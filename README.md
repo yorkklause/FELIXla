@@ -28,6 +28,14 @@ These prebuilt tools do not need conda or htslib at runtime. They are intended
 for local VCF/BCF paths; remote URL/S3/GCS support is disabled in the bundled
 htslib to keep the binaries dependency-free.
 
+A tools-only Docker image with the same standalone binaries is published as:
+
+```bash
+docker pull kyuan1024/tractor-hybrid-tools:latest
+docker run --rm -v "$PWD:/data" -w /data kyuan1024/tractor-hybrid-tools:latest \
+  rfmix_msp_to_tractor_hybrid genotype.phased.vcf.gz rfmix.msp.tsv.gz 5 512 out/chr22
+```
+
 The forward converters and MAC threshold estimator print progress to stderr.
 When the input has a usable `.csi` or `.tbi` index with record statistics, the
 tool reports `scanned records / total records` and a percentage; otherwise it
