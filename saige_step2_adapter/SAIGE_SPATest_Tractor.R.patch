@@ -1,0 +1,146 @@
+# SAIGE_SPATest_Tractor.R.patch
+# designed by Kai, implemented by codex
+#
+# SAIGE-TRACTOR 1.4.9 streaming hook for R/SAIGE_SPATest_Tractor.R.
+# This keeps tractor_hybrid traversal VCF-like and avoids loading all markers
+# from *.mks into R memory.
+
+# In SAIGE.Admixed(), treat tractor_hybrid like vcf for chunk traversal.
+
+# 1. Replace:
+#
+#   if(genoType != "vcf"){
+#
+# with:
+#
+#   if(genoType != "vcf" && genoType != "tractor_hybrid"){
+
+# 2. Replace the VCF setup branch:
+#
+#   }else{
+#    if(!isAnyInclude){
+#     if(chrom == ""){
+#       stop("chrom needs to be specified for single-variant assoc tests when using VCF as input\n")
+#     }else{
+#       set_iterator_inVcf("", chrom, 1, 250000000)
+#     }
+#    }
+#     if(outIndex > 1){
+#         move_forward_iterator_Vcf(outIndex*nMarkersEachChunk)
+#     }
+#     isVcfEnd =  check_Vcf_end()
+#     if(!isVcfEnd){
+#         genoIndex = rep("0", nMarkersEachChunk)
+#         genoIndex_prev = rep("0", nMarkersEachChunk)
+#         is_marker_test = TRUE
+#         i = outIndex
+#     }else{
+#         is_marker_test = FALSE
+#         stop("No markers are left in VCF")
+#     }
+#   }
+#
+# with:
+#
+#   }else{
+#    if(!isAnyInclude){
+#     if(chrom == ""){
+#       stop("chrom needs to be specified for single-variant assoc tests when using VCF or tractor_hybrid as input\n")
+#     }else if(genoType == "vcf"){
+#       set_iterator_inVcf("", chrom, 1, 250000000)
+#     }else if(genoType == "tractor_hybrid"){
+#       set_iterator_inTRACTORHYBRID(chrom, 1, 250000000)
+#     }
+#    }
+#     if(outIndex > 1){
+#       if(genoType == "vcf"){
+#         move_forward_iterator_Vcf(outIndex*nMarkersEachChunk)
+#       }else if(genoType == "tractor_hybrid"){
+#         move_forward_iterator_TRACTORHYBRID(outIndex*nMarkersEachChunk)
+#       }
+#     }
+#     isStreamEnd = if(genoType == "vcf") check_Vcf_end() else check_TRACTORHYBRID_end()
+#     if(!isStreamEnd){
+#       genoIndex = rep("0", nMarkersEachChunk)
+#       genoIndex_prev = rep("0", nMarkersEachChunk)
+#       is_marker_test = TRUE
+#       i = outIndex
+#     }else{
+#       is_marker_test = FALSE
+#       stop("No markers are left in genotype stream")
+#     }
+#   }
+
+# 3. In the while loop, replace:
+#
+#   if(genoType != "vcf"){
+#
+# with:
+#
+#   if(genoType != "vcf" && genoType != "tractor_hybrid"){
+
+# 4. Replace end-of-chunk handling:
+#
+#   if(genoType == "vcf"){
+#     isEnd_Output =  check_Vcf_end()
+#   }else{
+#     isEnd_Output = (i==nChunks)
+#   }
+#
+# with:
+#
+#   if(genoType == "vcf"){
+#     isEnd_Output = check_Vcf_end()
+#   }else if(genoType == "tractor_hybrid"){
+#     isEnd_Output = check_TRACTORHYBRID_end()
+#   }else{
+#     isEnd_Output = (i==nChunks)
+#   }
+
+# 5. Replace loop continuation:
+#
+#   if(genoType == "vcf"){
+#     isVcfEnd =  check_Vcf_end()
+#     cat("isVcfEnd ", isVcfEnd, "\n")
+#     if(isVcfEnd){
+#         is_marker_test = FALSE
+#     }
+#   }else{
+#     if(i > nChunks){
+#       is_marker_test = FALSE
+#     }
+#   }
+
+# 6. Wrap the main marker call for tractor_hybrid timing:
+#
+#   if(genoType == "tractor_hybrid"){
+#     .tractor_io_before = get_TRACTORHYBRID_io_seconds()
+#     .tractor_decode_before = get_TRACTORHYBRID_decode_seconds()
+#     .tractor_chunk_time = system.time({
+#       mainMarkerAdmixedInCPP(...)
+#     })
+#     .tractor_io_delta = get_TRACTORHYBRID_io_seconds() - .tractor_io_before
+#     .tractor_decode_delta = get_TRACTORHYBRID_decode_seconds() - .tractor_decode_before
+#     .tractor_total = as.numeric(.tractor_chunk_time[["elapsed"]])
+#     .tractor_regression = max(0, .tractor_total - .tractor_io_delta - .tractor_decode_delta)
+#     cat(sprintf("tractor_hybrid timing chunk %s: total=%.3fs input_io=%.3fs reader_decode=%.3fs regression_or_saige=%.3fs\n",
+#                 i, .tractor_total, .tractor_io_delta, .tractor_decode_delta, .tractor_regression))
+#   }else{
+#     mainMarkerAdmixedInCPP(...)
+#   }
+#
+# with:
+#
+#   if(genoType == "vcf"){
+#     isStreamEnd = check_Vcf_end()
+#     cat("isVcfEnd ", isStreamEnd, "\n")
+#     if(isStreamEnd) is_marker_test = FALSE
+#   }else if(genoType == "tractor_hybrid"){
+#     isStreamEnd = check_TRACTORHYBRID_end()
+#     cat("isTRACTORHYBRIDEnd ", isStreamEnd, "\n")
+#     if(isStreamEnd) is_marker_test = FALSE
+#   }else{
+#     if(i > nChunks){
+#       is_marker_test = FALSE
+#     }
+#   }

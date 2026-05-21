@@ -1,0 +1,16 @@
+bin/
+__pycache__/
+*.pyc
+*.common.geno.bin
+*.common.variant.idx
+*.common.variant.mks
+*.rare.carrier.bin
+*.rare.variant.idx
+*.rare.variant.mks
+*.ancblock.bin
+*.ancblock.idx
+*.ancblock.mks
+*.samples
+*.meta
+*.roundtrip.vcf
+*.dSYM/
