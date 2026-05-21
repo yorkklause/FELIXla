@@ -10,16 +10,19 @@ VCF_TARGET := $(BIN_DIR)/tractor_hybrid_to_vcf
 EST_TARGET := $(BIN_DIR)/estimate_mac_threshold
 CMP_TARGET := $(BIN_DIR)/compare_vcfs
 DOSAGE_TARGET := $(BIN_DIR)/tractor_dosage_vcf_to_hybrid
+RFMIX_MSP_TARGET := $(BIN_DIR)/rfmix_msp_to_tractor_hybrid
 STATIC_PACK_TARGET := $(STATIC_BIN_DIR)/flare_subset_to_tractor_hybrid
 STATIC_VCF_TARGET := $(STATIC_BIN_DIR)/tractor_hybrid_to_vcf
 STATIC_EST_TARGET := $(STATIC_BIN_DIR)/estimate_mac_threshold
 STATIC_CMP_TARGET := $(STATIC_BIN_DIR)/compare_vcfs
 STATIC_DOSAGE_TARGET := $(STATIC_BIN_DIR)/tractor_dosage_vcf_to_hybrid
+STATIC_RFMIX_MSP_TARGET := $(STATIC_BIN_DIR)/rfmix_msp_to_tractor_hybrid
 PACK_SRC := src/flare_subset_to_tractor_hybrid.cpp
 VCF_SRC := src/tractor_hybrid_to_vcf.cpp
 EST_SRC := src/estimate_mac_threshold.cpp
 CMP_SRC := src/compare_vcfs.cpp
 DOSAGE_SRC := src/tractor_dosage_vcf_to_hybrid.cpp
+RFMIX_MSP_SRC := src/rfmix_msp_to_tractor_hybrid.cpp
 
 PKG_HTSLIB_CFLAGS := $(shell $(PKG_CONFIG) --cflags htslib 2>/dev/null)
 PKG_HTSLIB_LIBS := $(shell $(PKG_CONFIG) --libs htslib 2>/dev/null)
@@ -85,9 +88,9 @@ LDLIBS += $(HTSLIB_LIBS)
 
 .PHONY: all static clean check-deps check-static-deps test test-static
 
-all: check-deps $(PACK_TARGET) $(VCF_TARGET) $(EST_TARGET) $(CMP_TARGET) $(DOSAGE_TARGET)
+all: check-deps $(PACK_TARGET) $(VCF_TARGET) $(EST_TARGET) $(CMP_TARGET) $(DOSAGE_TARGET) $(RFMIX_MSP_TARGET)
 
-static: check-static-deps $(STATIC_PACK_TARGET) $(STATIC_VCF_TARGET) $(STATIC_EST_TARGET) $(STATIC_CMP_TARGET) $(STATIC_DOSAGE_TARGET)
+static: check-static-deps $(STATIC_PACK_TARGET) $(STATIC_VCF_TARGET) $(STATIC_EST_TARGET) $(STATIC_CMP_TARGET) $(STATIC_DOSAGE_TARGET) $(STATIC_RFMIX_MSP_TARGET)
 
 check-deps:
 	@printf '#include <htslib/hts.h>\n#include <htslib/vcf.h>\n' | \
@@ -120,6 +123,10 @@ $(DOSAGE_TARGET): $(DOSAGE_SRC)
 	mkdir -p $(BIN_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(LDFLAGS) $(LDLIBS)
 
+$(RFMIX_MSP_TARGET): $(RFMIX_MSP_SRC)
+	mkdir -p $(BIN_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(LDFLAGS) $(LDLIBS)
+
 $(STATIC_PACK_TARGET): $(PACK_SRC)
 	mkdir -p $(STATIC_BIN_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(STATIC_LDFLAGS) $(HTSLIB_STATIC_LIBS)
@@ -137,6 +144,10 @@ $(STATIC_CMP_TARGET): $(CMP_SRC)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(STATIC_LDFLAGS) $(HTSLIB_STATIC_LIBS)
 
 $(STATIC_DOSAGE_TARGET): $(DOSAGE_SRC)
+	mkdir -p $(STATIC_BIN_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(STATIC_LDFLAGS) $(HTSLIB_STATIC_LIBS)
+
+$(STATIC_RFMIX_MSP_TARGET): $(RFMIX_MSP_SRC)
 	mkdir -p $(STATIC_BIN_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(STATIC_LDFLAGS) $(HTSLIB_STATIC_LIBS)
 

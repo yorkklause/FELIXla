@@ -66,6 +66,27 @@ bin/tractor_hybrid_to_vcf out/chr1 out/chr1.roundtrip.vcf.gz
 The reverse converter writes BGZF-compressed VCF and creates a tabix index at
 `out/chr1.roundtrip.vcf.gz.tbi`.
 
+Convert a phased genotype VCF/BCF plus an RFMix `.msp.tsv` local ancestry file:
+
+```bash
+bin/rfmix_msp_to_tractor_hybrid \
+  genotype.phased.vcf.gz \
+  rfmix.msp.tsv.gz \
+  5 \
+  512 \
+  out/chr22
+```
+
+The MSP converter expects haplotype columns in VCF sample order, named like
+`sample.0` and `sample.1`, and validates the optional
+`#Subpopulation order/codes:` line against `n_ancestries`. It accepts exact
+chromosome names or simple `chr`/non-`chr` equivalents, for example MSP `22`
+with VCF `chr22`. Adjacent MSP rows often share an endpoint; the converter
+treats the first interval as including `spos`, then assigns later shared
+`epos`/`spos` boundaries to the previous interval. Progress reports include
+scanned VCF records, MSP rows consumed, converted split variants, and
+rare/common counts.
+
 Convert a SAIGE-TRACTOR-style VCF/BCF that already has hardcall
 `DS1..DSk` and `ANC1..ANCk` FORMAT fields:
 
@@ -145,6 +166,7 @@ and their source code in `/scripts/src`:
 /scripts/bin/flare_subset_to_tractor_hybrid
 /scripts/bin/tractor_hybrid_to_vcf
 /scripts/bin/tractor_dosage_vcf_to_hybrid
+/scripts/bin/rfmix_msp_to_tractor_hybrid
 /scripts/bin/estimate_mac_threshold
 /scripts/bin/compare_vcfs
 ```

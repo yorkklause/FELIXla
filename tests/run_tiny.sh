@@ -41,6 +41,25 @@ grep -q "Recommended threshold:" "$OUT_DIR/threshold.sampled.txt"
 
 grep -q "Differences:             0" "$OUT_DIR/compare.txt"
 
+"$BIN_DIR/rfmix_msp_to_tractor_hybrid" \
+  "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
+  "$ROOT_DIR/testdata/tiny.rfmix.msp.tsv" \
+  2 \
+  1 \
+  "$OUT_DIR/rfmix" >/dev/null
+
+"$BIN_DIR/tractor_hybrid_to_vcf" \
+  "$OUT_DIR/rfmix" \
+  "$OUT_DIR/rfmix.roundtrip.vcf.gz" >/dev/null
+
+"$BIN_DIR/compare_vcfs" \
+  "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
+  "$OUT_DIR/rfmix.roundtrip.vcf.gz" \
+  --split-multiallelic \
+  >"$OUT_DIR/rfmix.compare.txt"
+
+grep -q "Differences:             0" "$OUT_DIR/rfmix.compare.txt"
+
 "$BIN_DIR/tractor_dosage_vcf_to_hybrid" \
   "$ROOT_DIR/testdata/tiny.tractor_dosage.vcf" \
   2 \
@@ -329,6 +348,19 @@ assert [(r[0], r[1], r[2], r[3], r[4], r[9], r[10]) for r in rows] == [
     ("chr1", "160", "v2", "C", "T", "1|1", "1|0"),
     ("chr1", "220", "v3", "G", "A", "1|0", "1|0"),
 ], rows
+PY
+
+python3 - "$OUT_DIR/rfmix" <<'PY'
+import pathlib
+import sys
+
+prefix = pathlib.Path(sys.argv[1])
+meta = pathlib.Path(str(prefix) + ".meta").read_text()
+samples = pathlib.Path(str(prefix) + ".samples").read_text().strip().splitlines()
+assert "source_rfmix_msp" in meta, meta
+assert "rfmix_msp_interval_note" in meta, meta
+assert "rfmix_subpopulation_order_codes" in meta, meta
+assert samples == ["s1", "s2"], samples
 PY
 
 if "$BIN_DIR/flare_subset_to_tractor_hybrid" \
