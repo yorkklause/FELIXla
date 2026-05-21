@@ -1,4 +1,5 @@
 bin/
+bin-static/
 __pycache__/
 *.pyc
 *.common.geno.bin

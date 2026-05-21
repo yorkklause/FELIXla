@@ -3,27 +3,28 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BIN_DIR="${BIN_DIR:-$ROOT_DIR/bin}"
 OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tractor-hybrid-tiny.XXXXXX")"
 trap 'rm -rf "$OUT_DIR"' EXIT
 
-"$ROOT_DIR/bin/flare_subset_to_tractor_hybrid" \
+"$BIN_DIR/flare_subset_to_tractor_hybrid" \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   "$ROOT_DIR/testdata/tiny.flare.vcf" \
   2 \
   1 \
   "$OUT_DIR/tiny" >/dev/null
 
-"$ROOT_DIR/bin/tractor_hybrid_to_vcf" \
+"$BIN_DIR/tractor_hybrid_to_vcf" \
   "$OUT_DIR/tiny" \
   "$OUT_DIR/tiny.roundtrip.vcf.gz" >/dev/null
 
-"$ROOT_DIR/bin/estimate_mac_threshold" \
+"$BIN_DIR/estimate_mac_threshold" \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   >"$OUT_DIR/threshold.txt"
 
 grep -q "Recommended threshold:" "$OUT_DIR/threshold.txt"
 
-"$ROOT_DIR/bin/compare_vcfs" \
+"$BIN_DIR/compare_vcfs" \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   "$OUT_DIR/tiny.roundtrip.vcf.gz" \
   --split-multiallelic \
@@ -31,13 +32,13 @@ grep -q "Recommended threshold:" "$OUT_DIR/threshold.txt"
 
 grep -q "Differences:             0" "$OUT_DIR/compare.txt"
 
-"$ROOT_DIR/bin/tractor_dosage_vcf_to_hybrid" \
+"$BIN_DIR/tractor_dosage_vcf_to_hybrid" \
   "$ROOT_DIR/testdata/tiny.tractor_dosage.vcf" \
   2 \
   2 \
   "$OUT_DIR/dosage" >/dev/null
 
-"$ROOT_DIR/bin/tractor_hybrid_to_vcf" \
+"$BIN_DIR/tractor_hybrid_to_vcf" \
   "$OUT_DIR/dosage" \
   "$OUT_DIR/dosage.roundtrip.vcf.gz" >/dev/null
 
@@ -321,7 +322,7 @@ assert [(r[0], r[1], r[2], r[3], r[4], r[9], r[10]) for r in rows] == [
 ], rows
 PY
 
-if "$ROOT_DIR/bin/flare_subset_to_tractor_hybrid" \
+if "$BIN_DIR/flare_subset_to_tractor_hybrid" \
   "$ROOT_DIR/testdata/tiny.missing_gt.vcf" \
   "$ROOT_DIR/testdata/tiny.flare.vcf" \
   2 \
@@ -333,7 +334,7 @@ fi
 
 grep -q "missing genotype" "$OUT_DIR/missing_gt.err"
 
-if "$ROOT_DIR/bin/flare_subset_to_tractor_hybrid" \
+if "$BIN_DIR/flare_subset_to_tractor_hybrid" \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   "$ROOT_DIR/testdata/tiny.missing_flare.vcf" \
   2 \
@@ -345,7 +346,7 @@ fi
 
 grep -q "missing FORMAT/AN1" "$OUT_DIR/missing_flare.err"
 
-if "$ROOT_DIR/bin/flare_subset_to_tractor_hybrid" \
+if "$BIN_DIR/flare_subset_to_tractor_hybrid" \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   "$ROOT_DIR/testdata/tiny.flare_swapped_samples.vcf" \
   2 \
@@ -357,7 +358,7 @@ fi
 
 grep -q "sample IDs must be identical" "$OUT_DIR/swapped_samples.err"
 
-"$ROOT_DIR/bin/flare_subset_to_tractor_hybrid" \
+"$BIN_DIR/flare_subset_to_tractor_hybrid" \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   "$ROOT_DIR/testdata/tiny.duplicate_flare.vcf" \
   2 \

@@ -229,6 +229,26 @@ the later SPA/Firth/region logic can reuse it instead of calling
 Build dependency:
 
 - htslib headers and library are required. On macOS with Homebrew, install with `brew install htslib`.
+
+Static-style builds:
+
+```bash
+make static
+make test-static
+```
+
+`make static` writes binaries to `bin-static/` and links `libhts.a` directly
+when a static htslib archive is available. On Linux, you can request a fully
+static executable with:
+
+```bash
+make static STATIC_FULLY=1
+```
+
+That requires static transitive dependencies for htslib, such as zlib,
+libdeflate, bzip2, and xz/lzma. On macOS, the system runtime remains dynamically
+linked by platform design, but the htslib dependency is still linked from
+`libhts.a` rather than `libhts.dylib`.
 - If htslib is installed in a non-standard location, build with:
 
 ```bash
