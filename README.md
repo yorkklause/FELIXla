@@ -15,13 +15,12 @@ bin/flare_subset_to_tractor_hybrid \
   out/chr1
 ```
 
-Both forward converters print progress to stderr. When the input has a usable
-`.csi` or `.tbi` index with record statistics, the converter reports
-`scanned records / total records`, a percentage, and the converted count;
-otherwise it keeps reporting the number of scanned records. For the phased
-genotype plus FLARE converter, the percentage is based on genotype VCF records,
-while the converted count is the number of emitted split-biallelic hybrid
-variants.
+The forward converters and MAC threshold estimator print progress to stderr.
+When the input has a usable `.csi` or `.tbi` index with record statistics, the
+tool reports `scanned records / total records` and a percentage; otherwise it
+keeps reporting the number of scanned records. For the phased genotype plus
+FLARE converter, the percentage is based on genotype VCF records, while the
+converted count is the number of emitted split-biallelic hybrid variants.
 
 The packed files can be converted back to a split-biallelic VCF:
 
@@ -55,6 +54,10 @@ Estimate a MAC threshold from a phased genotype VCF/BCF:
 ```bash
 bin/estimate_mac_threshold genotype.phased.vcf.gz
 ```
+
+The estimator's progress line also reports split ALT variants seen so far and
+the maximum observed MAC. `--max-records` caps the denominator when an indexed
+input has more records than the scan limit.
 
 The estimator scans split ALT MAC values and compares sparse carrier payload
 against dense bitset payload. By default it optimizes storage bytes only. You can

@@ -7,6 +7,7 @@
 #include <htslib/vcf.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -14,9 +15,12 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <string>
 #include <vector>
+
+#include <unistd.h>
 
 struct Options {
     const char* genotype_path = nullptr;
@@ -58,6 +62,159 @@ struct ThresholdScore {
     va_end(args);
     std::exit(1);
 }
+
+struct IndexRecordCount {
+    bool available = false;
+    uint64_t total = 0;
+};
+
+static constexpr uint64_t kProgressRecordInterval = 10000;
+static constexpr int kProgressSecondsInterval = 2;
+
+static hts_idx_t* load_any_vcf_index(const char* path) {
+    hts_idx_t* idx = hts_idx_load3(path, nullptr, HTS_FMT_CSI, HTS_IDX_SILENT_FAIL);
+    if (idx) return idx;
+    return hts_idx_load3(path, nullptr, HTS_FMT_TBI, HTS_IDX_SILENT_FAIL);
+}
+
+static IndexRecordCount get_index_record_count(const char* path) {
+    IndexRecordCount result;
+    hts_idx_t* idx = load_any_vcf_index(path);
+    if (!idx) return result;
+
+    int nseq = hts_idx_nseq(idx);
+    if (nseq <= 0) {
+        hts_idx_destroy(idx);
+        return result;
+    }
+
+    uint64_t total = 0;
+    for (int tid = 0; tid < nseq; ++tid) {
+        uint64_t mapped = 0;
+        uint64_t unmapped = 0;
+        if (hts_idx_get_stat(idx, tid, &mapped, &unmapped) != 0) {
+            hts_idx_destroy(idx);
+            return result;
+        }
+
+        if (mapped > std::numeric_limits<uint64_t>::max() - total) {
+            total = std::numeric_limits<uint64_t>::max();
+        } else {
+            total += mapped;
+        }
+    }
+
+    hts_idx_destroy(idx);
+    result.available = true;
+    result.total = total;
+    return result;
+}
+
+class ProgressReporter {
+public:
+    ProgressReporter(const char* input_path, uint64_t max_records)
+        : total_(get_index_record_count(input_path)),
+          last_report_(std::chrono::steady_clock::now()),
+          stderr_is_tty_(isatty(fileno(stderr)) != 0) {
+        if (total_.available && max_records != 0 && max_records < total_.total) {
+            total_.total = max_records;
+        }
+
+        if (total_.available) {
+            std::fprintf(
+                stderr,
+                "Progress: genotype VCF index reports %llu records%s.\n",
+                static_cast<unsigned long long>(total_.total),
+                max_records != 0 ? " after --max-records cap" : ""
+            );
+        } else {
+            std::fprintf(
+                stderr,
+                "Progress: genotype VCF index record count unavailable; reporting scanned records only.\n"
+            );
+        }
+    }
+
+    void maybe_report(const ScanStats& stats, bool force = false) {
+        auto now = std::chrono::steady_clock::now();
+        bool count_due = stats.records_seen >= next_record_report_;
+        bool time_due = now - last_report_ >= std::chrono::seconds(kProgressSecondsInterval);
+
+        if (!force && !count_due && !time_due) {
+            return;
+        }
+
+        print(stats);
+        last_report_ = now;
+        printed_ = true;
+
+        if (stats.records_seen >= next_record_report_) {
+            if (stats.records_seen > std::numeric_limits<uint64_t>::max() - kProgressRecordInterval) {
+                next_record_report_ = std::numeric_limits<uint64_t>::max();
+            } else {
+                next_record_report_ = stats.records_seen + kProgressRecordInterval;
+            }
+        }
+    }
+
+    void finish(const ScanStats& stats) {
+        maybe_report(stats, true);
+        if (stderr_is_tty_ && printed_) {
+            std::fputc('\n', stderr);
+        }
+    }
+
+private:
+    void print(const ScanStats& stats) const {
+        const char* prefix = stderr_is_tty_ ? "\r" : "";
+        const char* suffix = stderr_is_tty_ ? "" : "\n";
+
+        if (total_.available && total_.total > 0) {
+            uint64_t capped_records = std::min(stats.records_seen, total_.total);
+            double pct = 100.0 * static_cast<double>(capped_records) /
+                         static_cast<double>(total_.total);
+            std::fprintf(
+                stderr,
+                "%sProgress: records %llu/%llu (%.1f%%), split ALT variants %llu, max MAC %u%s",
+                prefix,
+                static_cast<unsigned long long>(stats.records_seen),
+                static_cast<unsigned long long>(total_.total),
+                pct,
+                static_cast<unsigned long long>(stats.split_variants),
+                stats.max_mac,
+                suffix
+            );
+        } else if (total_.available) {
+            std::fprintf(
+                stderr,
+                "%sProgress: records %llu/0, split ALT variants %llu, max MAC %u%s",
+                prefix,
+                static_cast<unsigned long long>(stats.records_seen),
+                static_cast<unsigned long long>(stats.split_variants),
+                stats.max_mac,
+                suffix
+            );
+        } else {
+            std::fprintf(
+                stderr,
+                "%sProgress: records %llu, split ALT variants %llu, max MAC %u%s",
+                prefix,
+                static_cast<unsigned long long>(stats.records_seen),
+                static_cast<unsigned long long>(stats.split_variants),
+                stats.max_mac,
+                suffix
+            );
+        }
+
+        std::fflush(stderr);
+    }
+
+    IndexRecordCount total_;
+    uint64_t next_record_report_ = kProgressRecordInterval;
+    std::chrono::steady_clock::time_point last_report_;
+    bool stderr_is_tty_ = false;
+    bool printed_ = false;
+};
 
 static uint64_t parse_u64_arg(const char* value, const char* name) {
     char* end = nullptr;
@@ -153,13 +310,17 @@ static ScanStats scan_mac_distribution(const char* path, uint64_t max_records) {
     bcf1_t* rec = bcf_init();
     int32_t* gt_arr = nullptr;
     int ngt_arr = 0;
+    ProgressReporter progress(path, max_records);
 
     while (bcf_read(fp, hdr, rec) == 0) {
         if (max_records != 0 && stats.records_seen >= max_records) break;
         ++stats.records_seen;
 
         bcf_unpack(rec, BCF_UN_STR);
-        if (rec->n_allele < 2) continue;
+        if (rec->n_allele < 2) {
+            progress.maybe_report(stats);
+            continue;
+        }
 
         const char* chr = bcf_hdr_id2name(hdr, rec->rid);
         int64_t pos = static_cast<int64_t>(rec->pos) + 1;
@@ -202,6 +363,8 @@ static ScanStats scan_mac_distribution(const char* path, uint64_t max_records) {
             stats.total_alt_carriers += mac;
             stats.max_mac = std::max(stats.max_mac, mac);
         }
+
+        progress.maybe_report(stats);
     }
 
     if (gt_arr) std::free(gt_arr);
@@ -209,6 +372,7 @@ static ScanStats scan_mac_distribution(const char* path, uint64_t max_records) {
     bcf_hdr_destroy(hdr);
     bcf_close(fp);
 
+    progress.finish(stats);
     return stats;
 }
 
