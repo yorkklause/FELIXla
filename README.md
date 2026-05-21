@@ -21,6 +21,7 @@ want to compile, use the checked-in static binaries:
 ```bash
 export PATH="$PWD/prebuilt/linux-x86_64-static:$PATH"
 estimate_mac_threshold testdata/tiny.genotypes.vcf
+estimate_mac_threshold testdata/tiny.genotypes.vcf --sample-every 100
 ```
 
 These prebuilt tools do not need conda or htslib at runtime. They are intended
@@ -69,8 +70,10 @@ bin/estimate_mac_threshold genotype.phased.vcf.gz
 
 The estimator's progress line also reports split ALT variants seen so far, the
 maximum observed MAC, elapsed time, ETA when the input record count is known,
-and scan rate. `--max-records` caps the denominator when an indexed input has
-more records than the scan limit.
+and scan rate. `--sample-every N` keeps the full scan/progress denominator but
+uses only every Nth VCF record for the MAC distribution; the default is `1`,
+which uses all records. `--max-records` caps the denominator when an indexed
+input has more records than the scan limit.
 
 The estimator scans split ALT MAC values and compares sparse carrier payload
 against dense bitset payload. By default it optimizes storage bytes only. You can
@@ -338,6 +341,7 @@ Roundtrip scope:
 Threshold estimation:
 
 - `estimate_mac_threshold` reads phased diploid GT, splits multi-allelic sites by ALT, and builds a MAC distribution.
+- `--sample-every N` gives a deterministic partial-site estimate by using the first VCF record and then every Nth record; the default `1` uses the whole input.
 - Dense payload per split variant is `8 * ceil(2 * n_samples / 64)` bytes.
 - Sparse payload per split variant is `8 * MAC` bytes.
 - Storage-only break-even is therefore approximately `ceil(2 * n_samples / 64)`.

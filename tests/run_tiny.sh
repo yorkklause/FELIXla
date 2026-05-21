@@ -24,6 +24,15 @@ trap 'rm -rf "$OUT_DIR"' EXIT
 
 grep -q "Recommended threshold:" "$OUT_DIR/threshold.txt"
 
+"$BIN_DIR/estimate_mac_threshold" \
+  "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
+  --sample-every 2 \
+  >"$OUT_DIR/threshold.sampled.txt"
+
+grep -q "VCF records sampled:" "$OUT_DIR/threshold.sampled.txt"
+grep -q "Sampling stride:      2" "$OUT_DIR/threshold.sampled.txt"
+grep -q "Recommended threshold:" "$OUT_DIR/threshold.sampled.txt"
+
 "$BIN_DIR/compare_vcfs" \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   "$OUT_DIR/tiny.roundtrip.vcf.gz" \

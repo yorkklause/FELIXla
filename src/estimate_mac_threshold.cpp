@@ -29,6 +29,7 @@ struct Options {
     double dense_word_cost = 1.0;
     double sparse_carrier_cost = 1.0;
     uint64_t max_records = 0;
+    uint64_t sample_every = 1;
 };
 
 struct ScanStats {
@@ -36,6 +37,7 @@ struct ScanStats {
     uint64_t n_haps = 0;
     uint64_t n_words = 0;
     uint64_t records_seen = 0;
+    uint64_t sampled_records = 0;
     uint64_t split_variants = 0;
     uint64_t total_alt_carriers = 0;
     uint32_t max_mac = 0;
@@ -112,8 +114,9 @@ static IndexRecordCount get_index_record_count(const char* path) {
 
 class ProgressReporter {
 public:
-    ProgressReporter(const char* input_path, uint64_t max_records)
+    ProgressReporter(const char* input_path, uint64_t max_records, uint64_t sample_every)
         : total_(get_index_record_count(input_path)),
+          sample_every_(sample_every),
           start_time_(std::chrono::steady_clock::now()),
           last_report_(start_time_),
           stderr_is_tty_(isatty(fileno(stderr)) != 0) {
@@ -132,6 +135,14 @@ public:
             std::fprintf(
                 stderr,
                 "Progress: genotype VCF index record count unavailable; reporting scanned records only.\n"
+            );
+        }
+
+        if (sample_every_ > 1) {
+            std::fprintf(
+                stderr,
+                "Progress: estimating MAC distribution with VCF record stride %llu.\n",
+                static_cast<unsigned long long>(sample_every_)
             );
         }
     }
@@ -233,6 +244,18 @@ private:
         std::string elapsed = format_duration(elapsed_seconds, false);
         std::string rate = format_rate(records_per_second);
         std::string eta = "unknown";
+        std::string sampled;
+
+        if (sample_every_ > 1) {
+            char buf[80];
+            std::snprintf(
+                buf,
+                sizeof(buf),
+                ", sampled records %llu",
+                static_cast<unsigned long long>(stats.sampled_records)
+            );
+            sampled = buf;
+        }
 
         if (total_.available && total_.total > 0) {
             uint64_t capped_records = std::min(stats.records_seen, total_.total);
@@ -246,11 +269,12 @@ private:
             }
             std::fprintf(
                 stderr,
-                "%sProgress: records %llu/%llu (%.1f%%), split ALT variants %llu, max MAC %u, elapsed %s, ETA %s, rate %s%s",
+                "%sProgress: records %llu/%llu (%.1f%%)%s, split ALT variants %llu, max MAC %u, elapsed %s, ETA %s, rate %s%s",
                 prefix,
                 static_cast<unsigned long long>(stats.records_seen),
                 static_cast<unsigned long long>(total_.total),
                 pct,
+                sampled.c_str(),
                 static_cast<unsigned long long>(stats.split_variants),
                 stats.max_mac,
                 elapsed.c_str(),
@@ -261,9 +285,10 @@ private:
         } else if (total_.available) {
             std::fprintf(
                 stderr,
-                "%sProgress: records %llu/0, split ALT variants %llu, max MAC %u, elapsed %s, ETA unknown, rate %s%s",
+                "%sProgress: records %llu/0%s, split ALT variants %llu, max MAC %u, elapsed %s, ETA unknown, rate %s%s",
                 prefix,
                 static_cast<unsigned long long>(stats.records_seen),
+                sampled.c_str(),
                 static_cast<unsigned long long>(stats.split_variants),
                 stats.max_mac,
                 elapsed.c_str(),
@@ -273,9 +298,10 @@ private:
         } else {
             std::fprintf(
                 stderr,
-                "%sProgress: records %llu, split ALT variants %llu, max MAC %u, elapsed %s, ETA unknown, rate %s%s",
+                "%sProgress: records %llu%s, split ALT variants %llu, max MAC %u, elapsed %s, ETA unknown, rate %s%s",
                 prefix,
                 static_cast<unsigned long long>(stats.records_seen),
+                sampled.c_str(),
                 static_cast<unsigned long long>(stats.split_variants),
                 stats.max_mac,
                 elapsed.c_str(),
@@ -288,6 +314,7 @@ private:
     }
 
     IndexRecordCount total_;
+    uint64_t sample_every_ = 1;
     uint64_t next_record_report_ = kProgressRecordInterval;
     std::chrono::steady_clock::time_point start_time_;
     std::chrono::steady_clock::time_point last_report_;
@@ -319,7 +346,8 @@ static void print_usage(const char* prog) {
         "  --query-weight FLOAT         Weight for per-query work units (default: 0.0)\n"
         "  --dense-word-cost FLOAT      Cost per dense uint64 word scanned (default: 1.0)\n"
         "  --sparse-carrier-cost FLOAT  Cost per sparse carrier scanned (default: 1.0)\n"
-        "  --max-records N              Scan only the first N VCF records (default: all)\n",
+        "  --max-records N              Scan only the first N VCF records (default: all)\n"
+        "  --sample-every N             Use every Nth VCF record for MAC estimation (default: 1/all)\n",
         prog
     );
 }
@@ -350,6 +378,8 @@ static Options parse_options(int argc, char** argv) {
             opt.sparse_carrier_cost = parse_double_arg(require_value("--sparse-carrier-cost"), "--sparse-carrier-cost");
         } else if (arg == "--max-records") {
             opt.max_records = parse_u64_arg(require_value("--max-records"), "--max-records");
+        } else if (arg == "--sample-every") {
+            opt.sample_every = parse_u64_arg(require_value("--sample-every"), "--sample-every");
         } else if (arg == "--help" || arg == "-h") {
             print_usage(argv[0]);
             std::exit(0);
@@ -360,6 +390,9 @@ static Options parse_options(int argc, char** argv) {
 
     if (opt.storage_weight == 0.0 && opt.query_weight == 0.0) {
         die("at least one of --storage-weight or --query-weight must be positive");
+    }
+    if (opt.sample_every == 0) {
+        die("--sample-every must be at least 1");
     }
 
     return opt;
@@ -373,7 +406,7 @@ static void validate_extra_ploidy(const int32_t* sample_gt, int ploidy, const ch
     }
 }
 
-static ScanStats scan_mac_distribution(const char* path, uint64_t max_records) {
+static ScanStats scan_mac_distribution(const char* path, uint64_t max_records, uint64_t sample_every) {
     htsFile* fp = bcf_open(path, "r");
     if (!fp) die("cannot open genotype VCF/BCF: %s", path);
 
@@ -389,11 +422,17 @@ static ScanStats scan_mac_distribution(const char* path, uint64_t max_records) {
     bcf1_t* rec = bcf_init();
     int32_t* gt_arr = nullptr;
     int ngt_arr = 0;
-    ProgressReporter progress(path, max_records);
+    ProgressReporter progress(path, max_records, sample_every);
 
     while (bcf_read(fp, hdr, rec) == 0) {
         if (max_records != 0 && stats.records_seen >= max_records) break;
         ++stats.records_seen;
+
+        if ((stats.records_seen - 1ULL) % sample_every != 0) {
+            progress.maybe_report(stats);
+            continue;
+        }
+        ++stats.sampled_records;
 
         bcf_unpack(rec, BCF_UN_STR);
         if (rec->n_allele < 2) {
@@ -536,7 +575,7 @@ static void print_score_row(const char* label, const ThresholdScore& score) {
 
 int main(int argc, char** argv) {
     Options opt = parse_options(argc, argv);
-    ScanStats stats = scan_mac_distribution(opt.genotype_path, opt.max_records);
+    ScanStats stats = scan_mac_distribution(opt.genotype_path, opt.max_records, opt.sample_every);
 
     if (stats.split_variants == 0) die("no split ALT variants found");
 
@@ -549,6 +588,13 @@ int main(int argc, char** argv) {
     std::cout << "Dense words/variant:  " << stats.n_words << "\n";
     std::cout << "Dense bytes/variant:  " << stats.n_words * 8ULL << "\n";
     std::cout << "VCF records scanned:  " << stats.records_seen << "\n";
+    std::cout << "VCF records sampled:  " << stats.sampled_records << "\n";
+    std::cout << "Sampling stride:      " << opt.sample_every;
+    if (opt.sample_every == 1) {
+        std::cout << " (all records)\n";
+    } else {
+        std::cout << " (first record, then every " << opt.sample_every << " records)\n";
+    }
     std::cout << "Split ALT variants:   " << stats.split_variants << "\n";
     std::cout << "Max MAC observed:     " << stats.max_mac << "\n";
     std::cout << "Mean MAC observed:    "
