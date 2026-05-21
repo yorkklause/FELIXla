@@ -23,6 +23,17 @@ Or call a binary directly:
   out/chr1
 ```
 
+The RFMix MSP converter is also included:
+
+```bash
+./prebuilt/linux-x86_64-static/rfmix_msp_to_tractor_hybrid \
+  genotype.phased.vcf.gz \
+  rfmix.msp.tsv.gz \
+  5 \
+  512 \
+  out/chr22
+```
+
 The binaries were linked against htslib 1.23.1 with remote URL/S3/GCS support
 disabled to keep them dependency-free. Use local VCF/BCF files; if your input is
 in cloud storage, localize it into the Workbench environment first.
