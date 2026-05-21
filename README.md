@@ -15,6 +15,18 @@ bin/flare_subset_to_tractor_hybrid \
   out/chr1
 ```
 
+For All of Us Workbench or other Linux x86_64 environments where you do not
+want to compile, use the checked-in static binaries:
+
+```bash
+export PATH="$PWD/prebuilt/linux-x86_64-static:$PATH"
+estimate_mac_threshold testdata/tiny.genotypes.vcf
+```
+
+These prebuilt tools do not need conda or htslib at runtime. They are intended
+for local VCF/BCF paths; remote URL/S3/GCS support is disabled in the bundled
+htslib to keep the binaries dependency-free.
+
 The forward converters and MAC threshold estimator print progress to stderr.
 When the input has a usable `.csi` or `.tbi` index with record statistics, the
 tool reports `scanned records / total records` and a percentage; otherwise it
