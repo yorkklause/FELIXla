@@ -35,6 +35,28 @@ keeps reporting the number of scanned records. For the phased genotype plus
 FLARE converter, the percentage is based on genotype VCF records, while the
 converted count is the number of emitted split-biallelic hybrid variants.
 
+Chunking coordinate convention for wrapper scripts and chunk manifests follows
+VCF/tabix region style: coordinates are 1-based and both ends are inclusive,
+`[start, end]`. A variant belongs to a chunk when `start <= POS <= end`, so
+adjacent chunks should start at the previous chunk's `end + 1`:
+
+```text
+chr1:1-50000000
+chr1:50000001-100000000
+```
+
+The same convention in a TSV-style chunk manifest could be:
+
+```text
+chr1    1           50000000     out/chr1.chunk0001
+chr1    50000001    100000000    out/chr1.chunk0002
+```
+
+Do not define adjacent chunks as `chr1:1-50000000` and
+`chr1:50000000-100000000`, because a variant with `POS=50000000` would be
+included in both. This chunk convention is separate from FLARE LAI intervals,
+which remain `(previous_lai_pos, current_lai_pos]`.
+
 The packed files can be converted back to a split-biallelic VCF:
 
 ```bash
@@ -318,6 +340,7 @@ Implementation notes:
 - Rare `.idx` records store `rare_index`, `global_variant_index`, `mks_offset`, `carrier_offset`, and `n_carriers`.
 - Ancestry block `.idx` records store `block_id`, `mks_offset`, and `anc_offset`.
 - Multi-allelic records are split logically by ALT allele, and each split ALT receives its own `global_variant_index`.
+- Structural variants use the VCF start position (`POS`) as the marker position for ancestry-block assignment and chunk ownership. The converter does not interpret `INFO/END` or `SVLEN`.
 - `<prefix>.samples` and `<prefix>.meta` are small sidecars used by readers and VCF roundtrip tooling.
 
 Capacity limits:
