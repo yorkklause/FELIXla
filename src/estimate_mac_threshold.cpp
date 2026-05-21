@@ -114,7 +114,8 @@ class ProgressReporter {
 public:
     ProgressReporter(const char* input_path, uint64_t max_records)
         : total_(get_index_record_count(input_path)),
-          last_report_(std::chrono::steady_clock::now()),
+          start_time_(std::chrono::steady_clock::now()),
+          last_report_(start_time_),
           stderr_is_tty_(isatty(fileno(stderr)) != 0) {
         if (total_.available && max_records != 0 && max_records < total_.total) {
             total_.total = max_records;
@@ -165,43 +166,120 @@ public:
     }
 
 private:
+    static std::string format_duration(double seconds, bool round_up) {
+        if (seconds < 0.0) seconds = 0.0;
+
+        uint64_t rounded = static_cast<uint64_t>(seconds);
+        if (round_up && seconds > static_cast<double>(rounded)) {
+            ++rounded;
+        }
+
+        uint64_t hours = rounded / 3600ULL;
+        uint64_t minutes = (rounded % 3600ULL) / 60ULL;
+        uint64_t secs = rounded % 60ULL;
+
+        char buf[64];
+        if (hours > 0) {
+            std::snprintf(
+                buf,
+                sizeof(buf),
+                "%lluh%02llum%02llus",
+                static_cast<unsigned long long>(hours),
+                static_cast<unsigned long long>(minutes),
+                static_cast<unsigned long long>(secs)
+            );
+        } else if (minutes > 0) {
+            std::snprintf(
+                buf,
+                sizeof(buf),
+                "%llum%02llus",
+                static_cast<unsigned long long>(minutes),
+                static_cast<unsigned long long>(secs)
+            );
+        } else {
+            std::snprintf(
+                buf,
+                sizeof(buf),
+                "%llus",
+                static_cast<unsigned long long>(secs)
+            );
+        }
+
+        return buf;
+    }
+
+    static std::string format_rate(double records_per_second) {
+        char buf[64];
+        if (records_per_second >= 1000000.0) {
+            std::snprintf(buf, sizeof(buf), "%.2fM records/s", records_per_second / 1000000.0);
+        } else if (records_per_second >= 1000.0) {
+            std::snprintf(buf, sizeof(buf), "%.2fk records/s", records_per_second / 1000.0);
+        } else {
+            std::snprintf(buf, sizeof(buf), "%.1f records/s", records_per_second);
+        }
+
+        return buf;
+    }
+
     void print(const ScanStats& stats) const {
         const char* prefix = stderr_is_tty_ ? "\r" : "";
         const char* suffix = stderr_is_tty_ ? "" : "\n";
+        auto now = std::chrono::steady_clock::now();
+        double elapsed_seconds = std::chrono::duration<double>(now - start_time_).count();
+        double records_per_second =
+            elapsed_seconds > 0.0
+                ? static_cast<double>(stats.records_seen) / elapsed_seconds
+                : 0.0;
+        std::string elapsed = format_duration(elapsed_seconds, false);
+        std::string rate = format_rate(records_per_second);
+        std::string eta = "unknown";
 
         if (total_.available && total_.total > 0) {
             uint64_t capped_records = std::min(stats.records_seen, total_.total);
             double pct = 100.0 * static_cast<double>(capped_records) /
                          static_cast<double>(total_.total);
+            if (records_per_second > 0.0 && capped_records < total_.total) {
+                double remaining_records = static_cast<double>(total_.total - capped_records);
+                eta = format_duration(remaining_records / records_per_second, true);
+            } else {
+                eta = "0s";
+            }
             std::fprintf(
                 stderr,
-                "%sProgress: records %llu/%llu (%.1f%%), split ALT variants %llu, max MAC %u%s",
+                "%sProgress: records %llu/%llu (%.1f%%), split ALT variants %llu, max MAC %u, elapsed %s, ETA %s, rate %s%s",
                 prefix,
                 static_cast<unsigned long long>(stats.records_seen),
                 static_cast<unsigned long long>(total_.total),
                 pct,
                 static_cast<unsigned long long>(stats.split_variants),
                 stats.max_mac,
+                elapsed.c_str(),
+                eta.c_str(),
+                rate.c_str(),
                 suffix
             );
         } else if (total_.available) {
             std::fprintf(
                 stderr,
-                "%sProgress: records %llu/0, split ALT variants %llu, max MAC %u%s",
+                "%sProgress: records %llu/0, split ALT variants %llu, max MAC %u, elapsed %s, ETA unknown, rate %s%s",
                 prefix,
                 static_cast<unsigned long long>(stats.records_seen),
                 static_cast<unsigned long long>(stats.split_variants),
                 stats.max_mac,
+                elapsed.c_str(),
+                rate.c_str(),
                 suffix
             );
         } else {
             std::fprintf(
                 stderr,
-                "%sProgress: records %llu, split ALT variants %llu, max MAC %u%s",
+                "%sProgress: records %llu, split ALT variants %llu, max MAC %u, elapsed %s, ETA unknown, rate %s%s",
                 prefix,
                 static_cast<unsigned long long>(stats.records_seen),
                 static_cast<unsigned long long>(stats.split_variants),
                 stats.max_mac,
+                elapsed.c_str(),
+                rate.c_str(),
                 suffix
             );
         }
@@ -211,6 +289,7 @@ private:
 
     IndexRecordCount total_;
     uint64_t next_record_report_ = kProgressRecordInterval;
+    std::chrono::steady_clock::time_point start_time_;
     std::chrono::steady_clock::time_point last_report_;
     bool stderr_is_tty_ = false;
     bool printed_ = false;

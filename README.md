@@ -67,9 +67,10 @@ Estimate a MAC threshold from a phased genotype VCF/BCF:
 bin/estimate_mac_threshold genotype.phased.vcf.gz
 ```
 
-The estimator's progress line also reports split ALT variants seen so far and
-the maximum observed MAC. `--max-records` caps the denominator when an indexed
-input has more records than the scan limit.
+The estimator's progress line also reports split ALT variants seen so far, the
+maximum observed MAC, elapsed time, ETA when the input record count is known,
+and scan rate. `--max-records` caps the denominator when an indexed input has
+more records than the scan limit.
 
 The estimator scans split ALT MAC values and compares sparse carrier payload
 against dense bitset payload. By default it optimizes storage bytes only. You can
