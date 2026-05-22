@@ -1,93 +1,80 @@
-# Ancestry-aware Packed Backend Prototype
+# tractor-hybrid-tools
 
-> **Acknowledgement:** designed by Kai, implemented by codex.
+Standalone tools and SAIGE-TRACTOR adapter code for storing phased genotypes
+and local ancestry calls in a compact `tractor_hybrid` packed format.
 
-This repo starts from the ancestry-aware packed backend design for SAIGE-TRACTOR.
-The first implemented piece is a standalone converter:
+The main converter takes a phased genotype VCF/BCF plus FLARE local ancestry
+VCF/BCF and writes a packed prefix that can be read back as VCF, subset by
+region, or used by the patched SAIGE-TRACTOR step2 backend.
+
+## Contents
+
+- `src/`: standalone C++ tools.
+- `saige_step2_adapter/`: SAIGE/SAIGE-TRACTOR step2 adapter source and patches.
+- `prebuilt/linux-x86_64-static/`: dependency-free Linux x86_64 binaries.
+- `resources/shapeit5_chunks/b38_4cM/`: GRCh38 autosome 4 cM chunk files.
+- `scripts/shapeit_chunks_to_tractor_args.sh`: SHAPEIT5 chunk adapter for
+  `flare_subset_to_tractor_hybrid`.
+- `docker/`: tools-only and SAIGE-TRACTOR Docker builds.
+
+## Quick Start
+
+Build locally:
 
 ```bash
 make
 bin/flare_subset_to_tractor_hybrid \
   genotype.phased.vcf.gz \
   flare.anc.vcf.gz \
-  3 \
+  5 \
   512 \
-  out/chr1
+  hybrid/chr22
 ```
 
-For All of Us Workbench or other Linux x86_64 environments where you do not
-want to compile, use the checked-in static binaries:
+Use the prebuilt Linux x86_64 binaries:
 
 ```bash
 export PATH="$PWD/prebuilt/linux-x86_64-static:$PATH"
-estimate_mac_threshold testdata/tiny.genotypes.vcf
-estimate_mac_threshold testdata/tiny.genotypes.vcf --sample-every 100
+flare_subset_to_tractor_hybrid genotype.phased.vcf.gz flare.anc.vcf.gz 5 512 hybrid/chr22
+estimate_mac_threshold genotype.phased.vcf.gz
 ```
 
-These prebuilt tools do not need conda or htslib at runtime. They are intended
-for local VCF/BCF paths; remote URL/S3/GCS support is disabled in the bundled
-htslib to keep the binaries dependency-free.
-
-A tools-only Docker image with the same standalone binaries is published as:
+Use the tools-only Docker image:
 
 ```bash
 docker pull kyuan1024/tractor-hybrid-tools:latest
 docker run --rm -v "$PWD:/data" -w /data kyuan1024/tractor-hybrid-tools:latest \
-  rfmix_msp_to_tractor_hybrid genotype.phased.vcf.gz rfmix.msp.tsv.gz 5 512 out/chr22
+  flare_subset_to_tractor_hybrid genotype.phased.vcf.gz flare.anc.vcf.gz 5 512 hybrid/chr22
 ```
 
-The forward converters and MAC threshold estimator print progress to stderr.
-When the input has a usable `.csi` or `.tbi` index with record statistics, the
-tool reports `scanned records / total records` and a percentage; otherwise it
-keeps reporting the number of scanned records. For the phased genotype plus
-FLARE converter, the percentage is based on genotype VCF records, while the
-converted count is the number of emitted split-biallelic hybrid variants.
+The static binaries are intended for local VCF/BCF paths. Remote URL/S3/GCS
+support is disabled in the bundled htslib so the binaries do not need conda or
+shared runtime libraries.
 
-Chunking is driven by region strings passed as the optional final argument to
-`flare_subset_to_tractor_hybrid`. Use a prepared interval file, such as a
-SHAPEIT5 4 cM chunk file, and pass each desired `chr:start-end` interval to the
-converter. Region coordinates follow VCF/tabix style: they are 1-based and both
-ends are inclusive, `[start, end]`. A variant belongs to a chunk when
-`start <= POS <= end`, so adjacent chunks should start at the previous chunk's
-`end + 1`:
+## Common Workflows
 
-```text
-chr1:1-50000000
-chr1:50000001-100000000
-```
-
-Do not define adjacent chunks as `chr1:1-50000000` and
-`chr1:50000000-100000000`, because a variant with `POS=50000000` would be
-included in both. This chunk convention is separate from FLARE LAI intervals,
-which remain `(previous_lai_pos, current_lai_pos]`.
-
-For an interval file with one tabix-style region in the first column:
+### FLARE VCF To Packed Hybrid
 
 ```bash
-i=0
-while read -r region _; do
-  case "$region" in ""|\#*) continue ;; esac
-  chrom="${region%%:*}"
-  i=$((i + 1))
-  chunk="$(printf '%04d' "$i")"
-  flare_subset_to_tractor_hybrid \
-    "phase/${chrom}.phased.vcf.gz" \
-    "flare/${chrom}.flare.vcf.gz" \
-    5 \
-    512 \
-    "hybrid/${chrom}.chunk${chunk}" \
-    "$region"
-done < shapeit5.4cm.regions.txt
+flare_subset_to_tractor_hybrid \
+  genotype.phased.vcf.gz \
+  flare.anc.vcf.gz \
+  5 \
+  512 \
+  hybrid/chr22
 ```
 
-If your interval file has separate `chrom start end` columns, convert the
-desired columns to region strings first:
+Arguments are:
 
-```bash
-awk 'BEGIN{OFS=""} !/^#/ && NF >= 3 {print $1,":",$2,"-",$3}' intervals.tsv > regions.txt
-```
+1. Phased genotype VCF/BCF.
+2. FLARE local ancestry VCF/BCF with scalar integer `FORMAT/AN1` and
+   `FORMAT/AN2`.
+3. Number of ancestry labels, max `32`.
+4. MAC threshold: variants with `MAC <= threshold` are stored sparse.
+5. Output prefix.
+6. Optional `chr:start-end` region.
 
-You can also call the converter directly for one region:
+For one region:
 
 ```bash
 flare_subset_to_tractor_hybrid \
@@ -99,105 +86,156 @@ flare_subset_to_tractor_hybrid \
   chr22:1-50000000
 ```
 
-The packed files can be converted back to a split-biallelic VCF:
+### SHAPEIT5 4 cM Chunk Conversion
 
-```bash
-bin/tractor_hybrid_to_vcf out/chr1 out/chr1.roundtrip.vcf.gz
+This repo vendors SHAPEIT5-style GRCh38 4 cM autosome chunks in
+`resources/shapeit5_chunks/b38_4cM/`.
+
+The chunk files have this layout:
+
+```text
+chunk_index    chrom    buffered_region    core_region    ...
 ```
 
-The reverse converter writes BGZF-compressed VCF and creates a tabix index at
-`out/chr1.roundtrip.vcf.gz.tbi`.
+Use `core_region` column 4 for conversion. Column 3 is a phasing buffer region
+and overlaps neighboring chunks, so using it here would duplicate variants at
+chunk boundaries.
 
-Extract a 1-based inclusive region from an existing packed hybrid prefix into a
-new packed hybrid prefix:
+Generate argument rows:
 
 ```bash
-bin/tractor_hybrid_extract_region \
-  out/chr22 \
-  chr22:16000000-17000000 \
-  out/chr22.16_17mb
+scripts/shapeit_chunks_to_tractor_args.sh \
+  --chunks-dir resources/shapeit5_chunks/b38_4cM \
+  --chrom-style chr \
+  --phase-template 'phase/{chrom}.phased.vcf.gz' \
+  --flare-template 'flare/{chrom}.flare.vcf.gz' \
+  --n-ancestries 5 \
+  --mac-threshold 512 \
+  --out-prefix-template 'hybrid/{chrom}.shapeit4cM.chunk{chunk0}' \
+  > flare_subset.shapeit4cm.args.tsv
 ```
 
-The extractor rewrites marker indexes and payload offsets, renumbers selected
-split variants from zero, and keeps only ancestry blocks overlapping the
-requested region. It also accepts split arguments:
-`bin/tractor_hybrid_extract_region in_prefix chr22 16000000 17000000 out_prefix`.
+Rows match the converter argument order:
 
-Convert a phased genotype VCF/BCF plus an RFMix `.msp.tsv` local ancestry file:
+```text
+source_phase_vcf    source_flare_vcf    n_ancestries    mac_threshold    out_prefix    region
+```
+
+Run in parallel:
 
 ```bash
-bin/rfmix_msp_to_tractor_hybrid \
+xargs -a flare_subset.shapeit4cm.args.tsv -n 6 -P 8 flare_subset_to_tractor_hybrid
+```
+
+The bundled chunk files use chromosome names `1..22`. Use `--chrom-style chr`
+for VCF contigs named `chr1..chr22`; use `--chrom-style keep` or omit it for
+contigs named `1..22`.
+
+Inside the tools Docker image:
+
+```bash
+docker run --rm -v "$PWD:/data" -w /data kyuan1024/tractor-hybrid-tools:latest \
+  shapeit_chunks_to_tractor_args \
+    --chunks-dir /opt/tractor-hybrid-tools/resources/shapeit5_chunks/b38_4cM \
+    --chrom-style chr \
+    --phase-template 'phase/{chrom}.phased.vcf.gz' \
+    --flare-template 'flare/{chrom}.flare.vcf.gz' \
+    --n-ancestries 5 \
+    --mac-threshold 512 \
+    --out-prefix-template 'hybrid/{chrom}.shapeit4cM.chunk{chunk0}' \
+  > flare_subset.shapeit4cm.args.tsv
+```
+
+### RFMix MSP To Packed Hybrid
+
+```bash
+rfmix_msp_to_tractor_hybrid \
   genotype.phased.vcf.gz \
   rfmix.msp.tsv.gz \
   5 \
   512 \
-  out/chr22
+  hybrid/chr22
 ```
 
 The MSP converter expects haplotype columns in VCF sample order, named like
-`sample.0` and `sample.1`, and validates the optional
-`#Subpopulation order/codes:` line against `n_ancestries`. It accepts exact
-chromosome names or simple `chr`/non-`chr` equivalents, for example MSP `22`
-with VCF `chr22`. Adjacent MSP rows often share an endpoint; the converter
-treats the first interval as including `spos`, then assigns later shared
-`epos`/`spos` boundaries to the previous interval. Progress reports include
-scanned VCF records, MSP rows consumed, converted split variants, and
-rare/common counts.
+`sample.0` and `sample.1`. It accepts exact chromosome names or simple
+`chr`/non-`chr` equivalents, for example MSP `22` with VCF `chr22`.
 
-Convert a SAIGE-TRACTOR-style VCF/BCF that already has hardcall
+Adjacent MSP rows often share an endpoint. The converter treats the first
+interval as including `spos`, then assigns later shared `epos`/`spos`
+boundaries to the previous interval.
+
+### TRACTOR Dosage VCF To Packed Hybrid
+
+For SAIGE-TRACTOR-style VCF/BCF files that already contain hardcall
 `DS1..DSk` and `ANC1..ANCk` FORMAT fields:
 
 ```bash
-bin/tractor_dosage_vcf_to_hybrid \
-  tractor.step2.input.vcf.gz \
-  3 \
-  512 \
-  out/chr1
+tractor_dosage_vcf_to_hybrid tractor.step2.input.vcf.gz 5 512 hybrid/chr22
 ```
 
-This path reconstructs canonical haplotypes from the per-sample ancestry counts
-and ancestry-specific ALT dosages. It is equivalent for SAIGE-TRACTOR step2
-fields (`ANC#`, `DS#`, `DSALL`) but it is not a recovery of the original
-phased haplotype order. The converter requires hardcall integer values: each
-sample's `ANC#` values must sum to `2`, each `DS#` value must be an integer in
-`0..ANC#`, and fractional imputed dosages are rejected.
+This reconstructs canonical haplotypes from ancestry counts and
+ancestry-specific ALT dosages. It is equivalent for SAIGE-TRACTOR step2 fields
+but does not recover the original phased haplotype order. Fractional imputed
+dosages are rejected.
 
-Estimate a MAC threshold from a phased genotype VCF/BCF:
+### Roundtrip And Region Extraction
+
+Convert a packed prefix back to split-biallelic VCF:
 
 ```bash
-bin/estimate_mac_threshold genotype.phased.vcf.gz
+tractor_hybrid_to_vcf hybrid/chr22 hybrid/chr22.roundtrip.vcf.gz
 ```
 
-The estimator's progress line also reports split ALT variants seen so far, the
-maximum observed MAC, elapsed time, ETA when the input record count is known,
-and scan rate. `--sample-every N` keeps the full scan/progress denominator but
-uses only every Nth VCF record for the MAC distribution; the default is `1`,
-which uses all records. `--max-records` caps the denominator when an indexed
-input has more records than the scan limit.
-
-The estimator scans split ALT MAC values and compares sparse carrier payload
-against dense bitset payload. By default it optimizes storage bytes only. You can
-add a query-work term when you want to penalize sparse carrier iteration or dense
-word scanning:
+Extract a packed sub-region:
 
 ```bash
-bin/estimate_mac_threshold genotype.phased.vcf.gz \
+tractor_hybrid_extract_region \
+  hybrid/chr22 \
+  chr22:16000000-17000000 \
+  hybrid/chr22.16_17mb
+```
+
+The extractor also accepts split arguments:
+
+```bash
+tractor_hybrid_extract_region in_prefix chr22 16000000 17000000 out_prefix
+```
+
+### MAC Threshold Estimation
+
+```bash
+estimate_mac_threshold genotype.phased.vcf.gz
+estimate_mac_threshold genotype.phased.vcf.gz --sample-every 100
+```
+
+The estimator reads phased diploid GT, splits multi-allelic sites by ALT, and
+builds a MAC distribution. Dense payload per split variant is
+`8 * ceil(2 * n_samples / 64)` bytes; sparse payload is `8 * MAC` bytes.
+
+By default the recommendation optimizes storage bytes only. You can add a
+simple query-cost term:
+
+```bash
+estimate_mac_threshold genotype.phased.vcf.gz \
   --query-weight 1 \
   --dense-word-cost 1 \
   --sparse-carrier-cost 16
 ```
 
-Compare two phased genotype VCF/BCF files:
+### VCF Comparison
 
 ```bash
-bin/compare_vcfs expected.vcf.gz observed.vcf.gz --split-multiallelic
+compare_vcfs expected.vcf.gz observed.vcf.gz --split-multiallelic
 ```
 
 `--split-multiallelic` compares both inputs after logically splitting each ALT
 allele, which is useful for checking a packed roundtrip against an original
 multi-allelic VCF.
 
-SAIGE/SAIGE-TRACTOR step2 adapter:
+## SAIGE-TRACTOR Step2 Adapter
+
+Adapter files:
 
 - `saige_step2_adapter/TractorHybrid.hpp`
 - `saige_step2_adapter/TractorHybrid.cpp`
@@ -208,7 +246,7 @@ SAIGE/SAIGE-TRACTOR step2 adapter:
 - `docker/saigetractor-hybrid/Dockerfile`
 - `docker/saigetractor-hybrid/patch_saigetractor_hybrid.py`
 
-Build the local SAIGE-TRACTOR image with tractor_hybrid step2 support:
+Build the local SAIGE-TRACTOR image:
 
 ```bash
 docker build --platform linux/amd64 \
@@ -216,18 +254,37 @@ docker build --platform linux/amd64 \
   -f docker/saigetractor-hybrid/Dockerfile .
 ```
 
-The Docker image also includes the standalone hybrid utilities in `/scripts/bin`
-and their source code in `/scripts/src`:
+Run step2 with a packed prefix:
 
 ```bash
-/scripts/bin/flare_subset_to_tractor_hybrid
-/scripts/bin/tractor_hybrid_to_vcf
-/scripts/bin/tractor_hybrid_extract_region
-/scripts/bin/tractor_dosage_vcf_to_hybrid
-/scripts/bin/rfmix_msp_to_tractor_hybrid
-/scripts/bin/estimate_mac_threshold
-/scripts/bin/compare_vcfs
+docker run --rm --platform linux/amd64 \
+  -v /path/to/data:/data \
+  saigetractor:1.4.9-tractor-hybrid \
+  step2_SPAtests.R \
+    --tractorHybridPrefix=/data/chr22 \
+    --chrom=chr22 \
+    --is_admixed=TRUE \
+    --number_of_ancestry=5 \
+    --markers_per_chunk=1000 \
+    --GMMATmodelFile=/data/null.rda \
+    --varianceRatioFile=/data/varianceRatio.txt \
+    --SAIGEOutputFile=/data/chr22.tractor.out
 ```
+
+`--markers_per_chunk=1000` is a practical setting for step2 chunk traversal.
+SAIGE-TRACTOR 1.4.9 enforces `1000` as the minimum for single-variant tests.
+
+The adapter adds a narrow `tractor_hybrid` genotype backend for step2:
+
+- Ordinary SAIGE paths receive total ALT dosage `0/1/2`.
+- SAIGE-TRACTOR admixed paths receive `ANC1..ANCk`, `DS1..DSk`, `DSALL`, `DS`,
+  or `GT`-like fields.
+- The reader supports streaming traversal to avoid loading a full marker stream
+  into R memory.
+- Repeated same-marker ancestry fields are cached, which matters because
+  SAIGE-TRACTOR asks for several fields for each marker.
+
+The local image also installs standalone tools in `/scripts/bin`.
 
 Frozen Docker Hub image for the current stable `.2` line:
 
@@ -236,224 +293,126 @@ kyuan1024/saigetractor:1.4.9-tractor-hybrid.2
 sha256:9f872fbd2df8e2ee57a427fbbb28b529fb4165ef823e4894750b17f60910fb8e
 ```
 
-Run step2 with the packed prefix:
+## Build And Test
+
+Dynamic local build:
 
 ```bash
-docker run --rm --platform linux/amd64 \
-  -v /path/to/data:/data \
-  saigetractor:1.4.9-tractor-hybrid \
-  step2_SPAtests.R \
-    --tractorHybridPrefix=/data/chr1 \
-    --chrom=chr1 \
-    --is_admixed=TRUE \
-    --number_of_ancestry=3 \
-    --markers_per_chunk=1000 \
-    --GMMATmodelFile=/data/null.rda \
-    --varianceRatioFile=/data/varianceRatio.txt \
-    --SAIGEOutputFile=/data/chr1.tractor.out
+make
+make test
 ```
 
-Use `--markers_per_chunk=1000` to process about 1000 variants per step2 chunk.
-SAIGE-TRACTOR 1.4.9 enforces `1000` as the minimum for single-variant tests; if
-you omit this option the default is typically larger, such as `10000`.
-
-The adapter is designed to be copied into the SAIGE/SAIGE-TRACTOR `src/`
-directory. It has been checked against `wzhou88/saigetractor:1.4.9`
-(`sha256:c599ccff1f3c46322809f0239b56fd4fc5caa44671cd833c65b7f372c0481799`).
-It adds a `tractor_hybrid` genotype backend for step2 only. The hook is narrow:
-`Unified_getOneMarker()` gets one new branch for ordinary dosage, and
-`Unified_getOneMarker_Admixed()` gets one new branch for SAIGE-TRACTOR fields.
-The score-test and TRACTOR internal calculation code can stay unchanged.
-
-`TractorHybridClass::getOneMarker()` returns the ordinary ALT dosage vector
-`0/1/2` in SAIGE sample-in-model order. Missing rate is always `0` because the
-forward converter rejects missing genotypes and missing LAI calls.
-
-For SAIGE-TRACTOR code paths that need ancestry-specific ALT dosage,
-`TractorHybridClass::getOneMarkerAncestry()` also fills `GByAncestry`, an
-`n_samples_in_model x n_ancestries` matrix. Rare variants use the ancestry bits
-stored directly in each carrier record; common variants combine the dense ALT
-haplotype bitset with the cached ancestry block.
-
-For SAIGE-TRACTOR 1.4.9 admixed step2, the main entry point is
-`TractorHybridClass::getOneMarkerAdmixedField()`. It serves the same FORMAT-like
-fields that the existing VCF path expects:
-
-- `ANC1..ANCk`: number of haplotypes from each ancestry per sample, independent of ALT genotype.
-- `DS1..DSk`: ALT dosage carried on haplotypes from each ancestry.
-- `DSALL`, `DS`, or `GT`: total ALT dosage `0/1/2`.
-
-The reader supports two access modes. Random-like increasing
-`global_variant_index` access is available for small indexed runs. For AoU-scale
-step2 traversal, use the streaming iterator methods and pass dummy `0` indices
-from R, VCF-style; this avoids loading the full `.mks` marker stream into R
-memory. In admixed streaming mode the reader is intentionally lazy: it does not
-advance after every field read, because SAIGE-TRACTOR queries several fields for
-the same marker before moving to the next marker. Common marker bitsets and
-ancestry blocks are buffered/cached for these repeated same-marker reads.
-
-Current step2 reader optimizations:
-
-- Payload files use explicit libc read buffers: `64 MiB` for `.bin` payloads and `8 MiB` for `.mks`/`.idx` sidecars.
-- On Linux, payload and marker files are opened with `posix_fadvise(..., POSIX_FADV_SEQUENTIAL)` so the kernel can optimize readahead for chromosome traversal.
-- The reader tracks current file offsets and skips redundant `fseeko()` calls when traversal is already sequential.
-- Rare carriers and common bitsets are loaded in bulk reads, then decoded from memory.
-- Same-marker results are cached across SAIGE-TRACTOR's repeated `ANC#`, `DS#`, and `DSALL` requests; ancestry-count matrices are also cached per ancestry block.
-
-For `tractor_hybrid` input, the patched step2 scripts print a chunk-level timing
-line:
-
-```text
-tractor_hybrid timing chunk 1: total=12.345s input_io=0.123s reader_decode=0.456s hybrid_get_marker=0.789s get_marker_overhead=0.210s marker_pvalue=9.876s reset_zero=0.012s condition_total=0.000s condition_cache_hit=0 condition_cache_miss=0 impute_qc=0.111s variance_ratio=0.222s joint_cct_spa=0.333s output_write=0.321s other_cpp_or_r=0.681s
-```
-
-`input_io` is time spent in tracked file seek/read calls inside the hybrid
-reader. `reader_decode` is time spent constructing dosage and ancestry-count
-vectors/matrices from packed data. `hybrid_get_marker` is the full C++ marker
-fetch call, so it includes `input_io`, `reader_decode`, vector materialization,
-and cache-copy overhead. `get_marker_overhead` is the part of marker fetch not
-counted by file IO or packed decode. `marker_pvalue` wraps SAIGE's marker p-value
-calculation, including SPA/Firth when triggered. `reset_zero` tracks repeated
-vector/matrix zeroing before each marker, `impute_qc` tracks the impute/flip and
-post-QC helper call, `variance_ratio` tracks variance-ratio assignment, and
-`joint_cct_spa` tracks admixed joint/CCT/SPA-ER combination work outside the
-per-ancestry p-value calls. `condition_total` wraps the conditioning-haplotype
-setup and is diagnostic because it can contain nested marker reads or p-value
-work when conditioning is active. For `tractor_hybrid`, conditioning setup is
-cached across consecutive variants in the same simplified ancestry block;
-`condition_cache_hit` and `condition_cache_miss` report that block-level reuse.
-`output_write` wraps the admixed single-marker result writer. `other_cpp_or_r`
-is the remaining chunk elapsed time outside the non-overlapping measured
-sections.
-
-Frozen version `.2` keeps the same statistical settings and adds a second
-diagnostic line that splits `SAIGEClass::getMarkerPval()` internally:
-
-```text
-tractor_hybrid pvalue timing chunk 1: pvalue_score=1.234s score_fast_calls=100 score_slow_calls=0 scorefast_extract=0.111s scorefast_projection=0.222s scorefast_variance=0.333s scorefast_result=0.444s scorefast_gtilde=0.555s scorefast_gtilde_calls=100 pvalue_alloc=0.123s pvalue_getadjg=0.456s getadjg_calls=10 getadjg_accum=0.234s getadjg_projection=0.222s getadjg_spa=0.100s getadjg_spa_calls=3 getadjg_firth=0.050s getadjg_firth_calls=1 getadjg_condition=0.020s getadjg_condition_calls=1 getadjg_region=0.286s getadjg_region_calls=5 getadjg_other=0.000s getadjg_other_calls=0 pvalue_spa=0.789s spa_calls=10 pvalue_firth=2.345s firth_calls=3 pvalue_er=0.000s pvalue_condition_adjust=0.111s pvalue_region_finalize=0.222s
-```
-
-These fields are instrumentation only. They do not change score, SPA, Firth,
-variance-ratio, filtering, or output calculations.
-The current `.2` image also uses an optimized `scoreTestFast()` sparse path that
-computes the same algebra without materializing the large `X1`, `A1`, `g1`, and
-`res1` temporary copies for every call, plus a `getadjGFast()` projection path
-that updates the adjusted genotype vector by column without constructing an
-extra dense matrix-vector product temporary. In the region path, `.2` also lets
-`scoreTestFast()` emit the full adjusted genotype vector (`scorefast_gtilde`) so
-the later SPA/Firth/region logic can reuse it instead of calling
-`getadjGFast()` again for the same marker.
-
-Build dependency:
-
-- htslib headers and library are required. On macOS with Homebrew, install with `brew install htslib`.
-
-Static-style builds:
+Static-style build:
 
 ```bash
 make static
 make test-static
 ```
 
-`make static` writes binaries to `bin-static/` and links `libhts.a` directly
-when a static htslib archive is available. On Linux, you can request a fully
-static executable with:
+Build dependency:
 
-```bash
-make static STATIC_FULLY=1
-```
-
-That requires static transitive dependencies for htslib, such as zlib,
-libdeflate, bzip2, and xz/lzma. On macOS, the system runtime remains dynamically
-linked by platform design, but the htslib dependency is still linked from
-`libhts.a` rather than `libhts.dylib`.
-- If htslib is installed in a non-standard location, build with:
+- htslib headers and library are required.
+- On macOS with Homebrew: `brew install htslib`.
+- If htslib is installed in a non-standard location:
 
 ```bash
 make HTSLIB_CFLAGS="-I/path/to/htslib/include" HTSLIB_LIBS="-L/path/to/htslib/lib -lhts"
 ```
 
-Arguments:
+`make static` writes binaries to `bin-static/` and links `libhts.a` directly
+when a static htslib archive is available. On Linux, fully static executables
+can be requested with:
 
-1. `genotype.phased.vcf.gz`: phased genotype VCF/BCF.
-2. `flare.anc.vcf.gz`: FLARE local ancestry VCF/BCF with `FORMAT/AN1` and `FORMAT/AN2`.
-3. `n_ancestries`: number of ancestry labels, max `32`.
-4. `rare_threshold`: variants with `MAC <= rare_threshold` are stored sparse.
-5. `out_prefix`: prefix for output files.
+```bash
+make static STATIC_FULLY=1
+```
 
-Outputs:
+## Input Assumptions
+
+- Genotypes are diploid, phased, and non-missing.
+- FLARE `AN1` and `AN2` are scalar, non-missing integer FORMAT fields encoded
+  as `0..n_ancestries-1`.
+- Only FLARE hardcall ancestry fields are used. REF/ALT/GT in the LAI file are
+  not interpreted as genotype data.
+- Genotype and LAI sample IDs must be identical and in the same order.
+- Genotype and LAI records must be sorted by compatible contig order.
+- FLARE can be a subset of genotype sites.
+- Genotype contigs with no LAI records are skipped.
+- Multi-allelic genotype records are split logically by ALT allele.
+- Structural variants use VCF `POS` as the marker position; `INFO/END` and
+  `SVLEN` are not interpreted.
+
+FLARE interval convention:
+
+- Each LAI record represents `(previous_lai_pos, current_lai_pos]`.
+- The first LAI record on a contig covers `1..current_lai_pos`.
+- The last LAI hardcall on a contig extends to the last genotype position on
+  that contig.
+- Adjacent LAI intervals with identical haplotype ancestry masks are merged.
+- Duplicate LAI positions on the same contig are allowed; the last record at
+  that position defines the interval ending there.
+
+Region/chunk convention:
+
+- Region strings are `chr:start-end`.
+- Coordinates are 1-based inclusive.
+- A variant belongs to a chunk when `start <= POS <= end`.
+- Adjacent chunks should start at previous `end + 1`.
+
+## Packed Output
+
+Each packed prefix writes:
 
 - `<prefix>.common.geno.bin`
-- `<prefix>.common.variant.mks` (binary marker stream)
-- `<prefix>.common.variant.idx` (binary offset index for the marker stream)
+- `<prefix>.common.variant.mks`
+- `<prefix>.common.variant.idx`
 - `<prefix>.rare.carrier.bin`
-- `<prefix>.rare.variant.mks` (binary marker stream)
-- `<prefix>.rare.variant.idx` (binary offset index for the marker stream)
+- `<prefix>.rare.variant.mks`
+- `<prefix>.rare.variant.idx`
 - `<prefix>.ancblock.bin`
-- `<prefix>.ancblock.mks` (binary marker stream)
-- `<prefix>.ancblock.idx` (binary offset index for the marker stream)
+- `<prefix>.ancblock.mks`
+- `<prefix>.ancblock.idx`
 - `<prefix>.samples`
 - `<prefix>.meta`
 
-Input assumptions:
+Storage notes:
 
-- Genotypes are diploid, phased, and non-missing. Missing, unphased, or non-diploid calls are rejected.
-- FLARE `AN1` and `AN2` are scalar, non-missing integer FORMAT fields, encoded as `0..n_ancestries-1`.
-- Only the FLARE hardcall ancestry fields are used. REF/ALT/GT in the LAI file are not interpreted as genotype data.
-- Each LAI record represents the ancestry interval from the previous LAI position plus one through this LAI position, inclusive: `(previous_lai_pos, current_lai_pos]`.
-- The first LAI record on a contig covers `1..current_lai_pos`.
-- The last LAI hardcall on a contig is extended to the last genotype position on that contig, so the chromosome tail is not dropped when the LAI file lacks a terminal sentinel marker.
-- Adjacent LAI intervals with identical haplotype ancestry masks are merged into one ancestry block.
-- Duplicate LAI positions on the same contig are allowed; the last record at that position defines the ancestry hardcall for the interval ending there.
-- Genotype and FLARE sample IDs must be identical and in the same order.
-- Genotype and FLARE records are sorted by compatible contig order.
-- FLARE can be a subset of genotype sites. Genotype contigs with no LAI records are skipped.
-
-Implementation notes:
-
-- Common variants are written as variant-major dense ALT haplotype bitsets.
-- Rare variants are written as packed carriers: `uint32_t pos_index` plus `uint32_t anc_hap`.
-- `anc_hap` stores ancestry in the high 5 bits and haplotype ID in the low 27 bits.
-- Marker streams (`*.mks`) are binary, little-endian, and use length-prefixed strings, so allele/id lengths can vary naturally.
-- Offset indexes (`*.idx`) are fixed-width binary tables pointing into both the matching `.mks` stream and the payload `.bin` file. Magic headers are `TRCMIDX2`, `TRRAIDX2`, and `TRANIDX2`.
-- Common `.idx` records store `common_index`, `global_variant_index`, `mks_offset`, and `geno_offset`.
-- Rare `.idx` records store `rare_index`, `global_variant_index`, `mks_offset`, `carrier_offset`, and `n_carriers`.
-- Ancestry block `.idx` records store `block_id`, `mks_offset`, and `anc_offset`.
-- Multi-allelic records are split logically by ALT allele, and each split ALT receives its own `global_variant_index`.
-- Structural variants use the VCF start position (`POS`) as the marker position for ancestry-block assignment and chunk ownership. The converter does not interpret `INFO/END` or `SVLEN`.
-- `<prefix>.samples` and `<prefix>.meta` are small sidecars used by readers and VCF roundtrip tooling.
+- Common variants are variant-major dense ALT haplotype bitsets.
+- Rare variants are packed carriers: `uint32_t pos_index` plus
+  `uint32_t anc_hap`.
+- `anc_hap` stores ancestry in the high 5 bits and haplotype ID in the low
+  27 bits.
+- Marker streams (`*.mks`) are binary, little-endian, and use length-prefixed
+  strings.
+- Offset indexes (`*.idx`) are fixed-width binary tables pointing into the
+  matching marker stream and payload file.
 
 Capacity limits:
 
-- Offsets are `uint64_t`, so each `.mks` or payload `.bin` file can be addressed up to `2^64 - 1` bytes, about `16 EiB`.
-- `global_variant_index` is `uint32_t`, supporting up to about `4.29B` split variants per prefix.
-- `block_id` is `uint32_t`, supporting up to about `4.29B` ancestry blocks per prefix.
-- `common_index` and `rare_index` are `uint64_t`.
-- `hap_id` uses 27 bits inside `anc_hap`, supporting up to `134,217,728` haplotypes, or about `67M` diploid samples.
-- Ancestry uses 5 bits inside `anc_hap`, supporting up to `32` ancestry labels.
-- For AoU-scale data, a whole genome with about `1.6B` variants is under the `uint32_t` split-variant limit, and per-chromosome prefixes are substantially smaller.
+- `global_variant_index` is `uint32_t`, supporting about `4.29B` split variants
+  per prefix.
+- `block_id` is `uint32_t`, supporting about `4.29B` ancestry blocks per
+  prefix.
+- Payload offsets are `uint64_t`.
+- `hap_id` supports about `134M` haplotypes, or about `67M` diploid samples.
+- Ancestry uses 5 bits, supporting up to `32` ancestry labels.
 
-Roundtrip scope:
+## Roundtrip Scope
 
-- `tractor_hybrid_to_vcf` reconstructs a phased, split-biallelic BGZF-compressed VCF from the packed genotype bits/carriers and writes a tabix `.tbi` index.
-- `tractor_hybrid_extract_region` writes a new packed prefix for variants with `start <= POS <= end`, renumbering marker indexes and clipping overlapping ancestry block metadata to the requested region.
-- This verifies that split ALT haplotypes survive the packed representation.
-- It does not restore original unsplit multi-allelic rows.
-- Missing genotype and LAI calls are rejected by the forward converter, so they do not appear in roundtrip output.
-- Genotype contigs skipped because they have no LAI records are not present in the packed files, so they cannot be emitted by the reverse converter.
+`tractor_hybrid_to_vcf` reconstructs a phased, split-biallelic BGZF-compressed
+VCF and writes a tabix index. It verifies that split ALT haplotypes survive the
+packed representation, but it does not restore original unsplit multi-allelic
+rows. Missing genotype and LAI calls are rejected by the forward converters, so
+they do not appear in roundtrip output.
 
-Threshold estimation:
+## Progress And Timing
 
-- `estimate_mac_threshold` reads phased diploid GT, splits multi-allelic sites by ALT, and builds a MAC distribution.
-- `--sample-every N` gives a deterministic partial-site estimate by using the first VCF record and then every Nth record; the default `1` uses the whole input.
-- Dense payload per split variant is `8 * ceil(2 * n_samples / 64)` bytes.
-- Sparse payload per split variant is `8 * MAC` bytes.
-- Storage-only break-even is therefore approximately `ceil(2 * n_samples / 64)`.
-- The optional query model scores dense variants by scanned `uint64_t` words and sparse variants by scanned carriers.
+Forward converters and `estimate_mac_threshold` print progress to stderr. When
+an input `.csi` or `.tbi` index exposes record statistics, progress includes
+`scanned records / total records` and a percentage; otherwise it reports scanned
+records only.
 
-The current converter intentionally stays close to the design document while fixing several prototype hazards:
-
-- per-ALT `pos_index` is written correctly for multi-allelic sites;
-- ancestry blocks are not reused across chromosomes;
-- contig advancement uses the genotype header order instead of lexicographic chromosome strings;
-- ancestry lookup for carriers is `O(1)` from the active FLARE block state.
+The patched SAIGE-TRACTOR step2 scripts print chunk-level timing diagnostics
+for `tractor_hybrid` input. These diagnostics are instrumentation only and do
+not change score, SPA, Firth, variance-ratio, filtering, or output
+calculations.

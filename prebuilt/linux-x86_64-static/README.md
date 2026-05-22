@@ -35,6 +35,25 @@ The FLARE converter also accepts an optional final `chr:start-end` region:
   chr1:1-50000000
 ```
 
+For chunked conversion, this repo includes SHAPEIT5-style GRCh38 4 cM chunk
+files under `resources/shapeit5_chunks/b38_4cM/` and a helper that converts
+those chunks to `flare_subset_to_tractor_hybrid` argument rows:
+
+```bash
+scripts/shapeit_chunks_to_tractor_args.sh \
+  --chunks-dir resources/shapeit5_chunks/b38_4cM \
+  --chrom-style chr \
+  --phase-template 'phase/{chrom}.phased.vcf.gz' \
+  --flare-template 'flare/{chrom}.flare.vcf.gz' \
+  --n-ancestries 5 \
+  --mac-threshold 512 \
+  --out-prefix-template 'hybrid/{chrom}.shapeit4cM.chunk{chunk0}' \
+  > flare_subset.shapeit4cm.args.tsv
+
+xargs -a flare_subset.shapeit4cm.args.tsv -n 6 -P 8 \
+  ./prebuilt/linux-x86_64-static/flare_subset_to_tractor_hybrid
+```
+
 The RFMix MSP converter is also included:
 
 ```bash

@@ -33,6 +33,47 @@ grep -q "VCF records sampled:" "$OUT_DIR/threshold.sampled.txt"
 grep -q "Sampling stride:      2" "$OUT_DIR/threshold.sampled.txt"
 grep -q "Recommended threshold:" "$OUT_DIR/threshold.sampled.txt"
 
+cat >"$OUT_DIR/shapeit.chunks.txt" <<'EOF'
+0	chr1	chr1:1-180	chr1:1-150	4.0	150	10	3
+1	chr1	chr1:120-260	chr1:151-250	4.0	100	10	3
+EOF
+
+"$ROOT_DIR/scripts/shapeit_chunks_to_tractor_args.sh" \
+  --chunks "$OUT_DIR/shapeit.chunks.txt" \
+  --phase-template "$OUT_DIR/source/{chrom}.phased.vcf.gz" \
+  --flare-template "$OUT_DIR/source/{chrom}.flare.vcf.gz" \
+  --n-ancestries 2 \
+  --mac-threshold 1 \
+  --out-prefix-template "$OUT_DIR/{chrom}.shapeit4cM.chunk{chunk0}" \
+  >"$OUT_DIR/shapeit.args.tsv"
+
+python3 - "$OUT_DIR/shapeit.args.tsv" "$OUT_DIR" <<'PY'
+import pathlib
+import sys
+
+args_file = pathlib.Path(sys.argv[1])
+out_dir = pathlib.Path(sys.argv[2])
+rows = [line.rstrip().split("\t") for line in args_file.read_text().splitlines()]
+assert [[pathlib.Path(row[0]), pathlib.Path(row[1]), row[2], row[3], pathlib.Path(row[4]), row[5]] for row in rows] == [
+    [
+        out_dir / "source" / "chr1.phased.vcf.gz",
+        out_dir / "source" / "chr1.flare.vcf.gz",
+        "2",
+        "1",
+        out_dir / "chr1.shapeit4cM.chunk0001",
+        "chr1:1-150",
+    ],
+    [
+        out_dir / "source" / "chr1.phased.vcf.gz",
+        out_dir / "source" / "chr1.flare.vcf.gz",
+        "2",
+        "1",
+        out_dir / "chr1.shapeit4cM.chunk0002",
+        "chr1:151-250",
+    ],
+], rows
+PY
+
 "$BIN_DIR/compare_vcfs" \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   "$OUT_DIR/tiny.roundtrip.vcf.gz" \
