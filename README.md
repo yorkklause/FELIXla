@@ -36,8 +36,6 @@ docker run --rm -v "$PWD:/data" -w /data kyuan1024/tractor-hybrid-tools:latest \
   rfmix_msp_to_tractor_hybrid genotype.phased.vcf.gz rfmix.msp.tsv.gz 5 512 out/chr22
 ```
 
-The image also includes `make_chunk_manifest` for creating split lists.
-
 The forward converters and MAC threshold estimator print progress to stderr.
 When the input has a usable `.csi` or `.tbi` index with record statistics, the
 tool reports `scanned records / total records` and a percentage; otherwise it
@@ -45,21 +43,17 @@ keeps reporting the number of scanned records. For the phased genotype plus
 FLARE converter, the percentage is based on genotype VCF records, while the
 converted count is the number of emitted split-biallelic hybrid variants.
 
-Chunking coordinate convention for wrapper scripts and chunk manifests follows
-VCF/tabix region style: coordinates are 1-based and both ends are inclusive,
-`[start, end]`. A variant belongs to a chunk when `start <= POS <= end`, so
-adjacent chunks should start at the previous chunk's `end + 1`:
+Chunking is driven by region strings passed as the optional final argument to
+`flare_subset_to_tractor_hybrid`. Use a prepared interval file, such as a
+SHAPEIT5 4 cM chunk file, and pass each desired `chr:start-end` interval to the
+converter. Region coordinates follow VCF/tabix style: they are 1-based and both
+ends are inclusive, `[start, end]`. A variant belongs to a chunk when
+`start <= POS <= end`, so adjacent chunks should start at the previous chunk's
+`end + 1`:
 
 ```text
 chr1:1-50000000
 chr1:50000001-100000000
-```
-
-The same convention in a TSV-style chunk manifest could be:
-
-```text
-chr1    1           50000000     out/chr1.chunk0001
-chr1    50000001    100000000    out/chr1.chunk0002
 ```
 
 Do not define adjacent chunks as `chr1:1-50000000` and
@@ -67,66 +61,33 @@ Do not define adjacent chunks as `chr1:1-50000000` and
 included in both. This chunk convention is separate from FLARE LAI intervals,
 which remain `(previous_lai_pos, current_lai_pos]`.
 
-Generate a chunk manifest for 22 chromosomes:
+For an interval file with one tabix-style region in the first column:
 
 ```bash
-scripts/make_chunk_manifest.py \
-  --build GRCh38 \
-  --chroms 1-22 \
-  --chunk-bp 50000000 \
-  --out-prefix-template 'hybrid/{chrom}.chunk{chunk:04d}' \
-  > chunks.tsv
+i=0
+while read -r region _; do
+  case "$region" in ""|\#*) continue ;; esac
+  chrom="${region%%:*}"
+  i=$((i + 1))
+  chunk="$(printf '%04d' "$i")"
+  flare_subset_to_tractor_hybrid \
+    "phase/${chrom}.phased.vcf.gz" \
+    "flare/${chrom}.flare.vcf.gz" \
+    5 \
+    512 \
+    "hybrid/${chrom}.chunk${chunk}" \
+    "$region"
+done < shapeit5.4cm.regions.txt
 ```
 
-The default manifest columns are:
-
-```text
-chrom    start    end    out_prefix
-```
-
-You can also read chromosome lengths from VCF headers or a two-column chrom
-sizes file:
+If your interval file has separate `chrom start end` columns, convert the
+desired columns to region strings first:
 
 ```bash
-scripts/make_chunk_manifest.py \
-  --vcf chr1.phased.vcf.gz \
-  --vcf chr2.phased.vcf.gz \
-  --chroms 1-22 \
-  --format tsv5 \
-  --out-prefix-template 'hybrid/{chrom}.chunk{chunk:04d}' \
-  > chunks.tsv
+awk 'BEGIN{OFS=""} !/^#/ && NF >= 3 {print $1,":",$2,"-",$3}' intervals.tsv > regions.txt
 ```
 
-`--format tsv5` adds a ready-to-use `chr:start-end` region column:
-`chrom start end region out_prefix`.
-
-`flare_subset_to_tractor_hybrid` also accepts an optional final
-`chr:start-end` region argument, so 22 per-chromosome phased VCF plus FLARE VCF
-inputs can be chunked without first writing temporary VCFs:
-
-```bash
-scripts/make_chunk_manifest.py \
-  --build GRCh38 \
-  --chroms 1-22 \
-  --chunk-bp 50000000 \
-  --format flare-direct-args \
-  --phase-template 'phase/{chrom}.phased.vcf.gz' \
-  --flare-template 'flare/{chrom}.flare.vcf.gz' \
-  --n-ancestries 5 \
-  --mac-threshold 512 \
-  --out-prefix-template 'hybrid/{chrom}.chunk{chunk:04d}' \
-  > flare_subset.region.args.tsv
-
-xargs -a flare_subset.region.args.tsv -n 6 -P 8 flare_subset_to_tractor_hybrid
-```
-
-The columns of `--format flare-direct-args` match the converter argument order:
-
-```text
-source_phase_vcf    source_flare_vcf    n_ancestries    mac_threshold    out_prefix    region
-```
-
-You can call the converter directly for one region:
+You can also call the converter directly for one region:
 
 ```bash
 flare_subset_to_tractor_hybrid \
@@ -136,45 +97,6 @@ flare_subset_to_tractor_hybrid \
   512 \
   hybrid/chr22.chunk0001 \
   chr22:1-50000000
-```
-
-The older pre-split VCF workflow is still available. `--format flare` includes
-both the source VCFs and chunked VCF paths; the last five columns match the
-converter's original no-region argument order:
-
-```text
-chunk_phase_vcf    chunk_flare_vcf    n_ancestries    mac_threshold    out_prefix
-```
-
-```bash
-scripts/make_chunk_manifest.py \
-  --build GRCh38 \
-  --chroms 1-22 \
-  --chunk-bp 50000000 \
-  --format flare \
-  --phase-template 'phase/{chrom}.phased.vcf.gz' \
-  --flare-template 'flare/{chrom}.flare.vcf.gz' \
-  --n-ancestries 5 \
-  --mac-threshold 512 \
-  --out-prefix-template 'hybrid/{chrom}.chunk{chunk:04d}' \
-  > chunks.flare.tsv
-
-while IFS=$'\t' read -r chrom start end region source_phase source_flare chunk_phase chunk_flare n_anc mac out_prefix; do
-  mkdir -p "$(dirname "$out_prefix")"
-  bcftools view -r "$region" -Oz -o "$chunk_phase" "$source_phase"
-  bcftools view -r "$region" -Oz -o "$chunk_flare" "$source_flare"
-  tabix -p vcf "$chunk_phase"
-  tabix -p vcf "$chunk_flare"
-  flare_subset_to_tractor_hybrid "$chunk_phase" "$chunk_flare" "$n_anc" "$mac" "$out_prefix"
-done < chunks.flare.tsv
-```
-
-Inside the tools Docker image, run the manifest generator the same way:
-
-```bash
-docker run --rm -v "$PWD:/data" -w /data kyuan1024/tractor-hybrid-tools:latest \
-  make_chunk_manifest --build GRCh38 --chroms 1-22 --format flare-direct-args \
-  --n-ancestries 5 --mac-threshold 512 > flare_subset.region.args.tsv
 ```
 
 The packed files can be converted back to a split-biallelic VCF:
