@@ -66,6 +66,67 @@ assert prefixes == [
 ], rows
 PY
 
+"$ROOT_DIR/scripts/make_chunk_manifest.py" \
+  --chrom-sizes "$OUT_DIR/chrom.sizes" \
+  --chroms 1 \
+  --chunk-bp 150 \
+  --format flare \
+  --phase-template "$OUT_DIR/source/{chrom}.phased.vcf.gz" \
+  --flare-template "$OUT_DIR/source/{chrom}.flare.vcf.gz" \
+  --n-ancestries 2 \
+  --mac-threshold 1 \
+  --out-prefix-template "$OUT_DIR/{chrom}.chunk{chunk:02d}" \
+  >"$OUT_DIR/chunks.flare.tsv"
+
+"$ROOT_DIR/scripts/make_chunk_manifest.py" \
+  --chrom-sizes "$OUT_DIR/chrom.sizes" \
+  --chroms 1 \
+  --chunk-bp 150 \
+  --format flare-args \
+  --n-ancestries 2 \
+  --mac-threshold 1 \
+  --out-prefix-template "$OUT_DIR/{chrom}.chunk{chunk:02d}" \
+  >"$OUT_DIR/chunks.flare.args.tsv"
+
+python3 - "$OUT_DIR/chunks.flare.tsv" "$OUT_DIR/chunks.flare.args.tsv" "$OUT_DIR" <<'PY'
+import pathlib
+import sys
+
+flare_manifest = pathlib.Path(sys.argv[1])
+args_manifest = pathlib.Path(sys.argv[2])
+out_dir = pathlib.Path(sys.argv[3])
+
+flare_rows = [line.rstrip().split("\t") for line in flare_manifest.read_text().splitlines()]
+assert [row[:4] for row in flare_rows] == [
+    ["chr1", "1", "150", "chr1:1-150"],
+    ["chr1", "151", "250", "chr1:151-250"],
+], flare_rows
+assert [pathlib.Path(row[4]) for row in flare_rows] == [
+    out_dir / "source" / "chr1.phased.vcf.gz",
+    out_dir / "source" / "chr1.phased.vcf.gz",
+], flare_rows
+assert [pathlib.Path(row[5]) for row in flare_rows] == [
+    out_dir / "source" / "chr1.flare.vcf.gz",
+    out_dir / "source" / "chr1.flare.vcf.gz",
+], flare_rows
+assert [pathlib.Path(row[6]) for row in flare_rows] == [
+    out_dir / "chr1.chunk01.phase.vcf.gz",
+    out_dir / "chr1.chunk02.phase.vcf.gz",
+], flare_rows
+assert [pathlib.Path(row[7]) for row in flare_rows] == [
+    out_dir / "chr1.chunk01.flare.vcf.gz",
+    out_dir / "chr1.chunk02.flare.vcf.gz",
+], flare_rows
+assert [row[8:10] for row in flare_rows] == [["2", "1"], ["2", "1"]], flare_rows
+assert [pathlib.Path(row[10]) for row in flare_rows] == [
+    out_dir / "chr1.chunk01",
+    out_dir / "chr1.chunk02",
+], flare_rows
+
+args_rows = [line.rstrip().split("\t") for line in args_manifest.read_text().splitlines()]
+assert args_rows == [row[6:] for row in flare_rows], args_rows
+PY
+
 "$BIN_DIR/compare_vcfs" \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   "$OUT_DIR/tiny.roundtrip.vcf.gz" \

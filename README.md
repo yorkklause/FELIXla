@@ -109,25 +109,52 @@ scripts/make_chunk_manifest.py \
   --build GRCh38 \
   --chroms 1-22 \
   --chunk-bp 50000000 \
-  --format tsv5 \
+  --format flare \
+  --phase-template 'phase/{chrom}.phased.vcf.gz' \
+  --flare-template 'flare/{chrom}.flare.vcf.gz' \
+  --n-ancestries 5 \
+  --mac-threshold 512 \
   --out-prefix-template 'hybrid/{chrom}.chunk{chunk:04d}' \
-  > chunks.tsv
+  > chunks.flare.tsv
 
-while IFS=$'\t' read -r chrom start end region out_prefix; do
+while IFS=$'\t' read -r chrom start end region source_phase source_flare chunk_phase chunk_flare n_anc mac out_prefix; do
   mkdir -p "$(dirname "$out_prefix")"
-  bcftools view -r "$region" -Oz -o "${out_prefix}.phase.vcf.gz" "phase/${chrom}.phased.vcf.gz"
-  bcftools view -r "$region" -Oz -o "${out_prefix}.flare.vcf.gz" "flare/${chrom}.flare.vcf.gz"
-  tabix -p vcf "${out_prefix}.phase.vcf.gz"
-  tabix -p vcf "${out_prefix}.flare.vcf.gz"
-  flare_subset_to_tractor_hybrid "${out_prefix}.phase.vcf.gz" "${out_prefix}.flare.vcf.gz" 5 512 "$out_prefix"
-done < chunks.tsv
+  bcftools view -r "$region" -Oz -o "$chunk_phase" "$source_phase"
+  bcftools view -r "$region" -Oz -o "$chunk_flare" "$source_flare"
+  tabix -p vcf "$chunk_phase"
+  tabix -p vcf "$chunk_flare"
+  flare_subset_to_tractor_hybrid "$chunk_phase" "$chunk_flare" "$n_anc" "$mac" "$out_prefix"
+done < chunks.flare.tsv
+```
+
+The last five columns of `--format flare` match the converter argument order:
+
+```text
+chunk_phase_vcf    chunk_flare_vcf    n_ancestries    mac_threshold    out_prefix
+```
+
+If the chunked VCFs already exist, generate only those converter arguments:
+
+```bash
+scripts/make_chunk_manifest.py \
+  --build GRCh38 \
+  --chroms 1-22 \
+  --chunk-bp 50000000 \
+  --format flare-args \
+  --n-ancestries 5 \
+  --mac-threshold 512 \
+  --out-prefix-template 'hybrid/{chrom}.chunk{chunk:04d}' \
+  > flare_subset.args.tsv
+
+xargs -a flare_subset.args.tsv -n 5 -P 8 flare_subset_to_tractor_hybrid
 ```
 
 Inside the tools Docker image, run the manifest generator the same way:
 
 ```bash
 docker run --rm -v "$PWD:/data" -w /data kyuan1024/tractor-hybrid-tools:latest \
-  make_chunk_manifest --build GRCh38 --chroms 1-22 --format tsv5 > chunks.tsv
+  make_chunk_manifest --build GRCh38 --chroms 1-22 --format flare \
+  --n-ancestries 5 --mac-threshold 512 > chunks.flare.tsv
 ```
 
 The packed files can be converted back to a split-biallelic VCF:

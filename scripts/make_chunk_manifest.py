@@ -240,19 +240,25 @@ def built_in_lengths(build, style):
     return OrderedDict((apply_chrom_style(chrom, style), length) for chrom, length in source.items())
 
 
-def template_prefix(template, chrom, chunk, start, end, region):
+def render_template(template, label, **values):
     try:
-        return template.format(
-            chrom=chrom,
-            chunk=chunk,
-            start=start,
-            end=end,
-            region=region,
-        )
+        return template.format(**values)
     except KeyError as exc:
-        die(f"unknown placeholder in --out-prefix-template: {exc}")
+        die(f"unknown placeholder in {label}: {exc}")
     except ValueError as exc:
-        die(f"invalid --out-prefix-template format: {exc}")
+        die(f"invalid {label} format: {exc}")
+
+
+def template_prefix(template, chrom, chunk, start, end, region):
+    return render_template(
+        template,
+        "--out-prefix-template",
+        chrom=chrom,
+        chunk=chunk,
+        start=start,
+        end=end,
+        region=region,
+    )
 
 
 def emit_manifest(lengths, args):
@@ -263,6 +269,13 @@ def emit_manifest(lengths, args):
             print("chrom\tstart\tend\tregion\tout_prefix")
         elif args.format == "regions":
             print("region")
+        elif args.format == "flare":
+            print(
+                "chrom\tstart\tend\tregion\tsource_phase_vcf\tsource_flare_vcf\t"
+                "chunk_phase_vcf\tchunk_flare_vcf\tn_ancestries\tmac_threshold\tout_prefix"
+            )
+        elif args.format == "flare-args":
+            print("chunk_phase_vcf\tchunk_flare_vcf\tn_ancestries\tmac_threshold\tout_prefix")
 
     chunk_bp = parse_int(args.chunk_bp, "--chunk-bp")
     chunk_index = 0
@@ -283,6 +296,14 @@ def emit_manifest(lengths, args):
                 end=end,
                 region=region,
             )
+            template_values = {
+                "chrom": chrom,
+                "chunk": per_chrom_chunk if args.chunk_numbering == "per-chrom" else chunk_index,
+                "start": start,
+                "end": end,
+                "region": region,
+                "out_prefix": out_prefix,
+            }
 
             if args.format == "tsv4":
                 print(f"{chrom}\t{start}\t{end}\t{out_prefix}")
@@ -290,6 +311,38 @@ def emit_manifest(lengths, args):
                 print(f"{chrom}\t{start}\t{end}\t{region}\t{out_prefix}")
             elif args.format == "regions":
                 print(region)
+            elif args.format in {"flare", "flare-args"}:
+                chunk_phase = render_template(
+                    args.chunk_phase_template,
+                    "--chunk-phase-template",
+                    **template_values,
+                )
+                chunk_flare = render_template(
+                    args.chunk_flare_template,
+                    "--chunk-flare-template",
+                    **template_values,
+                )
+                converter_args = (
+                    f"{chunk_phase}\t{chunk_flare}\t"
+                    f"{args.n_ancestries}\t{args.mac_threshold}\t{out_prefix}"
+                )
+                if args.format == "flare":
+                    source_phase = render_template(
+                        args.phase_template,
+                        "--phase-template",
+                        **template_values,
+                    )
+                    source_flare = render_template(
+                        args.flare_template,
+                        "--flare-template",
+                        **template_values,
+                    )
+                    print(
+                        f"{chrom}\t{start}\t{end}\t{region}\t"
+                        f"{source_phase}\t{source_flare}\t{converter_args}"
+                    )
+                else:
+                    print(converter_args)
 
             start = end + 1
 
@@ -335,6 +388,34 @@ def build_parser():
         help="Python format template for output prefix. Placeholders: {chrom}, {chunk}, {start}, {end}, {region}.",
     )
     parser.add_argument(
+        "--phase-template",
+        default="phase/{chrom}.phased.vcf.gz",
+        help="Source phased VCF path template for --format flare. Supports {chrom}, {chunk}, {start}, {end}, {region}, {out_prefix}.",
+    )
+    parser.add_argument(
+        "--flare-template",
+        default="flare/{chrom}.flare.vcf.gz",
+        help="Source FLARE VCF path template for --format flare. Supports {chrom}, {chunk}, {start}, {end}, {region}, {out_prefix}.",
+    )
+    parser.add_argument(
+        "--chunk-phase-template",
+        default="{out_prefix}.phase.vcf.gz",
+        help="Chunked phased VCF path template for --format flare and flare-args. Default: {out_prefix}.phase.vcf.gz.",
+    )
+    parser.add_argument(
+        "--chunk-flare-template",
+        default="{out_prefix}.flare.vcf.gz",
+        help="Chunked FLARE VCF path template for --format flare and flare-args. Default: {out_prefix}.flare.vcf.gz.",
+    )
+    parser.add_argument(
+        "--n-ancestries",
+        help="n_ancestries argument for flare_subset_to_tractor_hybrid when using --format flare or flare-args.",
+    )
+    parser.add_argument(
+        "--mac-threshold",
+        help="mac_threshold argument for flare_subset_to_tractor_hybrid when using --format flare or flare-args.",
+    )
+    parser.add_argument(
         "--chunk-numbering",
         choices=["per-chrom", "global"],
         default="per-chrom",
@@ -342,9 +423,13 @@ def build_parser():
     )
     parser.add_argument(
         "--format",
-        choices=["tsv4", "tsv5", "regions"],
+        choices=["tsv4", "tsv5", "regions", "flare", "flare-args"],
         default="tsv4",
-        help="Output format. tsv4: chrom/start/end/out_prefix. tsv5 adds region. regions outputs chr:start-end only.",
+        help=(
+            "Output format. tsv4: chrom/start/end/out_prefix. tsv5 adds region. "
+            "regions outputs chr:start-end only. flare adds split and converter columns. "
+            "flare-args outputs only the 5 flare_subset_to_tractor_hybrid arguments."
+        ),
     )
     parser.add_argument(
         "--header",
@@ -356,6 +441,14 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+
+    if args.format in {"flare", "flare-args"}:
+        if args.n_ancestries is None:
+            die("--n-ancestries is required with --format flare or flare-args")
+        if args.mac_threshold is None:
+            die("--mac-threshold is required with --format flare or flare-args")
+        args.n_ancestries = str(parse_int(args.n_ancestries, "--n-ancestries"))
+        args.mac_threshold = str(parse_int(args.mac_threshold, "--mac-threshold"))
 
     requested = parse_chroms(args.chroms)
     if args.build:
