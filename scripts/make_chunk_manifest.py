@@ -276,6 +276,13 @@ def emit_manifest(lengths, args):
             )
         elif args.format == "flare-args":
             print("chunk_phase_vcf\tchunk_flare_vcf\tn_ancestries\tmac_threshold\tout_prefix")
+        elif args.format == "flare-direct":
+            print(
+                "chrom\tstart\tend\tsource_phase_vcf\tsource_flare_vcf\t"
+                "n_ancestries\tmac_threshold\tout_prefix\tregion"
+            )
+        elif args.format == "flare-direct-args":
+            print("source_phase_vcf\tsource_flare_vcf\tn_ancestries\tmac_threshold\tout_prefix\tregion")
 
     chunk_bp = parse_int(args.chunk_bp, "--chunk-bp")
     chunk_index = 0
@@ -340,6 +347,29 @@ def emit_manifest(lengths, args):
                     print(
                         f"{chrom}\t{start}\t{end}\t{region}\t"
                         f"{source_phase}\t{source_flare}\t{converter_args}"
+                    )
+                else:
+                    print(converter_args)
+            elif args.format in {"flare-direct", "flare-direct-args"}:
+                source_phase = render_template(
+                    args.phase_template,
+                    "--phase-template",
+                    **template_values,
+                )
+                source_flare = render_template(
+                    args.flare_template,
+                    "--flare-template",
+                    **template_values,
+                )
+                converter_args = (
+                    f"{source_phase}\t{source_flare}\t"
+                    f"{args.n_ancestries}\t{args.mac_threshold}\t{out_prefix}\t{region}"
+                )
+                if args.format == "flare-direct":
+                    print(
+                        f"{chrom}\t{start}\t{end}\t"
+                        f"{source_phase}\t{source_flare}\t"
+                        f"{args.n_ancestries}\t{args.mac_threshold}\t{out_prefix}\t{region}"
                     )
                 else:
                     print(converter_args)
@@ -409,11 +439,11 @@ def build_parser():
     )
     parser.add_argument(
         "--n-ancestries",
-        help="n_ancestries argument for flare_subset_to_tractor_hybrid when using --format flare or flare-args.",
+        help="n_ancestries argument for flare_subset_to_tractor_hybrid when using a flare* format.",
     )
     parser.add_argument(
         "--mac-threshold",
-        help="mac_threshold argument for flare_subset_to_tractor_hybrid when using --format flare or flare-args.",
+        help="mac_threshold argument for flare_subset_to_tractor_hybrid when using a flare* format.",
     )
     parser.add_argument(
         "--chunk-numbering",
@@ -423,12 +453,21 @@ def build_parser():
     )
     parser.add_argument(
         "--format",
-        choices=["tsv4", "tsv5", "regions", "flare", "flare-args"],
+        choices=[
+            "tsv4",
+            "tsv5",
+            "regions",
+            "flare",
+            "flare-args",
+            "flare-direct",
+            "flare-direct-args",
+        ],
         default="tsv4",
         help=(
             "Output format. tsv4: chrom/start/end/out_prefix. tsv5 adds region. "
             "regions outputs chr:start-end only. flare adds split and converter columns. "
-            "flare-args outputs only the 5 flare_subset_to_tractor_hybrid arguments."
+            "flare-args outputs only the 5 pre-split flare_subset_to_tractor_hybrid arguments. "
+            "flare-direct and flare-direct-args target the converter's optional region argument."
         ),
     )
     parser.add_argument(
@@ -442,11 +481,11 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(argv)
 
-    if args.format in {"flare", "flare-args"}:
+    if args.format in {"flare", "flare-args", "flare-direct", "flare-direct-args"}:
         if args.n_ancestries is None:
-            die("--n-ancestries is required with --format flare or flare-args")
+            die("--n-ancestries is required with flare output formats")
         if args.mac_threshold is None:
-            die("--mac-threshold is required with --format flare or flare-args")
+            die("--mac-threshold is required with flare output formats")
         args.n_ancestries = str(parse_int(args.n_ancestries, "--n-ancestries"))
         args.mac_threshold = str(parse_int(args.mac_threshold, "--mac-threshold"))
 

@@ -88,13 +88,44 @@ PY
   --out-prefix-template "$OUT_DIR/{chrom}.chunk{chunk:02d}" \
   >"$OUT_DIR/chunks.flare.args.tsv"
 
-python3 - "$OUT_DIR/chunks.flare.tsv" "$OUT_DIR/chunks.flare.args.tsv" "$OUT_DIR" <<'PY'
+"$ROOT_DIR/scripts/make_chunk_manifest.py" \
+  --chrom-sizes "$OUT_DIR/chrom.sizes" \
+  --chroms 1 \
+  --chunk-bp 150 \
+  --format flare-direct \
+  --phase-template "$OUT_DIR/source/{chrom}.phased.vcf.gz" \
+  --flare-template "$OUT_DIR/source/{chrom}.flare.vcf.gz" \
+  --n-ancestries 2 \
+  --mac-threshold 1 \
+  --out-prefix-template "$OUT_DIR/{chrom}.chunk{chunk:02d}" \
+  >"$OUT_DIR/chunks.flare.direct.tsv"
+
+"$ROOT_DIR/scripts/make_chunk_manifest.py" \
+  --chrom-sizes "$OUT_DIR/chrom.sizes" \
+  --chroms 1 \
+  --chunk-bp 150 \
+  --format flare-direct-args \
+  --phase-template "$OUT_DIR/source/{chrom}.phased.vcf.gz" \
+  --flare-template "$OUT_DIR/source/{chrom}.flare.vcf.gz" \
+  --n-ancestries 2 \
+  --mac-threshold 1 \
+  --out-prefix-template "$OUT_DIR/{chrom}.chunk{chunk:02d}" \
+  >"$OUT_DIR/chunks.flare.direct.args.tsv"
+
+python3 - \
+  "$OUT_DIR/chunks.flare.tsv" \
+  "$OUT_DIR/chunks.flare.args.tsv" \
+  "$OUT_DIR/chunks.flare.direct.tsv" \
+  "$OUT_DIR/chunks.flare.direct.args.tsv" \
+  "$OUT_DIR" <<'PY'
 import pathlib
 import sys
 
 flare_manifest = pathlib.Path(sys.argv[1])
 args_manifest = pathlib.Path(sys.argv[2])
-out_dir = pathlib.Path(sys.argv[3])
+direct_manifest = pathlib.Path(sys.argv[3])
+direct_args_manifest = pathlib.Path(sys.argv[4])
+out_dir = pathlib.Path(sys.argv[5])
 
 flare_rows = [line.rstrip().split("\t") for line in flare_manifest.read_text().splitlines()]
 assert [row[:4] for row in flare_rows] == [
@@ -125,6 +156,31 @@ assert [pathlib.Path(row[10]) for row in flare_rows] == [
 
 args_rows = [line.rstrip().split("\t") for line in args_manifest.read_text().splitlines()]
 assert args_rows == [row[6:] for row in flare_rows], args_rows
+
+direct_rows = [line.rstrip().split("\t") for line in direct_manifest.read_text().splitlines()]
+assert [row[:3] for row in direct_rows] == [
+    ["chr1", "1", "150"],
+    ["chr1", "151", "250"],
+], direct_rows
+assert [pathlib.Path(row[3]) for row in direct_rows] == [
+    out_dir / "source" / "chr1.phased.vcf.gz",
+    out_dir / "source" / "chr1.phased.vcf.gz",
+], direct_rows
+assert [pathlib.Path(row[4]) for row in direct_rows] == [
+    out_dir / "source" / "chr1.flare.vcf.gz",
+    out_dir / "source" / "chr1.flare.vcf.gz",
+], direct_rows
+assert [row[5:7] for row in direct_rows] == [["2", "1"], ["2", "1"]], direct_rows
+assert [pathlib.Path(row[7]) for row in direct_rows] == [
+    out_dir / "chr1.chunk01",
+    out_dir / "chr1.chunk02",
+], direct_rows
+assert [row[8] for row in direct_rows] == ["chr1:1-150", "chr1:151-250"], direct_rows
+
+direct_args_rows = [
+    line.rstrip().split("\t") for line in direct_args_manifest.read_text().splitlines()
+]
+assert direct_args_rows == [row[3:] for row in direct_rows], direct_args_rows
 PY
 
 "$BIN_DIR/compare_vcfs" \
@@ -143,6 +199,28 @@ grep -q "Differences:             0" "$OUT_DIR/compare.txt"
 "$BIN_DIR/tractor_hybrid_to_vcf" \
   "$OUT_DIR/tiny.chr1_100_160" \
   "$OUT_DIR/tiny.chr1_100_160.roundtrip.vcf.gz" >/dev/null
+
+"$BIN_DIR/flare_subset_to_tractor_hybrid" \
+  "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
+  "$ROOT_DIR/testdata/tiny.flare.vcf" \
+  2 \
+  1 \
+  "$OUT_DIR/tiny.direct_region" \
+  chr1:100-160 >/dev/null
+
+grep -q $'selected_region\tchr1:100-160' "$OUT_DIR/tiny.direct_region.meta"
+
+"$BIN_DIR/tractor_hybrid_to_vcf" \
+  "$OUT_DIR/tiny.direct_region" \
+  "$OUT_DIR/tiny.direct_region.roundtrip.vcf.gz" >/dev/null
+
+"$BIN_DIR/compare_vcfs" \
+  "$OUT_DIR/tiny.chr1_100_160.roundtrip.vcf.gz" \
+  "$OUT_DIR/tiny.direct_region.roundtrip.vcf.gz" \
+  --split-multiallelic \
+  >"$OUT_DIR/direct_region.compare.txt"
+
+grep -q "Differences:             0" "$OUT_DIR/direct_region.compare.txt"
 
 "$BIN_DIR/rfmix_msp_to_tractor_hybrid" \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \

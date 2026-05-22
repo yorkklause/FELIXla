@@ -100,9 +100,51 @@ scripts/make_chunk_manifest.py \
 `--format tsv5` adds a ready-to-use `chr:start-end` region column:
 `chrom start end region out_prefix`.
 
-For 22 per-chromosome phased VCF plus FLARE VCF inputs, one practical pattern is
-to generate a chunk list with a region column, then use each row directly for
-splitting and conversion:
+`flare_subset_to_tractor_hybrid` also accepts an optional final
+`chr:start-end` region argument, so 22 per-chromosome phased VCF plus FLARE VCF
+inputs can be chunked without first writing temporary VCFs:
+
+```bash
+scripts/make_chunk_manifest.py \
+  --build GRCh38 \
+  --chroms 1-22 \
+  --chunk-bp 50000000 \
+  --format flare-direct-args \
+  --phase-template 'phase/{chrom}.phased.vcf.gz' \
+  --flare-template 'flare/{chrom}.flare.vcf.gz' \
+  --n-ancestries 5 \
+  --mac-threshold 512 \
+  --out-prefix-template 'hybrid/{chrom}.chunk{chunk:04d}' \
+  > flare_subset.region.args.tsv
+
+xargs -a flare_subset.region.args.tsv -n 6 -P 8 flare_subset_to_tractor_hybrid
+```
+
+The columns of `--format flare-direct-args` match the converter argument order:
+
+```text
+source_phase_vcf    source_flare_vcf    n_ancestries    mac_threshold    out_prefix    region
+```
+
+You can call the converter directly for one region:
+
+```bash
+flare_subset_to_tractor_hybrid \
+  phase/chr22.phased.vcf.gz \
+  flare/chr22.flare.vcf.gz \
+  5 \
+  512 \
+  hybrid/chr22.chunk0001 \
+  chr22:1-50000000
+```
+
+The older pre-split VCF workflow is still available. `--format flare` includes
+both the source VCFs and chunked VCF paths; the last five columns match the
+converter's original no-region argument order:
+
+```text
+chunk_phase_vcf    chunk_flare_vcf    n_ancestries    mac_threshold    out_prefix
+```
 
 ```bash
 scripts/make_chunk_manifest.py \
@@ -127,34 +169,12 @@ while IFS=$'\t' read -r chrom start end region source_phase source_flare chunk_p
 done < chunks.flare.tsv
 ```
 
-The last five columns of `--format flare` match the converter argument order:
-
-```text
-chunk_phase_vcf    chunk_flare_vcf    n_ancestries    mac_threshold    out_prefix
-```
-
-If the chunked VCFs already exist, generate only those converter arguments:
-
-```bash
-scripts/make_chunk_manifest.py \
-  --build GRCh38 \
-  --chroms 1-22 \
-  --chunk-bp 50000000 \
-  --format flare-args \
-  --n-ancestries 5 \
-  --mac-threshold 512 \
-  --out-prefix-template 'hybrid/{chrom}.chunk{chunk:04d}' \
-  > flare_subset.args.tsv
-
-xargs -a flare_subset.args.tsv -n 5 -P 8 flare_subset_to_tractor_hybrid
-```
-
 Inside the tools Docker image, run the manifest generator the same way:
 
 ```bash
 docker run --rm -v "$PWD:/data" -w /data kyuan1024/tractor-hybrid-tools:latest \
-  make_chunk_manifest --build GRCh38 --chroms 1-22 --format flare \
-  --n-ancestries 5 --mac-threshold 512 > chunks.flare.tsv
+  make_chunk_manifest --build GRCh38 --chroms 1-22 --format flare-direct-args \
+  --n-ancestries 5 --mac-threshold 512 > flare_subset.region.args.tsv
 ```
 
 The packed files can be converted back to a split-biallelic VCF:

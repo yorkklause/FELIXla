@@ -1,7 +1,7 @@
 # Linux x86_64 Static Binaries
 
 These binaries are prebuilt for Linux x86_64 systems such as All of Us
-Workbench notebooks. They are fully static musl ELF executables and do not
+Workbench notebooks. They are fully static Linux ELF executables and do not
 require conda, htslib, or system development headers.
 
 Use them from a fresh checkout:
@@ -21,6 +21,18 @@ Or call a binary directly:
   3 \
   512 \
   out/chr1
+```
+
+The FLARE converter also accepts an optional final `chr:start-end` region:
+
+```bash
+./prebuilt/linux-x86_64-static/flare_subset_to_tractor_hybrid \
+  genotype.phased.vcf.gz \
+  flare.anc.vcf.gz \
+  3 \
+  512 \
+  out/chr1.chunk0001 \
+  chr1:1-50000000
 ```
 
 The RFMix MSP converter is also included:
@@ -43,7 +55,7 @@ Extract a region from an existing packed prefix:
   out/chr22.16_17mb
 ```
 
-The binaries were linked against htslib 1.23.1 with remote URL/S3/GCS support
+The binaries were linked against htslib 1.23 with remote URL/S3/GCS support
 disabled to keep them dependency-free. Use local VCF/BCF files; if your input is
 in cloud storage, localize it into the Workbench environment first.
 

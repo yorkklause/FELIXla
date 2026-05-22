@@ -5,6 +5,7 @@
 // ancestry-aware packed files for a SAIGE-TRACTOR genotype backend.
 
 #include <htslib/hts.h>
+#include <htslib/synced_bcf_reader.h>
 #include <htslib/vcf.h>
 
 #include <algorithm>
@@ -54,9 +55,19 @@ struct LaiRecord {
     AncestryState state;
 };
 
+struct Region {
+    bool active = false;
+    std::string label;
+    std::string chr;
+    int64_t start = 0;
+    int64_t end = 0;
+    int geno_rid = -1;
+};
+
 static constexpr uint32_t kMaxPackedHapId = (1u << 27) - 1u;
 static constexpr uint64_t kProgressRecordInterval = 10000;
 static constexpr int kProgressSecondsInterval = 2;
+static constexpr int64_t kMaxVcfCoordinate = 2147483647LL;
 
 [[noreturn]] static void die(const char* fmt, ...) {
     va_list args;
@@ -74,9 +85,46 @@ struct IndexRecordCount {
 };
 
 static hts_idx_t* load_any_vcf_index(const char* path) {
-    hts_idx_t* idx = hts_idx_load3(path, nullptr, HTS_FMT_CSI, HTS_IDX_SILENT_FAIL);
+    hts_idx_t* idx = bcf_index_load3(path, nullptr, HTS_IDX_SILENT_FAIL);
+    if (idx) return idx;
+
+    idx = hts_idx_load3(path, nullptr, HTS_FMT_CSI, HTS_IDX_SILENT_FAIL);
     if (idx) return idx;
     return hts_idx_load3(path, nullptr, HTS_FMT_TBI, HTS_IDX_SILENT_FAIL);
+}
+
+static int64_t parse_i64_string(const std::string& text, const char* label) {
+    if (text.empty()) die("%s is empty", label);
+
+    char* end = nullptr;
+    long long value = std::strtoll(text.c_str(), &end, 10);
+    if (end == text.c_str() || *end != '\0') {
+        die("invalid integer for %s: %s", label, text.c_str());
+    }
+    if (value <= 0) {
+        die("%s must be positive: %s", label, text.c_str());
+    }
+    return static_cast<int64_t>(value);
+}
+
+static Region parse_region_string(const std::string& region_text) {
+    size_t colon = region_text.find(':');
+    size_t dash = region_text.find('-', colon == std::string::npos ? 0 : colon + 1);
+    if (colon == std::string::npos || dash == std::string::npos || dash <= colon + 1) {
+        die("region must look like chr:start-end: %s", region_text.c_str());
+    }
+
+    Region region;
+    region.active = true;
+    region.chr = region_text.substr(0, colon);
+    region.start = parse_i64_string(region_text.substr(colon + 1, dash - colon - 1), "region start");
+    region.end = parse_i64_string(region_text.substr(dash + 1), "region end");
+    if (region.chr.empty()) die("region chromosome is empty");
+    if (region.start > region.end) {
+        die("invalid region coordinates: %s", region_text.c_str());
+    }
+    region.label = region.chr + ":" + std::to_string(region.start) + "-" + std::to_string(region.end);
+    return region;
 }
 
 static IndexRecordCount get_index_record_count(const char* path) {
@@ -114,13 +162,25 @@ static IndexRecordCount get_index_record_count(const char* path) {
 
 class ProgressReporter {
 public:
-    ProgressReporter(const char* input_label, const char* input_path, const char* converted_label)
+    ProgressReporter(
+        const char* input_label,
+        const char* input_path,
+        const char* converted_label,
+        const char* region_label = nullptr
+    )
         : input_label_(input_label),
           converted_label_(converted_label),
-          total_(get_index_record_count(input_path)),
+          total_(region_label ? IndexRecordCount{} : get_index_record_count(input_path)),
           last_report_(std::chrono::steady_clock::now()),
           stderr_is_tty_(isatty(fileno(stderr)) != 0) {
-        if (total_.available) {
+        if (region_label) {
+            std::fprintf(
+                stderr,
+                "Progress: %s region %s; reporting scanned region records only.\n",
+                input_label_,
+                region_label
+            );
+        } else if (total_.available) {
             std::fprintf(
                 stderr,
                 "Progress: %s index reports %llu records.\n",
@@ -438,7 +498,8 @@ static void write_sidecars(
     uint64_t n_haps,
     int n_words,
     int n_ancestries,
-    int rare_threshold
+    int rare_threshold,
+    const char* selected_region
 ) {
     FILE* samples_fp = open_output_or_die(samples_path, "w");
     for (int i = 0; i < n_samples; ++i) {
@@ -455,6 +516,9 @@ static void write_sidecars(
     std::fprintf(meta_fp, "rare_threshold\t%d\n", rare_threshold);
     std::fprintf(meta_fp, "source_genotype\t%s\n", geno_vcf);
     std::fprintf(meta_fp, "source_flare\t%s\n", flare_vcf);
+    if (selected_region) {
+        std::fprintf(meta_fp, "selected_region\t%s\n", selected_region);
+    }
     std::fclose(meta_fp);
 }
 
@@ -791,9 +855,104 @@ static void process_genotypes(
     }
 }
 
-static int read_next_record(htsFile* fp, bcf_hdr_t* hdr, bcf1_t* rec) {
-    int ret = bcf_read(fp, hdr, rec);
+static int read_next_record(htsFile* fp, bcf_hdr_t* hdr, bcf1_t* rec, hts_itr_t* itr = nullptr) {
+    int ret = itr ? bcf_itr_next(fp, itr, rec) : bcf_read(fp, hdr, rec);
     if (ret == 0) bcf_unpack(rec, BCF_UN_STR);
+    return ret;
+}
+
+static bool ends_with(const std::string& value, const char* suffix) {
+    size_t n = std::strlen(suffix);
+    return value.size() >= n &&
+           value.compare(value.size() - n, n, suffix) == 0;
+}
+
+static bool looks_indexable_variant_path(const char* path) {
+    std::string value(path);
+    return ends_with(value, ".bcf") ||
+           ends_with(value, ".vcf.gz") ||
+           ends_with(value, ".vcf.bgz") ||
+           ends_with(value, ".bcf.gz");
+}
+
+static bool init_synced_region_reader(
+    bcf_srs_t** out,
+    const char* path,
+    const std::string& query,
+    const char* label
+) {
+    if (!looks_indexable_variant_path(path)) {
+        std::fprintf(
+            stderr,
+            "WARNING: %s is not bgzip-compressed VCF/BCF; falling back to scan/filter.\n",
+            label
+        );
+        return false;
+    }
+
+    bcf_srs_t* reader = bcf_sr_init();
+    if (!reader) die("failed to initialize synced reader for %s", label);
+
+    if (bcf_sr_set_regions(reader, query.c_str(), 0) != 0) {
+        std::fprintf(
+            stderr,
+            "WARNING: cannot set %s region %s; falling back to scan/filter.\n",
+            label,
+            query.c_str()
+        );
+        bcf_sr_destroy(reader);
+        return false;
+    }
+
+    if (!bcf_sr_add_reader(reader, path)) {
+        std::fprintf(
+            stderr,
+            "WARNING: cannot use indexed %s reader for %s (%s); falling back to scan/filter.\n",
+            label,
+            query.c_str(),
+            bcf_sr_strerror(reader->errnum)
+        );
+        bcf_sr_destroy(reader);
+        return false;
+    }
+
+    *out = reader;
+    return true;
+}
+
+static int read_next_synced_record(bcf_srs_t* reader, bcf1_t* rec) {
+    while (bcf_sr_next_line(reader)) {
+        bcf1_t* line = bcf_sr_get_line(reader, 0);
+        if (!line) continue;
+        if (!bcf_copy(rec, line)) die("failed to copy synced VCF record");
+        bcf_unpack(rec, BCF_UN_STR);
+        return 0;
+    }
+    return -1;
+}
+
+static bool record_in_region(bcf1_t* rec, const Region& region) {
+    if (!region.active) return true;
+    if (rec->rid != region.geno_rid) return false;
+    int64_t pos = static_cast<int64_t>(rec->pos) + 1;
+    return pos >= region.start && pos <= region.end;
+}
+
+static int read_next_genotype_record(
+    htsFile* fp,
+    bcf_hdr_t* hdr,
+    bcf1_t* rec,
+    bcf_srs_t* synced_reader,
+    const Region& region
+) {
+    if (synced_reader) {
+        return read_next_synced_record(synced_reader, rec);
+    }
+
+    int ret = 0;
+    while ((ret = read_next_record(fp, hdr, rec)) == 0) {
+        if (record_in_region(rec, region)) return 0;
+    }
     return ret;
 }
 
@@ -802,6 +961,7 @@ static bool read_next_lai_record(
     bcf_hdr_t* ahdr,
     bcf_hdr_t* ghdr,
     bcf1_t* rec,
+    bcf_srs_t* synced_reader,
     int n_samples,
     int n_ancestries,
     int n_words,
@@ -812,7 +972,8 @@ static bool read_next_lai_record(
     std::unordered_set<std::string>& warned_missing_flare_contigs,
     LaiRecord& out
 ) {
-    while (read_next_record(fp, ahdr, rec) == 0) {
+    while ((synced_reader ? read_next_synced_record(synced_reader, rec)
+                          : read_next_record(fp, ahdr, rec)) == 0) {
         const char* a_chr = bcf_hdr_id2name(ahdr, rec->rid);
         int a_geno_rid = bcf_hdr_name2id(ghdr, a_chr);
 
@@ -857,16 +1018,18 @@ static void print_usage(const char* prog) {
     std::fprintf(
         stderr,
         "Usage:\n"
-        "  %s genotype.phased.vcf.gz flare.anc.vcf.gz n_ancestries rare_threshold out_prefix\n\n"
+        "  %s genotype.phased.vcf.gz flare.anc.vcf.gz n_ancestries rare_threshold out_prefix [chr:start-end]\n\n"
         "Example:\n"
-        "  %s chr1.phased.vcf.gz chr1.flare.anc.vcf.gz 3 512 chr1\n",
+        "  %s chr1.phased.vcf.gz chr1.flare.anc.vcf.gz 3 512 chr1\n"
+        "  %s chr22.phased.vcf.gz chr22.flare.anc.vcf.gz 5 512 chr22.1 chr22:1-50000000\n",
+        prog,
         prog,
         prog
     );
 }
 
 int main(int argc, char** argv) {
-    if (argc < 6) {
+    if (argc < 6 || argc > 7) {
         print_usage(argv[0]);
         return 1;
     }
@@ -876,6 +1039,10 @@ int main(int argc, char** argv) {
     int n_ancestries = std::atoi(argv[3]);
     int rare_threshold = std::atoi(argv[4]);
     const char* out_prefix = argv[5];
+    Region region;
+    if (argc == 7) {
+        region = parse_region_string(argv[6]);
+    }
 
     if (n_ancestries <= 0 || n_ancestries > 32) {
         die("n_ancestries must be in [1, 32]");
@@ -903,7 +1070,53 @@ int main(int argc, char** argv) {
         die("genotype and FLARE sample IDs must be identical and in the same order");
     }
 
-    ProgressReporter progress("genotype VCF", geno_vcf, "split variants");
+    bcf_srs_t* genotype_region_reader = nullptr;
+    bcf_srs_t* flare_region_reader = nullptr;
+
+    if (region.active) {
+        region.geno_rid = bcf_hdr_name2id(ghdr, region.chr.c_str());
+        if (region.geno_rid < 0) {
+            die("region chromosome is absent from genotype header: %s", region.chr.c_str());
+        }
+
+        std::string flare_query =
+            region.chr + ":1-" + std::to_string(kMaxVcfCoordinate);
+        bool have_genotype_region_reader = init_synced_region_reader(
+            &genotype_region_reader,
+            geno_vcf,
+            region.label,
+            "genotype VCF"
+        );
+        bool have_flare_region_reader = init_synced_region_reader(
+            &flare_region_reader,
+            flare_vcf,
+            flare_query,
+            "FLARE VCF"
+        );
+
+        if (!have_genotype_region_reader || !have_flare_region_reader) {
+            if (genotype_region_reader) {
+                bcf_sr_destroy(genotype_region_reader);
+                genotype_region_reader = nullptr;
+            }
+            if (flare_region_reader) {
+                bcf_sr_destroy(flare_region_reader);
+                flare_region_reader = nullptr;
+            }
+            std::fprintf(
+                stderr,
+                "WARNING: indexed region reader unavailable; scanning inputs and filtering %s.\n",
+                region.label.c_str()
+            );
+        }
+    }
+
+    ProgressReporter progress(
+        "genotype VCF",
+        geno_vcf,
+        "split variants",
+        region.active ? region.label.c_str() : nullptr
+    );
 
     int n_samples = bcf_hdr_nsamples(ghdr);
     if (n_samples <= 0) {
@@ -962,7 +1175,8 @@ int main(int argc, char** argv) {
         n_haps,
         n_words,
         n_ancestries,
-        rare_threshold
+        rare_threshold,
+        region.active ? region.label.c_str() : nullptr
     );
 
     bcf1_t* grec = bcf_init();
@@ -990,6 +1204,7 @@ int main(int argc, char** argv) {
         ahdr,
         ghdr,
         arec,
+        flare_region_reader,
         n_samples,
         n_ancestries,
         n_words,
@@ -1003,7 +1218,12 @@ int main(int argc, char** argv) {
     int last_flare_geno_rid = -1;
     int64_t last_flare_pos = 0;
 
-    while (read_next_record(gfp, ghdr, grec) == 0) {
+    AncestryState pre_region_state;
+    int pre_region_rid = -1;
+    std::string pre_region_chr;
+    bool has_pre_region_state = false;
+
+    while (read_next_genotype_record(gfp, ghdr, grec, genotype_region_reader, region) == 0) {
         progress.record_scanned();
 
         const char* g_chr = bcf_hdr_id2name(ghdr, grec->rid);
@@ -1026,6 +1246,7 @@ int main(int argc, char** argv) {
                 ahdr,
                 ghdr,
                 arec,
+                flare_region_reader,
                 n_samples,
                 n_ancestries,
                 n_words,
@@ -1046,6 +1267,7 @@ int main(int argc, char** argv) {
                     ahdr,
                     ghdr,
                     arec,
+                    flare_region_reader,
                     n_samples,
                     n_ancestries,
                     n_words,
@@ -1074,6 +1296,55 @@ int main(int argc, char** argv) {
                 interval_start = last_flare_pos + 1;
             }
 
+            int64_t interval_end = interval_record.pos;
+            int64_t output_start = interval_start;
+            int64_t output_end = interval_end;
+            bool emit_interval = true;
+
+            if (region.active) {
+                if (interval_record.geno_rid != region.geno_rid) {
+                    emit_interval = false;
+                } else if (interval_end < region.start) {
+                    pre_region_state = interval_record.state;
+                    pre_region_rid = interval_record.geno_rid;
+                    pre_region_chr = interval_record.chr;
+                    has_pre_region_state = true;
+                    emit_interval = false;
+                } else if (interval_start > region.end) {
+                    emit_interval = false;
+                } else {
+                    output_start = std::max(interval_start, region.start);
+                    output_end = std::min(interval_end, region.end);
+                    emit_interval = output_start <= output_end;
+                }
+            }
+
+            if (emit_interval) {
+                update_open_block_from_flare(
+                    anc_fp,
+                    anc_bin.c_str(),
+                    anc_mks_fp,
+                    anc_mks.c_str(),
+                    anc_idx_fp,
+                    block,
+                    n_blocks_written,
+                    n_ancestries,
+                    n_words,
+                    interval_record.geno_rid,
+                    interval_record.chr.c_str(),
+                    output_start,
+                    output_end,
+                    interval_record.state
+                );
+            }
+
+            last_flare_geno_rid = interval_record.geno_rid;
+            last_flare_pos = interval_record.pos;
+        }
+
+        if (region.active && !block.active && !has_lai_record &&
+            has_pre_region_state && pre_region_rid == grec->rid) {
+            AncestryState state = pre_region_state;
             update_open_block_from_flare(
                 anc_fp,
                 anc_bin.c_str(),
@@ -1084,15 +1355,12 @@ int main(int argc, char** argv) {
                 n_blocks_written,
                 n_ancestries,
                 n_words,
-                interval_record.geno_rid,
-                interval_record.chr.c_str(),
-                interval_start,
-                interval_record.pos,
-                interval_record.state
+                pre_region_rid,
+                pre_region_chr.c_str(),
+                region.start,
+                region.end,
+                state
             );
-
-            last_flare_geno_rid = interval_record.geno_rid;
-            last_flare_pos = interval_record.pos;
         }
 
         if (block.active && block.geno_rid == grec->rid && g_pos > block.end_pos &&
@@ -1253,6 +1521,8 @@ int main(int argc, char** argv) {
 
     bcf_destroy(grec);
     bcf_destroy(arec);
+    if (genotype_region_reader) bcf_sr_destroy(genotype_region_reader);
+    if (flare_region_reader) bcf_sr_destroy(flare_region_reader);
     bcf_hdr_destroy(ghdr);
     bcf_hdr_destroy(ahdr);
     bcf_close(gfp);
