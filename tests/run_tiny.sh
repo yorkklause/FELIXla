@@ -33,6 +33,39 @@ grep -q "VCF records sampled:" "$OUT_DIR/threshold.sampled.txt"
 grep -q "Sampling stride:      2" "$OUT_DIR/threshold.sampled.txt"
 grep -q "Recommended threshold:" "$OUT_DIR/threshold.sampled.txt"
 
+printf "chr1\t250\nchr2\t150\n" >"$OUT_DIR/chrom.sizes"
+"$ROOT_DIR/scripts/make_chunk_manifest.py" \
+  --chrom-sizes "$OUT_DIR/chrom.sizes" \
+  --chroms 1-2 \
+  --chunk-bp 100 \
+  --out-prefix-template "$OUT_DIR/{chrom}.chunk{chunk:02d}" \
+  >"$OUT_DIR/chunks.tsv"
+
+python3 - "$OUT_DIR/chunks.tsv" "$OUT_DIR" <<'PY'
+import pathlib
+import sys
+
+manifest = pathlib.Path(sys.argv[1])
+out_dir = pathlib.Path(sys.argv[2])
+rows = [line.rstrip().split("\t") for line in manifest.read_text().splitlines()]
+prefixes = [pathlib.Path(row[3]) for row in rows]
+trimmed = [row[:3] for row in rows]
+assert trimmed == [
+    ["chr1", "1", "100"],
+    ["chr1", "101", "200"],
+    ["chr1", "201", "250"],
+    ["chr2", "1", "100"],
+    ["chr2", "101", "150"],
+], rows
+assert prefixes == [
+    out_dir / "chr1.chunk01",
+    out_dir / "chr1.chunk02",
+    out_dir / "chr1.chunk03",
+    out_dir / "chr2.chunk01",
+    out_dir / "chr2.chunk02",
+], rows
+PY
+
 "$BIN_DIR/compare_vcfs" \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   "$OUT_DIR/tiny.roundtrip.vcf.gz" \

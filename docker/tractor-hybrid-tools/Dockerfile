@@ -7,8 +7,9 @@ LABEL org.opencontainers.image.title="tractor-hybrid-tools"
 LABEL org.opencontainers.image.description="Standalone tractor_hybrid conversion and validation utilities"
 LABEL org.opencontainers.image.source="https://github.com/yorkklause/tractor-hybrid-tools"
 
-RUN apk add --no-cache bash
+RUN apk add --no-cache bash python3
 
+COPY scripts/make_chunk_manifest.py /usr/local/bin/make_chunk_manifest.py
 COPY prebuilt/linux-x86_64-static/compare_vcfs /usr/local/bin/compare_vcfs
 COPY prebuilt/linux-x86_64-static/estimate_mac_threshold /usr/local/bin/estimate_mac_threshold
 COPY prebuilt/linux-x86_64-static/flare_subset_to_tractor_hybrid /usr/local/bin/flare_subset_to_tractor_hybrid
@@ -18,6 +19,9 @@ COPY prebuilt/linux-x86_64-static/tractor_hybrid_extract_region /usr/local/bin/t
 COPY prebuilt/linux-x86_64-static/tractor_hybrid_to_vcf /usr/local/bin/tractor_hybrid_to_vcf
 COPY prebuilt/linux-x86_64-static/README.md /opt/tractor-hybrid-tools/README.md
 COPY prebuilt/linux-x86_64-static/SHA256SUMS /opt/tractor-hybrid-tools/SHA256SUMS
+
+RUN chmod +x /usr/local/bin/make_chunk_manifest.py && \
+    ln -s /usr/local/bin/make_chunk_manifest.py /usr/local/bin/make_chunk_manifest
 
 WORKDIR /data
 

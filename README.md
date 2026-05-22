@@ -36,6 +36,8 @@ docker run --rm -v "$PWD:/data" -w /data kyuan1024/tractor-hybrid-tools:latest \
   rfmix_msp_to_tractor_hybrid genotype.phased.vcf.gz rfmix.msp.tsv.gz 5 512 out/chr22
 ```
 
+The image also includes `make_chunk_manifest` for creating split lists.
+
 The forward converters and MAC threshold estimator print progress to stderr.
 When the input has a usable `.csi` or `.tbi` index with record statistics, the
 tool reports `scanned records / total records` and a percentage; otherwise it
@@ -64,6 +66,69 @@ Do not define adjacent chunks as `chr1:1-50000000` and
 `chr1:50000000-100000000`, because a variant with `POS=50000000` would be
 included in both. This chunk convention is separate from FLARE LAI intervals,
 which remain `(previous_lai_pos, current_lai_pos]`.
+
+Generate a chunk manifest for 22 chromosomes:
+
+```bash
+scripts/make_chunk_manifest.py \
+  --build GRCh38 \
+  --chroms 1-22 \
+  --chunk-bp 50000000 \
+  --out-prefix-template 'hybrid/{chrom}.chunk{chunk:04d}' \
+  > chunks.tsv
+```
+
+The default manifest columns are:
+
+```text
+chrom    start    end    out_prefix
+```
+
+You can also read chromosome lengths from VCF headers or a two-column chrom
+sizes file:
+
+```bash
+scripts/make_chunk_manifest.py \
+  --vcf chr1.phased.vcf.gz \
+  --vcf chr2.phased.vcf.gz \
+  --chroms 1-22 \
+  --format tsv5 \
+  --out-prefix-template 'hybrid/{chrom}.chunk{chunk:04d}' \
+  > chunks.tsv
+```
+
+`--format tsv5` adds a ready-to-use `chr:start-end` region column:
+`chrom start end region out_prefix`.
+
+For 22 per-chromosome phased VCF plus FLARE VCF inputs, one practical pattern is
+to generate a chunk list with a region column, then use each row directly for
+splitting and conversion:
+
+```bash
+scripts/make_chunk_manifest.py \
+  --build GRCh38 \
+  --chroms 1-22 \
+  --chunk-bp 50000000 \
+  --format tsv5 \
+  --out-prefix-template 'hybrid/{chrom}.chunk{chunk:04d}' \
+  > chunks.tsv
+
+while IFS=$'\t' read -r chrom start end region out_prefix; do
+  mkdir -p "$(dirname "$out_prefix")"
+  bcftools view -r "$region" -Oz -o "${out_prefix}.phase.vcf.gz" "phase/${chrom}.phased.vcf.gz"
+  bcftools view -r "$region" -Oz -o "${out_prefix}.flare.vcf.gz" "flare/${chrom}.flare.vcf.gz"
+  tabix -p vcf "${out_prefix}.phase.vcf.gz"
+  tabix -p vcf "${out_prefix}.flare.vcf.gz"
+  flare_subset_to_tractor_hybrid "${out_prefix}.phase.vcf.gz" "${out_prefix}.flare.vcf.gz" 5 512 "$out_prefix"
+done < chunks.tsv
+```
+
+Inside the tools Docker image, run the manifest generator the same way:
+
+```bash
+docker run --rm -v "$PWD:/data" -w /data kyuan1024/tractor-hybrid-tools:latest \
+  make_chunk_manifest --build GRCh38 --chroms 1-22 --format tsv5 > chunks.tsv
+```
 
 The packed files can be converted back to a split-biallelic VCF:
 
