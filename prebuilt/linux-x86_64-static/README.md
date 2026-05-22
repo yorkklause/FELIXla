@@ -34,6 +34,15 @@ The RFMix MSP converter is also included:
   out/chr22
 ```
 
+Extract a region from an existing packed prefix:
+
+```bash
+./prebuilt/linux-x86_64-static/tractor_hybrid_extract_region \
+  out/chr22 \
+  chr22:16000000-17000000 \
+  out/chr22.16_17mb
+```
+
 The binaries were linked against htslib 1.23.1 with remote URL/S3/GCS support
 disabled to keep them dependency-free. Use local VCF/BCF files; if your input is
 in cloud storage, localize it into the Workbench environment first.

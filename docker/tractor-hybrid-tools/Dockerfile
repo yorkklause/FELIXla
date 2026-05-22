@@ -14,6 +14,7 @@ COPY prebuilt/linux-x86_64-static/estimate_mac_threshold /usr/local/bin/estimate
 COPY prebuilt/linux-x86_64-static/flare_subset_to_tractor_hybrid /usr/local/bin/flare_subset_to_tractor_hybrid
 COPY prebuilt/linux-x86_64-static/rfmix_msp_to_tractor_hybrid /usr/local/bin/rfmix_msp_to_tractor_hybrid
 COPY prebuilt/linux-x86_64-static/tractor_dosage_vcf_to_hybrid /usr/local/bin/tractor_dosage_vcf_to_hybrid
+COPY prebuilt/linux-x86_64-static/tractor_hybrid_extract_region /usr/local/bin/tractor_hybrid_extract_region
 COPY prebuilt/linux-x86_64-static/tractor_hybrid_to_vcf /usr/local/bin/tractor_hybrid_to_vcf
 COPY prebuilt/linux-x86_64-static/README.md /opt/tractor-hybrid-tools/README.md
 COPY prebuilt/linux-x86_64-static/SHA256SUMS /opt/tractor-hybrid-tools/SHA256SUMS

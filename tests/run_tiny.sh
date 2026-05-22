@@ -41,6 +41,15 @@ grep -q "Recommended threshold:" "$OUT_DIR/threshold.sampled.txt"
 
 grep -q "Differences:             0" "$OUT_DIR/compare.txt"
 
+"$BIN_DIR/tractor_hybrid_extract_region" \
+  "$OUT_DIR/tiny" \
+  chr1:100-160 \
+  "$OUT_DIR/tiny.chr1_100_160" >/dev/null
+
+"$BIN_DIR/tractor_hybrid_to_vcf" \
+  "$OUT_DIR/tiny.chr1_100_160" \
+  "$OUT_DIR/tiny.chr1_100_160.roundtrip.vcf.gz" >/dev/null
+
 "$BIN_DIR/rfmix_msp_to_tractor_hybrid" \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   "$ROOT_DIR/testdata/tiny.rfmix.msp.tsv" \
@@ -329,6 +338,34 @@ assert [(r[0], r[1], r[2], r[3], r[4], r[9], r[10]) for r in vcf_records] == [
     ("chr2", "100", "chr2var_A_T", "A", "T", "0|0", "1|0"),
     ("chr2", "150", "tail2_A_T", "A", "T", "0|1", "0|0"),
 ], vcf_records
+PY
+
+python3 - "$OUT_DIR/tiny.chr1_100_160" <<'PY'
+import gzip
+import pathlib
+import struct
+import sys
+
+prefix = pathlib.Path(sys.argv[1])
+meta = pathlib.Path(str(prefix) + ".meta").read_text()
+assert "extracted_region\tchr1:100-160" in meta, meta
+assert "source_hybrid_prefix" in meta, meta
+
+with gzip.open(str(prefix) + ".roundtrip.vcf.gz", "rt") as fh:
+    rows = [line.rstrip().split("\t") for line in fh if not line.startswith("#")]
+assert [(r[0], r[1], r[2], r[3], r[4], r[9], r[10]) for r in rows] == [
+    ("chr1", "100", "multi_A_C", "A", "C", "0|1", "0|0"),
+    ("chr1", "100", "multi_A_G", "A", "G", "0|0", "1|0"),
+    ("chr1", "150", "rare_A_T", "A", "T", "1|0", "0|0"),
+    ("chr1", "160", "common_A_T", "A", "T", "1|1", "0|0"),
+], rows
+
+rare_bin = pathlib.Path(str(prefix) + ".rare.carrier.bin").read_bytes()
+records = [
+    struct.unpack("<II", rare_bin[i:i + 8])
+    for i in range(0, len(rare_bin), 8)
+]
+assert [r[0] for r in records] == [0, 1, 2], records
 PY
 
 python3 - "$OUT_DIR/dosage" <<'PY'

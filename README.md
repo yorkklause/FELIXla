@@ -74,6 +74,21 @@ bin/tractor_hybrid_to_vcf out/chr1 out/chr1.roundtrip.vcf.gz
 The reverse converter writes BGZF-compressed VCF and creates a tabix index at
 `out/chr1.roundtrip.vcf.gz.tbi`.
 
+Extract a 1-based inclusive region from an existing packed hybrid prefix into a
+new packed hybrid prefix:
+
+```bash
+bin/tractor_hybrid_extract_region \
+  out/chr22 \
+  chr22:16000000-17000000 \
+  out/chr22.16_17mb
+```
+
+The extractor rewrites marker indexes and payload offsets, renumbers selected
+split variants from zero, and keeps only ancestry blocks overlapping the
+requested region. It also accepts split arguments:
+`bin/tractor_hybrid_extract_region in_prefix chr22 16000000 17000000 out_prefix`.
+
 Convert a phased genotype VCF/BCF plus an RFMix `.msp.tsv` local ancestry file:
 
 ```bash
@@ -173,6 +188,7 @@ and their source code in `/scripts/src`:
 ```bash
 /scripts/bin/flare_subset_to_tractor_hybrid
 /scripts/bin/tractor_hybrid_to_vcf
+/scripts/bin/tractor_hybrid_extract_region
 /scripts/bin/tractor_dosage_vcf_to_hybrid
 /scripts/bin/rfmix_msp_to_tractor_hybrid
 /scripts/bin/estimate_mac_threshold
@@ -386,6 +402,7 @@ Capacity limits:
 Roundtrip scope:
 
 - `tractor_hybrid_to_vcf` reconstructs a phased, split-biallelic BGZF-compressed VCF from the packed genotype bits/carriers and writes a tabix `.tbi` index.
+- `tractor_hybrid_extract_region` writes a new packed prefix for variants with `start <= POS <= end`, renumbering marker indexes and clipping overlapping ancestry block metadata to the requested region.
 - This verifies that split ALT haplotypes survive the packed representation.
 - It does not restore original unsplit multi-allelic rows.
 - Missing genotype and LAI calls are rejected by the forward converter, so they do not appear in roundtrip output.
