@@ -861,6 +861,64 @@ static int read_next_record(htsFile* fp, bcf_hdr_t* hdr, bcf1_t* rec, hts_itr_t*
     return ret;
 }
 
+static bool add_contig_to_header_if_missing(
+    bcf_hdr_t* hdr,
+    const std::string& contig,
+    const char* header_label
+) {
+    if (contig.empty()) return false;
+    if (bcf_hdr_name2id(hdr, contig.c_str()) >= 0) return false;
+
+    std::string line = "##contig=<ID=" + contig + ">";
+    if (bcf_hdr_append(hdr, line.c_str()) != 0 || bcf_hdr_sync(hdr) != 0) {
+        die(
+            "failed to add inferred contig to %s header: %s",
+            header_label,
+            contig.c_str()
+        );
+    }
+    return true;
+}
+
+static int infer_genotype_contigs_from_records(
+    const char* geno_vcf,
+    bcf_hdr_t* ghdr
+) {
+    htsFile* fp = bcf_open(geno_vcf, "r");
+    if (!fp) die("cannot reopen genotype VCF for contig inference: %s", geno_vcf);
+
+    bcf_hdr_t* scan_hdr = bcf_hdr_read(fp);
+    if (!scan_hdr) die("cannot read genotype header for contig inference");
+
+    bcf1_t* rec = bcf_init();
+    if (!rec) die("failed to allocate VCF record for contig inference");
+
+    std::unordered_set<std::string> seen;
+    int added = 0;
+    int ret = 0;
+    while ((ret = read_next_record(fp, scan_hdr, rec)) == 0) {
+        const char* chr = bcf_hdr_id2name(scan_hdr, rec->rid);
+        if (!chr || !*chr) {
+            die("cannot resolve genotype chromosome during contig inference");
+        }
+
+        std::string contig(chr);
+        if (seen.insert(contig).second &&
+            add_contig_to_header_if_missing(ghdr, contig, "genotype")) {
+            ++added;
+        }
+    }
+
+    if (ret < -1) {
+        die("error while scanning genotype VCF for contig inference");
+    }
+
+    bcf_destroy(rec);
+    bcf_hdr_destroy(scan_hdr);
+    bcf_close(fp);
+    return added;
+}
+
 static bool ends_with(const std::string& value, const char* suffix) {
     size_t n = std::strlen(suffix);
     return value.size() >= n &&
@@ -1070,13 +1128,35 @@ int main(int argc, char** argv) {
         die("genotype and FLARE sample IDs must be identical and in the same order");
     }
 
+    bool scanned_genotype_contigs = false;
+    if (ghdr->n[BCF_DT_CTG] == 0) {
+        std::fprintf(
+            stderr,
+            "WARNING: genotype VCF header has no ##contig lines; inferring contigs by scanning records.\n"
+        );
+        infer_genotype_contigs_from_records(geno_vcf, ghdr);
+        scanned_genotype_contigs = true;
+    }
+
     bcf_srs_t* genotype_region_reader = nullptr;
     bcf_srs_t* flare_region_reader = nullptr;
 
     if (region.active) {
         region.geno_rid = bcf_hdr_name2id(ghdr, region.chr.c_str());
         if (region.geno_rid < 0) {
-            die("region chromosome is absent from genotype header: %s", region.chr.c_str());
+            if (!scanned_genotype_contigs) {
+                std::fprintf(
+                    stderr,
+                    "WARNING: region chromosome is absent from genotype header; scanning records for missing contigs.\n"
+                );
+                infer_genotype_contigs_from_records(geno_vcf, ghdr);
+                scanned_genotype_contigs = true;
+                region.geno_rid = bcf_hdr_name2id(ghdr, region.chr.c_str());
+            }
+
+            if (region.geno_rid < 0) {
+                die("region chromosome is absent from genotype records/header: %s", region.chr.c_str());
+            }
         }
 
         std::string flare_query =

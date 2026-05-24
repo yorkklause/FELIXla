@@ -36,7 +36,6 @@ Use the prebuilt Linux x86_64 binaries:
 ```bash
 export PATH="$PWD/prebuilt/linux-x86_64-static:$PATH"
 flare_subset_to_tractor_hybrid genotype.phased.vcf.gz flare.anc.vcf.gz 5 512 hybrid/chr22
-estimate_mac_threshold genotype.phased.vcf.gz
 ```
 
 Use the tools-only Docker image:
@@ -70,7 +69,8 @@ Arguments are:
 2. FLARE local ancestry VCF/BCF with scalar integer `FORMAT/AN1` and
    `FORMAT/AN2`.
 3. Number of ancestry labels, max `32`.
-4. MAC threshold: variants with `MAC <= threshold` are stored sparse.
+4. MAC threshold: variants with `MAC <= threshold` are stored sparse. See
+   [Choosing Mac Threshold](#choosing-mac-threshold).
 5. Output prefix.
 6. Optional `chr:start-end` region.
 
@@ -202,26 +202,28 @@ The extractor also accepts split arguments:
 tractor_hybrid_extract_region in_prefix chr22 16000000 17000000 out_prefix
 ```
 
-### MAC Threshold Estimation
+### Choosing Mac Threshold
 
-```bash
-estimate_mac_threshold genotype.phased.vcf.gz
-estimate_mac_threshold genotype.phased.vcf.gz --sample-every 100
+For storage-optimal sparse/dense packing, the threshold does not require
+scanning the VCF. It depends only on the sample count:
+
+```text
+mac_threshold = ceil(n_samples / 32)
 ```
 
-The estimator reads phased diploid GT, splits multi-allelic sites by ALT, and
-builds a MAC distribution. Dense payload per split variant is
-`8 * ceil(2 * n_samples / 64)` bytes; sparse payload is `8 * MAC` bytes.
-
-By default the recommendation optimizes storage bytes only. You can add a
-simple query-cost term:
+Equivalent integer shell formula:
 
 ```bash
-estimate_mac_threshold genotype.phased.vcf.gz \
-  --query-weight 1 \
-  --dense-word-cost 1 \
-  --sparse-carrier-cost 16
+n_samples=100000
+mac_threshold=$(( (n_samples + 31) / 32 ))
+echo "$mac_threshold"
 ```
+
+Reason: dense payload per split variant is
+`8 * ceil(2 * n_samples / 64)` bytes, while sparse payload is `8 * MAC` bytes.
+The break-even point is therefore `ceil(n_samples / 32)`. Scanning a VCF can
+estimate how many variants fall below that threshold, but it is not needed to
+choose the threshold itself.
 
 ### VCF Comparison
 
@@ -407,10 +409,9 @@ they do not appear in roundtrip output.
 
 ## Progress And Timing
 
-Forward converters and `estimate_mac_threshold` print progress to stderr. When
-an input `.csi` or `.tbi` index exposes record statistics, progress includes
-`scanned records / total records` and a percentage; otherwise it reports scanned
-records only.
+Forward converters print progress to stderr. When an input `.csi` or `.tbi`
+index exposes record statistics, progress includes `scanned records / total
+records` and a percentage; otherwise it reports scanned records only.
 
 The patched SAIGE-TRACTOR step2 scripts print chunk-level timing diagnostics
 for `tractor_hybrid` input. These diagnostics are instrumentation only and do

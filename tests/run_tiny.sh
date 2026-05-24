@@ -18,21 +18,6 @@ trap 'rm -rf "$OUT_DIR"' EXIT
   "$OUT_DIR/tiny" \
   "$OUT_DIR/tiny.roundtrip.vcf.gz" >/dev/null
 
-"$BIN_DIR/estimate_mac_threshold" \
-  "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
-  >"$OUT_DIR/threshold.txt"
-
-grep -q "Recommended threshold:" "$OUT_DIR/threshold.txt"
-
-"$BIN_DIR/estimate_mac_threshold" \
-  "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
-  --sample-every 2 \
-  >"$OUT_DIR/threshold.sampled.txt"
-
-grep -q "VCF records sampled:" "$OUT_DIR/threshold.sampled.txt"
-grep -q "Sampling stride:      2" "$OUT_DIR/threshold.sampled.txt"
-grep -q "Recommended threshold:" "$OUT_DIR/threshold.sampled.txt"
-
 cat >"$OUT_DIR/shapeit.chunks.txt" <<'EOF'
 0	chr1	chr1:1-180	chr1:1-150	4.0	150	10	3
 1	chr1	chr1:120-260	chr1:151-250	4.0	100	10	3
@@ -112,6 +97,50 @@ grep -q $'selected_region\tchr1:100-160' "$OUT_DIR/tiny.direct_region.meta"
   >"$OUT_DIR/direct_region.compare.txt"
 
 grep -q "Differences:             0" "$OUT_DIR/direct_region.compare.txt"
+
+grep -v '^##contig=' "$ROOT_DIR/testdata/tiny.genotypes.vcf" >"$OUT_DIR/tiny.genotypes.no_contig.vcf"
+grep -v '^##contig=' "$ROOT_DIR/testdata/tiny.flare.vcf" >"$OUT_DIR/tiny.flare.no_contig.vcf"
+
+"$BIN_DIR/flare_subset_to_tractor_hybrid" \
+  "$OUT_DIR/tiny.genotypes.no_contig.vcf" \
+  "$OUT_DIR/tiny.flare.no_contig.vcf" \
+  2 \
+  1 \
+  "$OUT_DIR/tiny.no_contig" >/dev/null
+
+"$BIN_DIR/tractor_hybrid_to_vcf" \
+  "$OUT_DIR/tiny.no_contig" \
+  "$OUT_DIR/tiny.no_contig.roundtrip.vcf.gz" >/dev/null
+
+"$BIN_DIR/compare_vcfs" \
+  "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
+  "$OUT_DIR/tiny.no_contig.roundtrip.vcf.gz" \
+  --split-multiallelic \
+  >"$OUT_DIR/no_contig.compare.txt"
+
+grep -q "Differences:             0" "$OUT_DIR/no_contig.compare.txt"
+
+"$BIN_DIR/flare_subset_to_tractor_hybrid" \
+  "$OUT_DIR/tiny.genotypes.no_contig.vcf" \
+  "$OUT_DIR/tiny.flare.no_contig.vcf" \
+  2 \
+  1 \
+  "$OUT_DIR/tiny.no_contig_region" \
+  chr1:100-160 >/dev/null
+
+grep -q $'selected_region\tchr1:100-160' "$OUT_DIR/tiny.no_contig_region.meta"
+
+"$BIN_DIR/tractor_hybrid_to_vcf" \
+  "$OUT_DIR/tiny.no_contig_region" \
+  "$OUT_DIR/tiny.no_contig_region.roundtrip.vcf.gz" >/dev/null
+
+"$BIN_DIR/compare_vcfs" \
+  "$OUT_DIR/tiny.direct_region.roundtrip.vcf.gz" \
+  "$OUT_DIR/tiny.no_contig_region.roundtrip.vcf.gz" \
+  --split-multiallelic \
+  >"$OUT_DIR/no_contig_region.compare.txt"
+
+grep -q "Differences:             0" "$OUT_DIR/no_contig_region.compare.txt"
 
 "$BIN_DIR/rfmix_msp_to_tractor_hybrid" \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \

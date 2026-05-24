@@ -9,7 +9,7 @@ Use them from a fresh checkout:
 ```bash
 cd tractor-hybrid-tools
 export PATH="$PWD/prebuilt/linux-x86_64-static:$PATH"
-estimate_mac_threshold testdata/tiny.genotypes.vcf
+flare_subset_to_tractor_hybrid genotype.phased.vcf.gz flare.anc.vcf.gz 5 512 out/chr1
 ```
 
 Or call a binary directly:
@@ -33,6 +33,15 @@ The FLARE converter also accepts an optional final `chr:start-end` region:
   512 \
   out/chr1.chunk0001 \
   chr1:1-50000000
+```
+
+For storage-optimal sparse/dense packing, choose `mac_threshold` from the
+sample count:
+
+```bash
+n_samples=100000
+mac_threshold=$(( (n_samples + 31) / 32 ))
+echo "$mac_threshold"
 ```
 
 For chunked conversion, this repo includes SHAPEIT5-style GRCh38 4 cM chunk
