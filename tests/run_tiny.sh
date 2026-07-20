@@ -18,17 +18,184 @@ trap 'rm -rf "$OUT_DIR"' EXIT
   "$OUT_DIR/tiny" \
   "$OUT_DIR/tiny.roundtrip.vcf.gz" >/dev/null
 
+"$BIN_DIR/felixla" \
+  --felixla \
+  "$OUT_DIR/tiny" \
+  --query chr1:160 \
+  --ref A \
+  --alt T \
+  >"$OUT_DIR/tiny.common.query.tsv"
+
+"$BIN_DIR/felixla" \
+  --felixla \
+  "$OUT_DIR/tiny" \
+  --query chr1:100 \
+  --ref A \
+  --alt G \
+  --nonzero-only \
+  >"$OUT_DIR/tiny.rare.query.tsv"
+
+python3 - "$OUT_DIR/tiny.common.query.tsv" "$OUT_DIR/tiny.rare.query.tsv" <<'PY'
+import pathlib
+import sys
+
+common = pathlib.Path(sys.argv[1]).read_text().strip().splitlines()
+rare = pathlib.Path(sys.argv[2]).read_text().strip().splitlines()
+header = "global_variant_index\tchr\tpos\tid\tref\talt\tsample\tDSALL\tDS1\tDS2"
+assert common == [
+    header,
+    "4\tchr1\t160\tcommon_A_T\tA\tT\ts1\t2\t1\t1",
+    "4\tchr1\t160\tcommon_A_T\tA\tT\ts2\t0\t0\t0",
+], common
+assert rare == [
+    header,
+    "2\tchr1\t100\tmulti_A_G\tA\tG\ts2\t1\t0\t1",
+], rare
+PY
+
+"$BIN_DIR/felixla" --version >"$OUT_DIR/felixla.version.txt"
+grep -q "FELIXla CLI v0" "$OUT_DIR/felixla.version.txt"
+
+"$BIN_DIR/felixla" --recommend-mac-threshold --n-samples 2 >"$OUT_DIR/mac_threshold.tsv"
+grep -q $'recommended_mac_threshold\t1' "$OUT_DIR/mac_threshold.tsv"
+
+"$BIN_DIR/felixla" \
+  --phase-vcf \
+  "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
+  --flare-vcf \
+  "$ROOT_DIR/testdata/tiny.flare.vcf" \
+  --n-ancestries 2 \
+  --make-felixla \
+  --out \
+  "$OUT_DIR/tiny.felixla_cli" >/dev/null
+
+"$BIN_DIR/felixla" \
+  --felixla \
+  "$OUT_DIR/tiny.felixla_cli" \
+  --export vcf \
+  --out \
+  "$OUT_DIR/tiny.felixla_cli.roundtrip.vcf.gz" >/dev/null
+
+"$BIN_DIR/felixla" \
+  --compare-vcfs \
+  "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
+  "$OUT_DIR/tiny.felixla_cli.roundtrip.vcf.gz" \
+  --split-multiallelic \
+  --out "$OUT_DIR/felixla_cli.compare.txt"
+
+grep -q "Differences:             0" "$OUT_DIR/felixla_cli.compare.txt"
+
+cat >"$OUT_DIR/keep.samples" <<'EOF'
+s2
+EOF
+
+cat >"$OUT_DIR/extract.sites.vcf" <<'EOF'
+##fileformat=VCFv4.2
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	ignored_sample
+chr1	100	multi	A	C,G	.	PASS	.	GT	0|1
+chr1	160	common	A	T	.	PASS	.	GT	0|0
+EOF
+
+python3 - "$OUT_DIR/extract.sites.vcf" "$OUT_DIR/extract.sites.vcf.gz" <<'PY'
+import gzip
+import pathlib
+import sys
+
+gzip.open(sys.argv[2], "wb").write(pathlib.Path(sys.argv[1]).read_bytes())
+PY
+
+"$BIN_DIR/felixla" \
+  --phase-vcf \
+  "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
+  --flare-vcf \
+  "$ROOT_DIR/testdata/tiny.flare.vcf" \
+  --n-ancestries 2 \
+  --keep "$OUT_DIR/keep.samples" \
+  --extract "$OUT_DIR/extract.sites.vcf.gz" \
+  --make-felixla \
+  --out \
+  "$OUT_DIR/tiny.keep_extract" >/dev/null
+
+"$BIN_DIR/tractor_hybrid_to_vcf" \
+  "$OUT_DIR/tiny.keep_extract" \
+  "$OUT_DIR/tiny.keep_extract.roundtrip.vcf.gz" >/dev/null
+
+python3 - "$OUT_DIR/tiny.keep_extract" <<'PY'
+import gzip
+import pathlib
+import sys
+
+prefix = pathlib.Path(sys.argv[1])
+meta = pathlib.Path(str(prefix) + ".meta").read_text()
+samples = pathlib.Path(str(prefix) + ".samples").read_text().strip().splitlines()
+assert "n_samples\t1" in meta, meta
+assert "keep_samples\t" in meta, meta
+assert "extract_sites\t" in meta, meta
+assert samples == ["s2"], samples
+
+with gzip.open(str(prefix) + ".roundtrip.vcf.gz", "rt") as fh:
+    lines = [line.rstrip() for line in fh]
+header = [line for line in lines if line.startswith("#CHROM")][0].split("\t")
+assert header[9:] == ["s2"], header
+rows = [line.split("\t") for line in lines if line and not line.startswith("#")]
+assert [(r[0], r[1], r[2], r[3], r[4], r[9]) for r in rows] == [
+    ("chr1", "100", "multi_A_C", "A", "C", "0|0"),
+    ("chr1", "100", "multi_A_G", "A", "G", "1|0"),
+    ("chr1", "160", "common_A_T", "A", "T", "0|0"),
+], rows
+PY
+
+cat >"$OUT_DIR/extract.bad_ref.vcf" <<'EOF'
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chr1	100	multi	T	G	.	PASS	.
+EOF
+
+if "$BIN_DIR/felixla" \
+  --phase-vcf \
+  "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
+  --flare-vcf \
+  "$ROOT_DIR/testdata/tiny.flare.vcf" \
+  --n-ancestries 2 \
+  --extract "$OUT_DIR/extract.bad_ref.vcf" \
+  --make-felixla \
+  --out \
+  "$OUT_DIR/tiny.bad_extract_ref" >/dev/null 2>"$OUT_DIR/tiny.bad_extract_ref.err"; then
+  echo "expected bad REF in --extract fixture to fail" >&2
+  exit 1
+fi
+
+grep -q "REF mismatch" "$OUT_DIR/tiny.bad_extract_ref.err"
+
+"$BIN_DIR/felixla" \
+  --felixla \
+  "$OUT_DIR/tiny.felixla_cli" \
+  --region chr1:100-160 \
+  --make-felixla \
+  --out \
+  "$OUT_DIR/tiny.felixla_cli.chr1_100_160" >/dev/null
+
+"$BIN_DIR/felixla" \
+  --vcf \
+  "$ROOT_DIR/testdata/tiny.flare.vcf" \
+  --admixture \
+  --progress-every 0 \
+  >"$OUT_DIR/felixla_admixture.tsv" \
+  2>"$OUT_DIR/felixla_admixture.err"
+
+grep -q $'s1\t6\t0.3333333333\t0.6666666667\t2\t4' "$OUT_DIR/felixla_admixture.tsv"
+
 cat >"$OUT_DIR/shapeit.chunks.txt" <<'EOF'
 0	chr1	chr1:1-180	chr1:1-150	4.0	150	10	3
 1	chr1	chr1:120-260	chr1:151-250	4.0	100	10	3
 EOF
 
-"$ROOT_DIR/scripts/shapeit_chunks_to_tractor_args.sh" \
+"$BIN_DIR/felixla" \
+  --shapeit-args \
   --chunks "$OUT_DIR/shapeit.chunks.txt" \
   --phase-template "$OUT_DIR/source/{chrom}.phased.vcf.gz" \
   --flare-template "$OUT_DIR/source/{chrom}.flare.vcf.gz" \
   --n-ancestries 2 \
-  --mac-threshold 1 \
+  --n-samples 2 \
   --out-prefix-template "$OUT_DIR/{chrom}.shapeit4cM.chunk{chunk0}" \
   >"$OUT_DIR/shapeit.args.tsv"
 
@@ -142,11 +309,14 @@ grep -q $'selected_region\tchr1:100-160' "$OUT_DIR/tiny.no_contig_region.meta"
 
 grep -q "Differences:             0" "$OUT_DIR/no_contig_region.compare.txt"
 
-"$BIN_DIR/rfmix_msp_to_tractor_hybrid" \
+"$BIN_DIR/felixla" \
+  --phase-vcf \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
+  --rfmix-msp \
   "$ROOT_DIR/testdata/tiny.rfmix.msp.tsv" \
-  2 \
-  1 \
+  --n-ancestries 2 \
+  --make-felixla \
+  --out \
   "$OUT_DIR/rfmix" >/dev/null
 
 "$BIN_DIR/tractor_hybrid_to_vcf" \
@@ -161,10 +331,12 @@ grep -q "Differences:             0" "$OUT_DIR/no_contig_region.compare.txt"
 
 grep -q "Differences:             0" "$OUT_DIR/rfmix.compare.txt"
 
-"$BIN_DIR/tractor_dosage_vcf_to_hybrid" \
+"$BIN_DIR/felixla" \
+  --tractor-dosage-vcf \
   "$ROOT_DIR/testdata/tiny.tractor_dosage.vcf" \
-  2 \
-  2 \
+  --n-ancestries 2 \
+  --make-felixla \
+  --out \
   "$OUT_DIR/dosage" >/dev/null
 
 "$BIN_DIR/tractor_hybrid_to_vcf" \

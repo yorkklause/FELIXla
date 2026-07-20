@@ -11,18 +11,30 @@ CMP_TARGET := $(BIN_DIR)/compare_vcfs
 DOSAGE_TARGET := $(BIN_DIR)/tractor_dosage_vcf_to_hybrid
 RFMIX_MSP_TARGET := $(BIN_DIR)/rfmix_msp_to_tractor_hybrid
 EXTRACT_TARGET := $(BIN_DIR)/tractor_hybrid_extract_region
+ADMIX_TARGET := $(BIN_DIR)/calc_tractor_admixture
+FELIX_QUERY_TARGET := $(BIN_DIR)/felixla_query
+FELIX_CLI_TARGET := $(BIN_DIR)/felixla
+SHAPEIT_ARGS_TARGET := $(BIN_DIR)/shapeit_chunks_to_tractor_args
 STATIC_PACK_TARGET := $(STATIC_BIN_DIR)/flare_subset_to_tractor_hybrid
 STATIC_VCF_TARGET := $(STATIC_BIN_DIR)/tractor_hybrid_to_vcf
 STATIC_CMP_TARGET := $(STATIC_BIN_DIR)/compare_vcfs
 STATIC_DOSAGE_TARGET := $(STATIC_BIN_DIR)/tractor_dosage_vcf_to_hybrid
 STATIC_RFMIX_MSP_TARGET := $(STATIC_BIN_DIR)/rfmix_msp_to_tractor_hybrid
 STATIC_EXTRACT_TARGET := $(STATIC_BIN_DIR)/tractor_hybrid_extract_region
+STATIC_ADMIX_TARGET := $(STATIC_BIN_DIR)/calc_tractor_admixture
+STATIC_FELIX_QUERY_TARGET := $(STATIC_BIN_DIR)/felixla_query
+STATIC_FELIX_CLI_TARGET := $(STATIC_BIN_DIR)/felixla
+STATIC_SHAPEIT_ARGS_TARGET := $(STATIC_BIN_DIR)/shapeit_chunks_to_tractor_args
 PACK_SRC := src/flare_subset_to_tractor_hybrid.cpp
 VCF_SRC := src/tractor_hybrid_to_vcf.cpp
 CMP_SRC := src/compare_vcfs.cpp
 DOSAGE_SRC := src/tractor_dosage_vcf_to_hybrid.cpp
 RFMIX_MSP_SRC := src/rfmix_msp_to_tractor_hybrid.cpp
 EXTRACT_SRC := src/tractor_hybrid_extract_region.cpp
+ADMIX_SRC := src/calc_tractor_admixture.cpp
+FELIX_QUERY_SRC := src/felixla_query.cpp
+FELIX_CLI_SRC := scripts/felixla
+SHAPEIT_ARGS_SRC := scripts/shapeit_chunks_to_tractor_args.sh
 
 PKG_HTSLIB_CFLAGS := $(shell $(PKG_CONFIG) --cflags htslib 2>/dev/null)
 PKG_HTSLIB_LIBS := $(shell $(PKG_CONFIG) --libs htslib 2>/dev/null)
@@ -86,11 +98,11 @@ endif
 CPPFLAGS += $(HTSLIB_CFLAGS)
 LDLIBS += $(HTSLIB_LIBS)
 
-.PHONY: all static clean check-deps check-static-deps test test-static
+.PHONY: all static clean check-deps check-static-deps test test-static test-intense
 
-all: check-deps $(PACK_TARGET) $(VCF_TARGET) $(CMP_TARGET) $(DOSAGE_TARGET) $(RFMIX_MSP_TARGET) $(EXTRACT_TARGET)
+all: check-deps $(PACK_TARGET) $(VCF_TARGET) $(CMP_TARGET) $(DOSAGE_TARGET) $(RFMIX_MSP_TARGET) $(EXTRACT_TARGET) $(ADMIX_TARGET) $(FELIX_QUERY_TARGET) $(FELIX_CLI_TARGET) $(SHAPEIT_ARGS_TARGET)
 
-static: check-static-deps $(STATIC_PACK_TARGET) $(STATIC_VCF_TARGET) $(STATIC_CMP_TARGET) $(STATIC_DOSAGE_TARGET) $(STATIC_RFMIX_MSP_TARGET) $(STATIC_EXTRACT_TARGET)
+static: check-static-deps $(STATIC_PACK_TARGET) $(STATIC_VCF_TARGET) $(STATIC_CMP_TARGET) $(STATIC_DOSAGE_TARGET) $(STATIC_RFMIX_MSP_TARGET) $(STATIC_EXTRACT_TARGET) $(STATIC_ADMIX_TARGET) $(STATIC_FELIX_QUERY_TARGET) $(STATIC_FELIX_CLI_TARGET) $(STATIC_SHAPEIT_ARGS_TARGET)
 
 check-deps:
 	@printf '#include <htslib/hts.h>\n#include <htslib/vcf.h>\n' | \
@@ -127,6 +139,22 @@ $(EXTRACT_TARGET): $(EXTRACT_SRC)
 	mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
 
+$(ADMIX_TARGET): $(ADMIX_SRC)
+	mkdir -p $(BIN_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(LDFLAGS) $(LDLIBS)
+
+$(FELIX_QUERY_TARGET): $(FELIX_QUERY_SRC)
+	mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
+
+$(FELIX_CLI_TARGET): $(FELIX_CLI_SRC)
+	mkdir -p $(BIN_DIR)
+	install -m 755 $< $@
+
+$(SHAPEIT_ARGS_TARGET): $(SHAPEIT_ARGS_SRC)
+	mkdir -p $(BIN_DIR)
+	install -m 755 $< $@
+
 $(STATIC_PACK_TARGET): $(PACK_SRC)
 	mkdir -p $(STATIC_BIN_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(STATIC_LDFLAGS) $(HTSLIB_STATIC_LIBS)
@@ -151,8 +179,27 @@ $(STATIC_EXTRACT_TARGET): $(EXTRACT_SRC)
 	mkdir -p $(STATIC_BIN_DIR)
 	$(CXX) $(CXXFLAGS) $< -o $@ $(STATIC_LDFLAGS)
 
+$(STATIC_ADMIX_TARGET): $(ADMIX_SRC)
+	mkdir -p $(STATIC_BIN_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(STATIC_LDFLAGS) $(HTSLIB_STATIC_LIBS)
+
+$(STATIC_FELIX_QUERY_TARGET): $(FELIX_QUERY_SRC)
+	mkdir -p $(STATIC_BIN_DIR)
+	$(CXX) $(CXXFLAGS) $< -o $@ $(STATIC_LDFLAGS)
+
+$(STATIC_FELIX_CLI_TARGET): $(FELIX_CLI_SRC)
+	mkdir -p $(STATIC_BIN_DIR)
+	install -m 755 $< $@
+
+$(STATIC_SHAPEIT_ARGS_TARGET): $(SHAPEIT_ARGS_SRC)
+	mkdir -p $(STATIC_BIN_DIR)
+	install -m 755 $< $@
+
 test: all
 	BIN_DIR="$(abspath $(BIN_DIR))" bash tests/run_tiny.sh
+
+test-intense: all
+	python3 tests/run_keep_extract_intense.py --bin-dir "$(abspath $(BIN_DIR))"
 
 test-static: static
 	BIN_DIR="$(abspath $(STATIC_BIN_DIR))" bash tests/run_tiny.sh

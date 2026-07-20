@@ -761,10 +761,30 @@ static void print_usage(const char* prog) {
     std::fprintf(
         stderr,
         "Usage:\n"
-        "  %s tractor_dosage.vcf[.gz|.bcf] n_ancestries rare_threshold out_prefix\n\n"
+        "  %s tractor_dosage.vcf[.gz|.bcf] n_ancestries rare_threshold|auto out_prefix\n\n"
         "Input FORMAT must contain scalar hardcall DS1..DSk and ANC1..ANCk values.\n",
         prog
     );
+}
+
+static int parse_rare_threshold_arg(const char* text) {
+    if (std::strcmp(text, "auto") == 0 || std::strcmp(text, "default") == 0) {
+        return -1;
+    }
+
+    char* end = nullptr;
+    long value = std::strtol(text, &end, 10);
+    if (end == text || *end != '\0') {
+        die("rare_threshold must be a non-negative integer or auto: %s", text);
+    }
+    if (value < 0 || value > std::numeric_limits<int>::max()) {
+        die("rare_threshold out of range: %s", text);
+    }
+    return static_cast<int>(value);
+}
+
+static int default_rare_threshold_from_samples(int n_samples) {
+    return (n_samples + 31) / 32;
 }
 
 int main(int argc, char** argv) {
@@ -775,15 +795,11 @@ int main(int argc, char** argv) {
 
     const char* dosage_vcf = argv[1];
     int n_ancestries = std::atoi(argv[2]);
-    int rare_threshold = std::atoi(argv[3]);
+    int rare_threshold = parse_rare_threshold_arg(argv[3]);
     const char* out_prefix = argv[4];
 
     if (n_ancestries <= 0 || n_ancestries > 32) {
         die("n_ancestries must be in [1, 32]");
-    }
-
-    if (rare_threshold < 0) {
-        die("rare_threshold must be non-negative");
     }
 
     htsFile* fp = bcf_open(dosage_vcf, "r");
@@ -801,6 +817,15 @@ int main(int argc, char** argv) {
     int n_samples = bcf_hdr_nsamples(hdr);
     if (n_samples <= 0) {
         die("input has no samples");
+    }
+    if (rare_threshold < 0) {
+        rare_threshold = default_rare_threshold_from_samples(n_samples);
+        std::fprintf(
+            stderr,
+            "Using rare_threshold=%d = ceil(%d / 32) from dosage VCF sample count.\n",
+            rare_threshold,
+            n_samples
+        );
     }
 
     uint64_t n_haps = static_cast<uint64_t>(n_samples) * 2ULL;

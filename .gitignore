@@ -2,6 +2,13 @@ bin/
 bin-static/
 __pycache__/
 *.pyc
+.DS_Store
+SAIGE-Tractor-upstream/
+docker/saigetractor-hybrid-debug/
+docker/saigetractor-hybrid-debug2/
+io_mac_dsub_runs/
+outputs/
+side_versions/
 *.common.geno.bin
 *.common.variant.idx
 *.common.variant.mks
