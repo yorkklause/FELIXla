@@ -69,6 +69,11 @@ GitHub repository and record the commit hash used in the analysis.
 
     will print the FELIXla command-line help.
 
+- A Linux x86_64 static binary is attached to GitHub Releases as
+  `felixla-linux-x86_64-static`. The release binary is built as a single
+  statically linked executable against a local-file htslib build without
+  libcurl remote-URL support.
+
 ## Using FELIXla
 
 The preferred entry point is the PLINK-style `felixla` command:
@@ -303,6 +308,10 @@ make static STATIC_FULLY=1
 The Docker image is built from `docker/felixla/Dockerfile`. On pushes to
 `main`, GitHub Actions publishes a multi-architecture image for `linux/amd64`
 and `linux/arm64` at `ghcr.io/yorkklause/felixla:latest`.
+
+On version tags, GitHub Actions also publishes
+`felixla-linux-x86_64-static` and its SHA256 checksum to the corresponding
+GitHub Release.
 
 To build the image locally:
 

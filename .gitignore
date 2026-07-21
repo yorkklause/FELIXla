@@ -1,6 +1,9 @@
 bin/
 bin-static/
 build/
+.tmp-static-artifacts/
+.tmp-static-build.*/
+dist/
 __pycache__/
 *.pyc
 .DS_Store
