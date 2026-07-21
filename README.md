@@ -15,8 +15,8 @@ stored as sparse carrier lists.
 
 FELIXla v0 is binary-compatible with the `tractor_hybrid` packed layout used by
 this repository. The compatibility is intentional: the same packed prefix can
-be queried directly, converted back to split-biallelic VCF, subset by region,
-or read by the included SAIGE-TRACTOR step2 adapter.
+be queried directly, converted back to split-biallelic VCF, or subset by
+region.
 
 ## Citation
 
@@ -228,30 +228,6 @@ bin/felixla \
   --n-samples 100000 \
   --out-prefix-template 'hybrid/{chrom}.shapeit4cM.chunk{chunk0}' \
   > flare_subset.shapeit4cm.args.tsv
-```
-
-## SAIGE-TRACTOR Adapter
-
-This repository includes a narrow SAIGE-TRACTOR step2 adapter that reads a
-FELIXla/`tractor_hybrid` prefix directly. The adapter returns total ALT dosage
-for ordinary SAIGE paths and ancestry-specific `ANC1..ANCk`, `DS1..DSk`,
-`DSALL`, `DS`, or `GT`-like fields for SAIGE-TRACTOR admixed paths.
-
-Adapter files are stored in `saige_step2_adapter/`, and a Docker build recipe is
-provided in `docker/saigetractor-hybrid/`.
-
-Example step2 invocation inside the patched image:
-
-```
-step2_SPAtests.R \
-  --tractorHybridPrefix=/data/chr22 \
-  --chrom=chr22 \
-  --is_admixed=TRUE \
-  --number_of_ancestry=5 \
-  --markers_per_chunk=1000 \
-  --GMMATmodelFile=/data/null.rda \
-  --varianceRatioFile=/data/varianceRatio.txt \
-  --SAIGEOutputFile=/data/chr22.tractor.out
 ```
 
 ## Testing
