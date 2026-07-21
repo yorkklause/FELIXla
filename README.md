@@ -1,10 +1,13 @@
 # FELIXla
 
-**FELIXla** is a C++ based command line tool and binary storage format for
-haplotype-resolved, local-ancestry-aware genotype data. It stores phased ALT
-alleles and inferred local ancestries under the same explicit haplotype index,
-so ancestry-specific dosages can be returned by direct query instead of being
-recomputed from phased genotype and local ancestry files for every phenotype.
+**FELIX** (**F**ull-cohort **E**fficient **L**ocal ancestry-**I**ntegrated
+mi**X**ed-model framework) is a framework for scalable local-ancestry-aware
+association analysis. **FELIXla** is its C++ based command line tool and binary
+storage format for haplotype-resolved, local-ancestry-aware genotype data. It
+stores phased ALT alleles and inferred local ancestries under the same explicit
+haplotype index, so ancestry-specific dosages can be returned by direct query
+instead of being recomputed from phased genotype and local ancestry files for
+every phenotype.
 
 The ancestry-specific dosage for ancestry `k` at a variant is represented as a
 bitwise intersection between the ALT haplotype vector and the ancestry `k`

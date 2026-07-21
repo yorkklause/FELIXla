@@ -32,7 +32,7 @@ FROM debian:bookworm-slim
 ARG DEBIAN_FRONTEND=noninteractive
 
 LABEL org.opencontainers.image.title="FELIXla"
-LABEL org.opencontainers.image.description="Haplotype-resolved, local-ancestry-aware genotype storage tools"
+LABEL org.opencontainers.image.description="FELIX local-ancestry storage tools for scalable ancestry-aware mixed-model analyses"
 LABEL org.opencontainers.image.source="https://github.com/yorkklause/FELIXla"
 LABEL org.opencontainers.image.licenses="GPL-3.0"
 

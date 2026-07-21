@@ -249,7 +249,7 @@ run_plink_style() {
         exit 0
         ;;
       --version)
-        printf 'FELIXla CLI v0, tractor_hybrid-compatible layout format_version=1\n'
+        printf 'FELIXla CLI v0 for FELIX (Full-cohort Efficient Local ancestry-Integrated miXed-model framework), tractor_hybrid-compatible layout format_version=1\n'
         exit 0
         ;;
       --phase-vcf|--genotype-vcf)
@@ -611,7 +611,7 @@ run_compat_command() {
       usage
       ;;
     --version|version)
-      printf 'FELIXla CLI v0, tractor_hybrid-compatible layout format_version=1\n'
+      printf 'FELIXla CLI v0 for FELIX (Full-cohort Efficient Local ancestry-Integrated miXed-model framework), tractor_hybrid-compatible layout format_version=1\n'
       ;;
     from-flare|build-flare|pack-flare|flare|flare_subset_to_tractor_hybrid)
       run_tool flare_subset_to_tractor_hybrid "$@"
