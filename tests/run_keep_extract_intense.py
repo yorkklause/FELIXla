@@ -415,7 +415,7 @@ def build_with_cli(
     return export_prefix(bin_dir, prefix)
 
 
-def indexed_expected_from_split_records(
+def bounded_extract_expected_from_split_records(
     split_records_all: list[dict],
     selected: set[tuple[str, int, str, str]],
 ) -> list[dict]:
@@ -430,6 +430,25 @@ def indexed_expected_from_split_records(
         copied["id"] = f"{split['id']}_{split['ref']}_{split['alt']}"
         expected.append(copied)
     return expected
+
+
+def bounded_extract_scanned_records(
+    split_records_all: list[dict],
+    selected: set[tuple[str, int, str, str]],
+) -> int:
+    bounds: dict[str, list[int]] = {}
+    for chrom, pos, _ref, _alt in selected:
+        if chrom not in bounds:
+            bounds[chrom] = [pos, pos]
+        else:
+            bounds[chrom][0] = min(bounds[chrom][0], pos)
+            bounds[chrom][1] = max(bounds[chrom][1], pos)
+
+    return sum(
+        1 for split in split_records_all
+        if split["chrom"] in bounds and
+        bounds[split["chrom"]][0] <= split["pos"] <= bounds[split["chrom"]][1]
+    )
 
 
 def last_progress_record_count(stderr: str) -> int:
@@ -547,7 +566,7 @@ def main() -> int:
             indexed_selected,
             "indexed.extract.sites",
         )
-        indexed_expected = indexed_expected_from_split_records(full_expected, indexed_selected)
+        indexed_expected = bounded_extract_expected_from_split_records(full_expected, indexed_selected)
         indexed_prefix = work / "subset.indexed_extract"
         indexed_result = run(
             [
@@ -565,21 +584,17 @@ def main() -> int:
                 str(indexed_prefix),
             ]
         )
-        if "Using indexed --extract genotype reader" not in indexed_result.stderr:
-            fail(f"indexed --extract reader was not used:\n{indexed_result.stderr}")
+        if "Using indexed --extract bounded genotype reader" not in indexed_result.stderr:
+            fail(f"indexed bounded --extract reader was not used:\n{indexed_result.stderr}")
         scanned_records = last_progress_record_count(indexed_result.stderr)
-        selected_positions = {(chrom, pos) for chrom, pos, _ref, _alt in indexed_selected}
-        expected_scanned_records = sum(
-            1 for split in full_expected
-            if (split["chrom"], split["pos"]) in selected_positions
-        )
+        expected_scanned_records = bounded_extract_scanned_records(full_expected, indexed_selected)
         if scanned_records != expected_scanned_records:
             fail(
                 f"indexed --extract scanned {scanned_records} records; "
-                f"expected exactly {expected_scanned_records} records at selected positions"
+                f"expected exactly {expected_scanned_records} records inside bounded extract intervals"
             )
         if scanned_records >= len(full_expected):
-            fail(f"indexed --extract scanned the full VCF: {scanned_records} of {len(full_expected)} records")
+            fail(f"bounded indexed --extract scanned the full VCF: {scanned_records} of {len(full_expected)} records")
         indexed_vcf = export_prefix(bin_dir, indexed_prefix)
         assert_vcf_matches(indexed_vcf, samples, indexed_expected)
 

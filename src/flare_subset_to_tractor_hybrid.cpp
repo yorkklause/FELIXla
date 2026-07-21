@@ -1267,22 +1267,51 @@ static std::string build_extract_genotype_region_query(
     const ExtractSites& extract_sites,
     bcf_hdr_t* ghdr,
     const Region& region,
-    uint64_t& n_positions
+    uint64_t& n_positions,
+    uint64_t& n_intervals
 ) {
     n_positions = 0;
+    n_intervals = 0;
     std::vector<ExtractPosition> positions =
         sorted_extract_positions(extract_sites, ghdr, region);
 
     std::string query;
     int64_t last_pos = -1;
     std::string last_chr;
+    std::string interval_chr;
+    int64_t interval_start = 0;
+    int64_t interval_end = 0;
+    bool have_interval = false;
+
+    auto flush_interval = [&]() {
+        if (!have_interval) return;
+        append_region_query(query, interval_chr, interval_start, interval_end);
+        ++n_intervals;
+    };
+
     for (const ExtractPosition& position : positions) {
         if (position.chr == last_chr && position.pos == last_pos) continue;
-        append_region_query(query, position.chr, position.pos, position.pos);
+
+        if (!have_interval) {
+            interval_chr = position.chr;
+            interval_start = position.pos;
+            interval_end = position.pos;
+            have_interval = true;
+        } else if (position.chr == interval_chr) {
+            interval_end = position.pos;
+        } else {
+            flush_interval();
+            interval_chr = position.chr;
+            interval_start = position.pos;
+            interval_end = position.pos;
+            have_interval = true;
+        }
+
         last_chr = position.chr;
         last_pos = position.pos;
         ++n_positions;
     }
+    flush_interval();
 
     return query;
 }
@@ -1649,7 +1678,7 @@ int main(int argc, char** argv) {
     bcf_srs_t* genotype_region_reader = nullptr;
     bcf_srs_t* flare_region_reader = nullptr;
     bool skip_genotype_loop = false;
-    bool exact_extract_reader = false;
+    bool bounded_extract_reader = false;
     std::string progress_scope;
 
     if (region.active) {
@@ -1662,16 +1691,18 @@ int main(int argc, char** argv) {
 
     if (extract_sites.active) {
         uint64_t n_extract_positions = 0;
+        uint64_t n_extract_intervals = 0;
         std::string genotype_query = build_extract_genotype_region_query(
             extract_sites,
             ghdr,
             region,
-            n_extract_positions
+            n_extract_positions,
+            n_extract_intervals
         );
 
         if (n_extract_positions == 0) {
             skip_genotype_loop = true;
-            progress_scope = "--extract site list";
+            progress_scope = "--extract bounded intervals";
             std::fprintf(
                 stderr,
                 "No --extract positions overlap the selected conversion scope; skipping genotype scan.\n"
@@ -1682,22 +1713,23 @@ int main(int argc, char** argv) {
                 geno_vcf,
                 genotype_query,
                 "genotype VCF",
-                "--extract site list"
+                "--extract bounded intervals"
             );
 
             if (have_genotype_extract_reader) {
-                exact_extract_reader = true;
-                progress_scope = "--extract site list";
+                bounded_extract_reader = true;
+                progress_scope = "--extract bounded intervals";
                 std::fprintf(
                     stderr,
-                    "Using indexed --extract genotype reader: %llu target position(s), %llu split allele(s).\n",
+                    "Using indexed --extract bounded genotype reader: %llu target position(s) across %llu interval(s), %llu split allele(s).\n",
                     static_cast<unsigned long long>(n_extract_positions),
+                    static_cast<unsigned long long>(n_extract_intervals),
                     static_cast<unsigned long long>(extract_sites.allele_keys.size())
                 );
             } else {
                 std::fprintf(
                     stderr,
-                    "WARNING: --extract could not use genotype VCF random access; scanning records and filtering by CHROM/POS/REF/ALT.\n"
+                    "WARNING: --extract could not use genotype VCF bounded random access; scanning records and filtering by CHROM/POS/REF/ALT.\n"
                 );
             }
         }
@@ -2004,7 +2036,7 @@ int main(int argc, char** argv) {
                 }
             }
 
-            if (!region.active && extract_sites.active && exact_extract_reader &&
+            if (!region.active && extract_sites.active && bounded_extract_reader &&
                 extract_sites.contigs.count(interval_record.chr) == 0) {
                 emit_interval = false;
             }

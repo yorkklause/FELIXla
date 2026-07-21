@@ -123,9 +123,10 @@ felixla \
   only by `CHROM`, `POS`, `REF`, and `ALT`. Multi-allelic `ALT` values may be
   comma-separated. REF must be known, and a REF mismatch against the genotype
   VCF is a fatal error. When the genotype VCF/BCF has a tabix/CSI index,
-  `--extract` uses htslib random access to visit only the requested positions
-  before allele-level filtering. Without an index, FELIXla falls back to a
-  streaming scan and prints a warning.
+  `--extract` first finds the first and last requested position on each
+  chromosome, seeks to those bounded intervals, and then linearly scans inside
+  them before exact allele-level filtering. Without an index, FELIXla falls
+  back to a streaming scan and prints a warning.
 
 The same binary also dispatches to compatibility subcommands:
 
@@ -281,9 +282,9 @@ make test-intense
 
 `test-intense` synthesizes multi-chromosome, multi-allelic phased genotype and
 FLARE inputs, compares the PLINK-style command against the compatibility
-subcommand path, verifies `--keep`, `--extract`, indexed extract seeking,
-`--region`, and `felixla --query` against a known truth table, and checks that
-malformed keep/extract files fail with specific errors.
+subcommand path, verifies `--keep`, `--extract`, indexed bounded extract
+scanning, `--region`, and `felixla --query` against a known truth table, and
+checks that malformed keep/extract files fail with specific errors.
 
 ## Build Notes
 
