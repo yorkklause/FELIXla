@@ -57,6 +57,16 @@ GitHub repository and record the commit hash used in the analysis.
   `prebuilt/linux-x86_64-static`. These binaries are intended for local VCF/BCF
   paths and do not require conda or shared runtime libraries.
 
+- A Docker image is published through GitHub Container Registry:
+
+    `docker pull ghcr.io/yorkklause/felixla:latest`
+
+    The image entry point is `felixla`, so running
+
+    `docker run --rm ghcr.io/yorkklause/felixla:latest --help`
+
+    will print the FELIXla command-line help.
+
 ## Using FELIXla
 
 The preferred entry point is the PLINK-style `felixla` wrapper:
@@ -214,6 +224,19 @@ bin/felixla \
   --out hybrid/chr22.subset
 ```
 
+The same command can be run through Docker by binding the working directory:
+
+```
+docker run --rm -v "$PWD":/data -w /data ghcr.io/yorkklause/felixla:latest \
+  --phase-vcf genotype.phased.vcf.gz \
+  --flare-vcf flare.anc.vcf.gz \
+  --n-ancestries 5 \
+  --keep samples.keep \
+  --extract sites.pvar \
+  --make-felixla \
+  --out hybrid/chr22.subset
+```
+
 The SHAPEIT/GLIMPSE chunk helper can generate converter argument rows for
 chromosome-scale jobs:
 
@@ -271,6 +294,16 @@ can be requested with:
 
 ```
 make static STATIC_FULLY=1
+```
+
+The Docker image is built from `docker/felixla/Dockerfile`. On pushes to
+`main`, GitHub Actions publishes a multi-architecture image for `linux/amd64`
+and `linux/arm64` at `ghcr.io/yorkklause/felixla:latest`.
+
+To build the image locally:
+
+```
+docker build -t felixla:local -f docker/felixla/Dockerfile .
 ```
 
 ## Input Assumptions
