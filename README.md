@@ -115,8 +115,10 @@ felixla \
 - SITE_LIST (optional): A PLINK2 `.pvar`-like file or VCF-like file used like
   PLINK `--extract`. FELIXla reads the first variant columns `CHROM POS ID REF
   ALT`; VCF `QUAL`, `FILTER`, `INFO`, `FORMAT`, and sample columns are ignored.
-  Multi-allelic `ALT` values may be comma-separated. REF must be known, and a
-  REF mismatch against the genotype VCF is a fatal error.
+  The `ID` column is ignored: retained alleles are matched and de-duplicated
+  only by `CHROM`, `POS`, `REF`, and `ALT`. Multi-allelic `ALT` values may be
+  comma-separated. REF must be known, and a REF mismatch against the genotype
+  VCF is a fatal error.
 
 The wrapper also dispatches to compatible standalone tools:
 

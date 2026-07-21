@@ -283,10 +283,12 @@ static ExtractSites load_extract_sites(const std::string& path) {
         std::istringstream iss(line);
         std::string chr;
         std::string pos_text;
-        std::string id;
+        std::string ignored_id;
         std::string ref;
         std::string alts;
-        if (!(iss >> chr >> pos_text >> id >> ref >> alts)) {
+        // Consume the ID column only to preserve PVAR/VCF column alignment.
+        // Site filtering is keyed exclusively by CHROM, POS, REF, and ALT.
+        if (!(iss >> chr >> pos_text >> ignored_id >> ref >> alts)) {
             die("--extract expects PVAR/VCF columns CHROM POS ID REF ALT at %s:%llu",
                 path.c_str(), static_cast<unsigned long long>(line_no));
         }

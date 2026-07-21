@@ -275,14 +275,20 @@ def write_extract_files(work: pathlib.Path, selected: set[tuple[str, int, str, s
     with pvar.open("w") as out:
         out.write("#CHROM\tPOS\tID\tREF\tALT\n")
         for (chrom, pos, ref), alts in sorted(by_site.items()):
-            out.write(f"{chrom}\t{pos}\t.\t{ref}\t{','.join(alts)}\n")
+            out.write(
+                f"{chrom}\t{pos}\tpvar_id_must_be_ignored_{chrom}_{pos}"
+                f"\t{ref}\t{','.join(alts)}\n"
+            )
 
     vcf = work / "extract.sites.vcf"
     with vcf.open("w") as out:
         out.write("##fileformat=VCFv4.2\n")
         out.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tignored\n")
         for (chrom, pos, ref), alts in sorted(by_site.items()):
-            out.write(f"{chrom}\t{pos}\t.\t{ref}\t{','.join(alts)}\t.\tPASS\t.\tGT\t0|0\n")
+            out.write(
+                f"{chrom}\t{pos}\tvcf_id_must_be_ignored_{chrom}_{pos}"
+                f"\t{ref}\t{','.join(alts)}\t.\tPASS\t.\tGT\t0|0\n"
+            )
 
     vcfgz = work / "extract.sites.vcf.gz"
     with vcf.open("rb") as src, gzip.open(vcfgz, "wb") as dst:
@@ -559,8 +565,8 @@ def main() -> int:
         bad_dup_allele = work / "bad.dup.allele.pvar"
         bad_dup_allele.write_text(
             f"#CHROM\tPOS\tID\tREF\tALT\n"
-            f"{first_key[0]}\t{first_key[1]}\t.\t{first_key[2]}\t{first_key[3]}\n"
-            f"{first_key[0]}\t{first_key[1]}\t.\t{first_key[2]}\t{first_key[3]}\n"
+            f"{first_key[0]}\t{first_key[1]}\tfirst_id\t{first_key[2]}\t{first_key[3]}\n"
+            f"{first_key[0]}\t{first_key[1]}\tsecond_id\t{first_key[2]}\t{first_key[3]}\n"
         )
         run([*build_bad_base, str(work / "bad.dup.allele.out"), "--extract", str(bad_dup_allele)], expect_fail=True, contains="duplicate allele")
 

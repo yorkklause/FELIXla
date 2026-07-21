@@ -92,8 +92,8 @@ EOF
 cat >"$OUT_DIR/extract.sites.vcf" <<'EOF'
 ##fileformat=VCFv4.2
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	ignored_sample
-chr1	100	multi	A	C,G	.	PASS	.	GT	0|1
-chr1	160	common	A	T	.	PASS	.	GT	0|0
+chr1	100	extract_id_is_ignored_1	A	C,G	.	PASS	.	GT	0|1
+chr1	160	extract_id_is_ignored_2	A	T	.	PASS	.	GT	0|0
 EOF
 
 python3 - "$OUT_DIR/extract.sites.vcf" "$OUT_DIR/extract.sites.vcf.gz" <<'PY'
