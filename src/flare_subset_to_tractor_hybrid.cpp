@@ -73,11 +73,19 @@ struct SampleSubset {
     std::vector<int> raw_indices;
 };
 
+struct ExtractPosition {
+    std::string chr;
+    int64_t pos = 0;
+    std::string ref;
+};
+
 struct ExtractSites {
     bool active = false;
     std::string path;
     std::unordered_set<std::string> allele_keys;
     std::unordered_map<std::string, std::string> ref_by_position;
+    std::unordered_set<std::string> contigs;
+    std::vector<ExtractPosition> positions;
 };
 
 static constexpr uint32_t kMaxPackedHapId = (1u << 27) - 1u;
@@ -308,6 +316,8 @@ static ExtractSites load_extract_sites(const std::string& path) {
         auto ref_it = sites.ref_by_position.find(pos_key);
         if (ref_it == sites.ref_by_position.end()) {
             sites.ref_by_position.emplace(pos_key, ref);
+            sites.contigs.insert(chr);
+            sites.positions.push_back(ExtractPosition{chr, pos, ref});
         } else if (ref_it->second != ref) {
             die("conflicting REF values in --extract list at %s:%llu for %s:%lld: %s vs %s",
                 path.c_str(), static_cast<unsigned long long>(line_no), chr.c_str(),
@@ -1159,6 +1169,146 @@ static int add_contigs_from_header_if_missing(
     return added;
 }
 
+static int add_contigs_from_extract_if_missing(
+    bcf_hdr_t* dst,
+    const ExtractSites& extract_sites,
+    const char* dst_label
+) {
+    if (!extract_sites.active) return 0;
+
+    std::unordered_set<std::string> seen;
+    int added = 0;
+    for (const ExtractPosition& position : extract_sites.positions) {
+        if (!seen.insert(position.chr).second) continue;
+        if (add_contig_to_header_if_missing(dst, position.chr, dst_label)) {
+            ++added;
+        }
+    }
+
+    if (added > 0) {
+        std::fprintf(
+            stderr,
+            "Added %d --extract contig(s) to %s header.\n",
+            added,
+            dst_label
+        );
+    }
+    return added;
+}
+
+static bool extract_position_in_region(
+    const ExtractPosition& position,
+    const Region& region
+) {
+    if (!region.active) return true;
+    return position.chr == region.chr &&
+           position.pos >= region.start &&
+           position.pos <= region.end;
+}
+
+static int extract_position_sort_rid(bcf_hdr_t* hdr, const std::string& chr) {
+    int rid = bcf_hdr_name2id(hdr, chr.c_str());
+    if (rid >= 0) return rid;
+    return std::numeric_limits<int>::max();
+}
+
+static std::vector<ExtractPosition> sorted_extract_positions(
+    const ExtractSites& extract_sites,
+    bcf_hdr_t* ghdr,
+    const Region& region
+) {
+    std::vector<ExtractPosition> positions;
+    if (!extract_sites.active) return positions;
+
+    positions.reserve(extract_sites.positions.size());
+    for (const ExtractPosition& position : extract_sites.positions) {
+        if (extract_position_in_region(position, region)) {
+            positions.push_back(position);
+        }
+    }
+
+    std::sort(
+        positions.begin(),
+        positions.end(),
+        [ghdr](const ExtractPosition& a, const ExtractPosition& b) {
+            int arid = extract_position_sort_rid(ghdr, a.chr);
+            int brid = extract_position_sort_rid(ghdr, b.chr);
+            if (arid != brid) return arid < brid;
+            if (a.chr != b.chr) return a.chr < b.chr;
+            return a.pos < b.pos;
+        }
+    );
+
+    return positions;
+}
+
+static std::string region_contig_token(const std::string& chr) {
+    if (chr.find_first_of(":-") == std::string::npos) {
+        return chr;
+    }
+    return "{" + chr + "}";
+}
+
+static void append_region_query(
+    std::string& query,
+    const std::string& chr,
+    int64_t start,
+    int64_t end
+) {
+    if (!query.empty()) query.push_back(',');
+    query += region_contig_token(chr);
+    query.push_back(':');
+    query += std::to_string(start);
+    query.push_back('-');
+    query += std::to_string(end);
+}
+
+static std::string build_extract_genotype_region_query(
+    const ExtractSites& extract_sites,
+    bcf_hdr_t* ghdr,
+    const Region& region,
+    uint64_t& n_positions
+) {
+    n_positions = 0;
+    std::vector<ExtractPosition> positions =
+        sorted_extract_positions(extract_sites, ghdr, region);
+
+    std::string query;
+    int64_t last_pos = -1;
+    std::string last_chr;
+    for (const ExtractPosition& position : positions) {
+        if (position.chr == last_chr && position.pos == last_pos) continue;
+        append_region_query(query, position.chr, position.pos, position.pos);
+        last_chr = position.chr;
+        last_pos = position.pos;
+        ++n_positions;
+    }
+
+    return query;
+}
+
+static std::string build_extract_flare_region_query(
+    const ExtractSites& extract_sites,
+    bcf_hdr_t* ghdr,
+    const Region& region,
+    uint64_t& n_contigs
+) {
+    n_contigs = 0;
+    std::vector<ExtractPosition> positions =
+        sorted_extract_positions(extract_sites, ghdr, region);
+
+    std::string query;
+    std::string last_chr;
+    for (const ExtractPosition& position : positions) {
+        if (position.chr == last_chr) continue;
+        append_region_query(query, position.chr, 1, kMaxVcfCoordinate);
+        last_chr = position.chr;
+        ++n_contigs;
+    }
+
+    return query;
+}
+
 static int infer_contigs_from_records(
     const char* vcf_path,
     bcf_hdr_t* dst,
@@ -1224,8 +1374,11 @@ static bool init_synced_region_reader(
     bcf_srs_t** out,
     const char* path,
     const std::string& query,
-    const char* label
+    const char* label,
+    const char* query_label = nullptr
 ) {
+    const char* shown_query = query_label ? query_label : query.c_str();
+
     if (!looks_indexable_variant_path(path)) {
         std::fprintf(
             stderr,
@@ -1243,7 +1396,7 @@ static bool init_synced_region_reader(
             stderr,
             "WARNING: cannot set %s region %s; falling back to scan/filter.\n",
             label,
-            query.c_str()
+            shown_query
         );
         bcf_sr_destroy(reader);
         return false;
@@ -1254,7 +1407,7 @@ static bool init_synced_region_reader(
             stderr,
             "WARNING: cannot use indexed %s reader for %s (%s); falling back to scan/filter.\n",
             label,
-            query.c_str(),
+            shown_query,
             bcf_sr_strerror(reader->errnum)
         );
         bcf_sr_destroy(reader);
@@ -1487,6 +1640,7 @@ int main(int argc, char** argv) {
             "WARNING: genotype VCF header has no ##contig lines; adding FLARE/header region contigs to the in-memory genotype header.\n"
         );
         add_contigs_from_header_if_missing(ghdr, ahdr, "genotype", "FLARE");
+        add_contigs_from_extract_if_missing(ghdr, extract_sites, "genotype");
         if (!region.active && ghdr->n[BCF_DT_CTG] == 0) {
             infer_contigs_from_records(geno_vcf, ghdr, "genotype");
         }
@@ -1494,6 +1648,9 @@ int main(int argc, char** argv) {
 
     bcf_srs_t* genotype_region_reader = nullptr;
     bcf_srs_t* flare_region_reader = nullptr;
+    bool skip_genotype_loop = false;
+    bool exact_extract_reader = false;
+    std::string progress_scope;
 
     if (region.active) {
         add_contig_to_header_if_missing(ghdr, region.chr, "genotype");
@@ -1501,7 +1658,52 @@ int main(int argc, char** argv) {
         if (region.geno_rid < 0) {
             die("failed to add region chromosome to genotype header: %s", region.chr.c_str());
         }
+    }
 
+    if (extract_sites.active) {
+        uint64_t n_extract_positions = 0;
+        std::string genotype_query = build_extract_genotype_region_query(
+            extract_sites,
+            ghdr,
+            region,
+            n_extract_positions
+        );
+
+        if (n_extract_positions == 0) {
+            skip_genotype_loop = true;
+            progress_scope = "--extract site list";
+            std::fprintf(
+                stderr,
+                "No --extract positions overlap the selected conversion scope; skipping genotype scan.\n"
+            );
+        } else {
+            bool have_genotype_extract_reader = init_synced_region_reader(
+                &genotype_region_reader,
+                geno_vcf,
+                genotype_query,
+                "genotype VCF",
+                "--extract site list"
+            );
+
+            if (have_genotype_extract_reader) {
+                exact_extract_reader = true;
+                progress_scope = "--extract site list";
+                std::fprintf(
+                    stderr,
+                    "Using indexed --extract genotype reader: %llu target position(s), %llu split allele(s).\n",
+                    static_cast<unsigned long long>(n_extract_positions),
+                    static_cast<unsigned long long>(extract_sites.allele_keys.size())
+                );
+            } else {
+                std::fprintf(
+                    stderr,
+                    "WARNING: --extract could not use genotype VCF random access; scanning records and filtering by CHROM/POS/REF/ALT.\n"
+                );
+            }
+        }
+    }
+
+    if (!extract_sites.active && region.active) {
         std::string flare_query =
             region.chr + ":1-" + std::to_string(kMaxVcfCoordinate);
         bool have_genotype_region_reader = init_synced_region_reader(
@@ -1510,6 +1712,9 @@ int main(int argc, char** argv) {
             region.label,
             "genotype VCF"
         );
+        if (have_genotype_region_reader) {
+            progress_scope = region.label;
+        }
         bool have_flare_region_reader = init_synced_region_reader(
             &flare_region_reader,
             flare_vcf,
@@ -1532,13 +1737,55 @@ int main(int argc, char** argv) {
                 region.label.c_str()
             );
         }
+    } else if (region.active) {
+        std::string flare_query =
+            region.chr + ":1-" + std::to_string(kMaxVcfCoordinate);
+        bool have_flare_region_reader = init_synced_region_reader(
+            &flare_region_reader,
+            flare_vcf,
+            flare_query,
+            "FLARE VCF"
+        );
+        if (!have_flare_region_reader) {
+            std::fprintf(
+                stderr,
+                "WARNING: indexed FLARE reader unavailable; scanning FLARE records while using --extract filter.\n"
+            );
+        }
+    } else if (extract_sites.active && !skip_genotype_loop) {
+        uint64_t n_extract_contigs = 0;
+        std::string flare_query = build_extract_flare_region_query(
+            extract_sites,
+            ghdr,
+            region,
+            n_extract_contigs
+        );
+        bool have_flare_extract_reader = init_synced_region_reader(
+            &flare_region_reader,
+            flare_vcf,
+            flare_query,
+            "FLARE VCF",
+            "--extract contig list"
+        );
+        if (have_flare_extract_reader) {
+            std::fprintf(
+                stderr,
+                "Using indexed FLARE reader for --extract: %llu contig(s).\n",
+                static_cast<unsigned long long>(n_extract_contigs)
+            );
+        } else {
+            std::fprintf(
+                stderr,
+                "WARNING: indexed FLARE reader unavailable for --extract contigs; scanning FLARE records.\n"
+            );
+        }
     }
 
     ProgressReporter progress(
         "genotype VCF",
         geno_vcf,
         "split variants",
-        region.active ? region.label.c_str() : nullptr
+        progress_scope.empty() ? (region.active ? region.label.c_str() : nullptr) : progress_scope.c_str()
     );
 
     if (rare_threshold < 0) {
@@ -1630,23 +1877,26 @@ int main(int argc, char** argv) {
     uint32_t global_variant_index = 0;
 
     LaiRecord lai_record;
-    bool has_lai_record = read_next_lai_record(
-        afp,
-        ahdr,
-        ghdr,
-        arec,
-        flare_region_reader,
-        raw_n_samples,
-        keep_raw_indices,
-        n_ancestries,
-        n_words,
-        &an1_arr,
-        &nan1_arr,
-        &an2_arr,
-        &nan2_arr,
-        warned_missing_flare_contigs,
-        lai_record
-    );
+    bool has_lai_record = false;
+    if (!skip_genotype_loop) {
+        has_lai_record = read_next_lai_record(
+            afp,
+            ahdr,
+            ghdr,
+            arec,
+            flare_region_reader,
+            raw_n_samples,
+            keep_raw_indices,
+            n_ancestries,
+            n_words,
+            &an1_arr,
+            &nan1_arr,
+            &an2_arr,
+            &nan2_arr,
+            warned_missing_flare_contigs,
+            lai_record
+        );
+    }
     int last_flare_geno_rid = -1;
     int64_t last_flare_pos = 0;
 
@@ -1655,7 +1905,8 @@ int main(int argc, char** argv) {
     std::string pre_region_chr;
     bool has_pre_region_state = false;
 
-    while (read_next_genotype_record(gfp, ghdr, grec, genotype_region_reader, region) == 0) {
+    while (!skip_genotype_loop &&
+           read_next_genotype_record(gfp, ghdr, grec, genotype_region_reader, region) == 0) {
         progress.record_scanned();
 
         const char* g_chr = bcf_hdr_id2name(ghdr, grec->rid);
@@ -1751,6 +2002,11 @@ int main(int argc, char** argv) {
                     output_end = std::min(interval_end, region.end);
                     emit_interval = output_start <= output_end;
                 }
+            }
+
+            if (!region.active && extract_sites.active && exact_extract_reader &&
+                extract_sites.contigs.count(interval_record.chr) == 0) {
+                emit_interval = false;
             }
 
             if (emit_interval) {

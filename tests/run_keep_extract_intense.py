@@ -7,6 +7,7 @@ import argparse
 import gzip
 import math
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -266,12 +267,16 @@ def make_selected_alleles(records: list[dict]) -> set[tuple[str, int, str, str]]
     return selected
 
 
-def write_extract_files(work: pathlib.Path, selected: set[tuple[str, int, str, str]]) -> tuple[pathlib.Path, pathlib.Path]:
+def write_extract_files(
+    work: pathlib.Path,
+    selected: set[tuple[str, int, str, str]],
+    stem: str = "extract.sites",
+) -> tuple[pathlib.Path, pathlib.Path]:
     by_site: dict[tuple[str, int, str], list[str]] = {}
     for chrom, pos, ref, alt in sorted(selected):
         by_site.setdefault((chrom, pos, ref), []).append(alt)
 
-    pvar = work / "extract.sites.pvar"
+    pvar = work / f"{stem}.pvar"
     with pvar.open("w") as out:
         out.write("#CHROM\tPOS\tID\tREF\tALT\n")
         for (chrom, pos, ref), alts in sorted(by_site.items()):
@@ -280,7 +285,7 @@ def write_extract_files(work: pathlib.Path, selected: set[tuple[str, int, str, s
                 f"\t{ref}\t{','.join(alts)}\n"
             )
 
-    vcf = work / "extract.sites.vcf"
+    vcf = work / f"{stem}.vcf"
     with vcf.open("w") as out:
         out.write("##fileformat=VCFv4.2\n")
         out.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tignored\n")
@@ -290,7 +295,7 @@ def write_extract_files(work: pathlib.Path, selected: set[tuple[str, int, str, s
                 f"\t{ref}\t{','.join(alts)}\t.\tPASS\t.\tGT\t0|0\n"
             )
 
-    vcfgz = work / "extract.sites.vcf.gz"
+    vcfgz = work / f"{stem}.vcf.gz"
     with vcf.open("rb") as src, gzip.open(vcfgz, "wb") as dst:
         shutil.copyfileobj(src, dst)
 
@@ -410,6 +415,30 @@ def build_with_cli(
     return export_prefix(bin_dir, prefix)
 
 
+def indexed_expected_from_split_records(
+    split_records_all: list[dict],
+    selected: set[tuple[str, int, str, str]],
+) -> list[dict]:
+    expected = []
+    for split in split_records_all:
+        key = (split["chrom"], split["pos"], split["ref"], split["alt"])
+        if key not in selected:
+            continue
+        copied = dict(split)
+        copied["global_index"] = len(expected)
+        copied["alt_index"] = 1
+        copied["id"] = f"{split['id']}_{split['ref']}_{split['alt']}"
+        expected.append(copied)
+    return expected
+
+
+def last_progress_record_count(stderr: str) -> int:
+    matches = re.findall(r"Progress: records (\d+)", stderr)
+    if not matches:
+        fail(f"missing progress records line in stderr:\n{stderr}")
+    return int(matches[-1])
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bin-dir", type=pathlib.Path, default=pathlib.Path("bin"))
@@ -508,6 +537,51 @@ def main() -> int:
         assert_vcf_matches(pvar_vcf, keep_samples, subset_expected)
         if read_roundtrip_vcf(pvar_vcf) != read_roundtrip_vcf(subset_vcf):
             fail("PVAR extract output differs from gzipped VCF extract output")
+
+        indexed_selected = {
+            (split["chrom"], split["pos"], split["ref"], split["alt"])
+            for split in [full_expected[1], full_expected[7], full_expected[19], full_expected[-3]]
+        }
+        indexed_extract_pvar, _indexed_extract_vcfgz = write_extract_files(
+            work,
+            indexed_selected,
+            "indexed.extract.sites",
+        )
+        indexed_expected = indexed_expected_from_split_records(full_expected, indexed_selected)
+        indexed_prefix = work / "subset.indexed_extract"
+        indexed_result = run(
+            [
+                str(bin_dir / "felixla"),
+                "--phase-vcf",
+                str(legacy_vcf),
+                "--flare-vcf",
+                str(flare_path),
+                "--n-ancestries",
+                str(N_ANCESTRIES),
+                "--extract",
+                str(indexed_extract_pvar),
+                "--make-felixla",
+                "--out",
+                str(indexed_prefix),
+            ]
+        )
+        if "Using indexed --extract genotype reader" not in indexed_result.stderr:
+            fail(f"indexed --extract reader was not used:\n{indexed_result.stderr}")
+        scanned_records = last_progress_record_count(indexed_result.stderr)
+        selected_positions = {(chrom, pos) for chrom, pos, _ref, _alt in indexed_selected}
+        expected_scanned_records = sum(
+            1 for split in full_expected
+            if (split["chrom"], split["pos"]) in selected_positions
+        )
+        if scanned_records != expected_scanned_records:
+            fail(
+                f"indexed --extract scanned {scanned_records} records; "
+                f"expected exactly {expected_scanned_records} records at selected positions"
+            )
+        if scanned_records >= len(full_expected):
+            fail(f"indexed --extract scanned the full VCF: {scanned_records} of {len(full_expected)} records")
+        indexed_vcf = export_prefix(bin_dir, indexed_prefix)
+        assert_vcf_matches(indexed_vcf, samples, indexed_expected)
 
         region = ("chr1", 200, 650)
         region_expected = split_records(records, keep_indices, selected=selected, region=region)
