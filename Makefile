@@ -5,26 +5,14 @@ PKG_CONFIG ?= pkg-config
 
 BIN_DIR ?= bin
 STATIC_BIN_DIR ?= bin-static
-PACK_TARGET := $(BIN_DIR)/flare_subset_to_tractor_hybrid
-VCF_TARGET := $(BIN_DIR)/tractor_hybrid_to_vcf
-CMP_TARGET := $(BIN_DIR)/compare_vcfs
-DOSAGE_TARGET := $(BIN_DIR)/tractor_dosage_vcf_to_hybrid
-RFMIX_MSP_TARGET := $(BIN_DIR)/rfmix_msp_to_tractor_hybrid
-EXTRACT_TARGET := $(BIN_DIR)/tractor_hybrid_extract_region
-ADMIX_TARGET := $(BIN_DIR)/calc_tractor_admixture
-FELIX_QUERY_TARGET := $(BIN_DIR)/felixla_query
-FELIX_CLI_TARGET := $(BIN_DIR)/felixla
-SHAPEIT_ARGS_TARGET := $(BIN_DIR)/shapeit_chunks_to_tractor_args
-STATIC_PACK_TARGET := $(STATIC_BIN_DIR)/flare_subset_to_tractor_hybrid
-STATIC_VCF_TARGET := $(STATIC_BIN_DIR)/tractor_hybrid_to_vcf
-STATIC_CMP_TARGET := $(STATIC_BIN_DIR)/compare_vcfs
-STATIC_DOSAGE_TARGET := $(STATIC_BIN_DIR)/tractor_dosage_vcf_to_hybrid
-STATIC_RFMIX_MSP_TARGET := $(STATIC_BIN_DIR)/rfmix_msp_to_tractor_hybrid
-STATIC_EXTRACT_TARGET := $(STATIC_BIN_DIR)/tractor_hybrid_extract_region
-STATIC_ADMIX_TARGET := $(STATIC_BIN_DIR)/calc_tractor_admixture
-STATIC_FELIX_QUERY_TARGET := $(STATIC_BIN_DIR)/felixla_query
-STATIC_FELIX_CLI_TARGET := $(STATIC_BIN_DIR)/felixla
-STATIC_SHAPEIT_ARGS_TARGET := $(STATIC_BIN_DIR)/shapeit_chunks_to_tractor_args
+BUILD_DIR ?= build
+OBJ_DIR := $(BUILD_DIR)/felixla-objects
+STATIC_OBJ_DIR := $(BUILD_DIR)/felixla-static-objects
+
+FELIX_TARGET := $(BIN_DIR)/felixla
+STATIC_FELIX_TARGET := $(STATIC_BIN_DIR)/felixla
+
+FELIX_SRC := src/felixla.cpp
 PACK_SRC := src/flare_subset_to_tractor_hybrid.cpp
 VCF_SRC := src/tractor_hybrid_to_vcf.cpp
 CMP_SRC := src/compare_vcfs.cpp
@@ -33,8 +21,37 @@ RFMIX_MSP_SRC := src/rfmix_msp_to_tractor_hybrid.cpp
 EXTRACT_SRC := src/tractor_hybrid_extract_region.cpp
 ADMIX_SRC := src/calc_tractor_admixture.cpp
 FELIX_QUERY_SRC := src/felixla_query.cpp
-FELIX_CLI_SRC := scripts/felixla
-SHAPEIT_ARGS_SRC := scripts/shapeit_chunks_to_tractor_args.sh
+
+TOOL_OBJS := \
+	$(OBJ_DIR)/flare_subset_to_tractor_hybrid.o \
+	$(OBJ_DIR)/tractor_hybrid_to_vcf.o \
+	$(OBJ_DIR)/compare_vcfs.o \
+	$(OBJ_DIR)/tractor_dosage_vcf_to_hybrid.o \
+	$(OBJ_DIR)/rfmix_msp_to_tractor_hybrid.o \
+	$(OBJ_DIR)/tractor_hybrid_extract_region.o \
+	$(OBJ_DIR)/calc_tractor_admixture.o \
+	$(OBJ_DIR)/felixla_query.o
+
+STATIC_TOOL_OBJS := \
+	$(STATIC_OBJ_DIR)/flare_subset_to_tractor_hybrid.o \
+	$(STATIC_OBJ_DIR)/tractor_hybrid_to_vcf.o \
+	$(STATIC_OBJ_DIR)/compare_vcfs.o \
+	$(STATIC_OBJ_DIR)/tractor_dosage_vcf_to_hybrid.o \
+	$(STATIC_OBJ_DIR)/rfmix_msp_to_tractor_hybrid.o \
+	$(STATIC_OBJ_DIR)/tractor_hybrid_extract_region.o \
+	$(STATIC_OBJ_DIR)/calc_tractor_admixture.o \
+	$(STATIC_OBJ_DIR)/felixla_query.o
+
+LEGACY_TOOL_NAMES := \
+	flare_subset_to_tractor_hybrid \
+	tractor_hybrid_to_vcf \
+	compare_vcfs \
+	tractor_dosage_vcf_to_hybrid \
+	rfmix_msp_to_tractor_hybrid \
+	tractor_hybrid_extract_region \
+	calc_tractor_admixture \
+	felixla_query \
+	shapeit_chunks_to_tractor_args
 
 PKG_HTSLIB_CFLAGS := $(shell $(PKG_CONFIG) --cflags htslib 2>/dev/null)
 PKG_HTSLIB_LIBS := $(shell $(PKG_CONFIG) --libs htslib 2>/dev/null)
@@ -98,11 +115,23 @@ endif
 CPPFLAGS += $(HTSLIB_CFLAGS)
 LDLIBS += $(HTSLIB_LIBS)
 
-.PHONY: all static clean check-deps check-static-deps test test-static test-intense
+.PHONY: all static clean clean-legacy-bin clean-legacy-static check-deps check-static-deps test test-static test-intense
 
-all: check-deps $(PACK_TARGET) $(VCF_TARGET) $(CMP_TARGET) $(DOSAGE_TARGET) $(RFMIX_MSP_TARGET) $(EXTRACT_TARGET) $(ADMIX_TARGET) $(FELIX_QUERY_TARGET) $(FELIX_CLI_TARGET) $(SHAPEIT_ARGS_TARGET)
+all: clean-legacy-bin check-deps $(FELIX_TARGET)
 
-static: check-static-deps $(STATIC_PACK_TARGET) $(STATIC_VCF_TARGET) $(STATIC_CMP_TARGET) $(STATIC_DOSAGE_TARGET) $(STATIC_RFMIX_MSP_TARGET) $(STATIC_EXTRACT_TARGET) $(STATIC_ADMIX_TARGET) $(STATIC_FELIX_QUERY_TARGET) $(STATIC_FELIX_CLI_TARGET) $(STATIC_SHAPEIT_ARGS_TARGET)
+static: clean-legacy-static check-static-deps $(STATIC_FELIX_TARGET)
+
+clean-legacy-bin:
+	rm -f $(addprefix $(BIN_DIR)/,$(LEGACY_TOOL_NAMES))
+	@if [ -d "$(BIN_DIR)" ]; then \
+		find "$(BIN_DIR)" -mindepth 1 -maxdepth 1 ! -name felixla -exec rm -R -f {} +; \
+	fi
+
+clean-legacy-static:
+	rm -f $(addprefix $(STATIC_BIN_DIR)/,$(LEGACY_TOOL_NAMES))
+	@if [ -d "$(STATIC_BIN_DIR)" ]; then \
+		find "$(STATIC_BIN_DIR)" -mindepth 1 -maxdepth 1 ! -name felixla -exec rm -R -f {} +; \
+	fi
 
 check-deps:
 	@printf '#include <htslib/hts.h>\n#include <htslib/vcf.h>\n' | \
@@ -115,85 +144,77 @@ check-static-deps: check-deps
 		exit 1; \
 	fi
 
-$(PACK_TARGET): $(PACK_SRC)
+$(FELIX_TARGET): $(FELIX_SRC) $(TOOL_OBJS)
 	mkdir -p $(BIN_DIR)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(LDFLAGS) $(LDLIBS)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(FELIX_SRC) $(TOOL_OBJS) -o $@ $(LDFLAGS) $(LDLIBS)
 
-$(VCF_TARGET): $(VCF_SRC)
-	mkdir -p $(BIN_DIR)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(LDFLAGS) $(LDLIBS)
-
-$(CMP_TARGET): $(CMP_SRC)
-	mkdir -p $(BIN_DIR)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(LDFLAGS) $(LDLIBS)
-
-$(DOSAGE_TARGET): $(DOSAGE_SRC)
-	mkdir -p $(BIN_DIR)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(LDFLAGS) $(LDLIBS)
-
-$(RFMIX_MSP_TARGET): $(RFMIX_MSP_SRC)
-	mkdir -p $(BIN_DIR)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(LDFLAGS) $(LDLIBS)
-
-$(EXTRACT_TARGET): $(EXTRACT_SRC)
-	mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
-
-$(ADMIX_TARGET): $(ADMIX_SRC)
-	mkdir -p $(BIN_DIR)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(LDFLAGS) $(LDLIBS)
-
-$(FELIX_QUERY_TARGET): $(FELIX_QUERY_SRC)
-	mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
-
-$(FELIX_CLI_TARGET): $(FELIX_CLI_SRC)
-	mkdir -p $(BIN_DIR)
-	install -m 755 $< $@
-
-$(SHAPEIT_ARGS_TARGET): $(SHAPEIT_ARGS_SRC)
-	mkdir -p $(BIN_DIR)
-	install -m 755 $< $@
-
-$(STATIC_PACK_TARGET): $(PACK_SRC)
+$(STATIC_FELIX_TARGET): $(FELIX_SRC) $(STATIC_TOOL_OBJS)
 	mkdir -p $(STATIC_BIN_DIR)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(STATIC_LDFLAGS) $(HTSLIB_STATIC_LIBS)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(FELIX_SRC) $(STATIC_TOOL_OBJS) -o $@ $(STATIC_LDFLAGS) $(HTSLIB_STATIC_LIBS)
 
-$(STATIC_VCF_TARGET): $(VCF_SRC)
-	mkdir -p $(STATIC_BIN_DIR)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(STATIC_LDFLAGS) $(HTSLIB_STATIC_LIBS)
+$(OBJ_DIR)/flare_subset_to_tractor_hybrid.o: $(PACK_SRC)
+	mkdir -p $(OBJ_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Dmain=felixla_pack_main -c $< -o $@
 
-$(STATIC_CMP_TARGET): $(CMP_SRC)
-	mkdir -p $(STATIC_BIN_DIR)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(STATIC_LDFLAGS) $(HTSLIB_STATIC_LIBS)
+$(OBJ_DIR)/tractor_hybrid_to_vcf.o: $(VCF_SRC)
+	mkdir -p $(OBJ_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Dmain=felixla_to_vcf_main -c $< -o $@
 
-$(STATIC_DOSAGE_TARGET): $(DOSAGE_SRC)
-	mkdir -p $(STATIC_BIN_DIR)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(STATIC_LDFLAGS) $(HTSLIB_STATIC_LIBS)
+$(OBJ_DIR)/compare_vcfs.o: $(CMP_SRC)
+	mkdir -p $(OBJ_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Dmain=felixla_compare_main -c $< -o $@
 
-$(STATIC_RFMIX_MSP_TARGET): $(RFMIX_MSP_SRC)
-	mkdir -p $(STATIC_BIN_DIR)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(STATIC_LDFLAGS) $(HTSLIB_STATIC_LIBS)
+$(OBJ_DIR)/tractor_dosage_vcf_to_hybrid.o: $(DOSAGE_SRC)
+	mkdir -p $(OBJ_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Dmain=felixla_dosage_main -c $< -o $@
 
-$(STATIC_EXTRACT_TARGET): $(EXTRACT_SRC)
-	mkdir -p $(STATIC_BIN_DIR)
-	$(CXX) $(CXXFLAGS) $< -o $@ $(STATIC_LDFLAGS)
+$(OBJ_DIR)/rfmix_msp_to_tractor_hybrid.o: $(RFMIX_MSP_SRC)
+	mkdir -p $(OBJ_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Dmain=felixla_rfmix_main -c $< -o $@
 
-$(STATIC_ADMIX_TARGET): $(ADMIX_SRC)
-	mkdir -p $(STATIC_BIN_DIR)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(STATIC_LDFLAGS) $(HTSLIB_STATIC_LIBS)
+$(OBJ_DIR)/tractor_hybrid_extract_region.o: $(EXTRACT_SRC)
+	mkdir -p $(OBJ_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Dmain=felixla_extract_main -c $< -o $@
 
-$(STATIC_FELIX_QUERY_TARGET): $(FELIX_QUERY_SRC)
-	mkdir -p $(STATIC_BIN_DIR)
-	$(CXX) $(CXXFLAGS) $< -o $@ $(STATIC_LDFLAGS)
+$(OBJ_DIR)/calc_tractor_admixture.o: $(ADMIX_SRC)
+	mkdir -p $(OBJ_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Dmain=felixla_admixture_main -c $< -o $@
 
-$(STATIC_FELIX_CLI_TARGET): $(FELIX_CLI_SRC)
-	mkdir -p $(STATIC_BIN_DIR)
-	install -m 755 $< $@
+$(OBJ_DIR)/felixla_query.o: $(FELIX_QUERY_SRC)
+	mkdir -p $(OBJ_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Dmain=felixla_query_main -c $< -o $@
 
-$(STATIC_SHAPEIT_ARGS_TARGET): $(SHAPEIT_ARGS_SRC)
-	mkdir -p $(STATIC_BIN_DIR)
-	install -m 755 $< $@
+$(STATIC_OBJ_DIR)/flare_subset_to_tractor_hybrid.o: $(PACK_SRC)
+	mkdir -p $(STATIC_OBJ_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Dmain=felixla_pack_main -c $< -o $@
+
+$(STATIC_OBJ_DIR)/tractor_hybrid_to_vcf.o: $(VCF_SRC)
+	mkdir -p $(STATIC_OBJ_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Dmain=felixla_to_vcf_main -c $< -o $@
+
+$(STATIC_OBJ_DIR)/compare_vcfs.o: $(CMP_SRC)
+	mkdir -p $(STATIC_OBJ_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Dmain=felixla_compare_main -c $< -o $@
+
+$(STATIC_OBJ_DIR)/tractor_dosage_vcf_to_hybrid.o: $(DOSAGE_SRC)
+	mkdir -p $(STATIC_OBJ_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Dmain=felixla_dosage_main -c $< -o $@
+
+$(STATIC_OBJ_DIR)/rfmix_msp_to_tractor_hybrid.o: $(RFMIX_MSP_SRC)
+	mkdir -p $(STATIC_OBJ_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Dmain=felixla_rfmix_main -c $< -o $@
+
+$(STATIC_OBJ_DIR)/tractor_hybrid_extract_region.o: $(EXTRACT_SRC)
+	mkdir -p $(STATIC_OBJ_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Dmain=felixla_extract_main -c $< -o $@
+
+$(STATIC_OBJ_DIR)/calc_tractor_admixture.o: $(ADMIX_SRC)
+	mkdir -p $(STATIC_OBJ_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Dmain=felixla_admixture_main -c $< -o $@
+
+$(STATIC_OBJ_DIR)/felixla_query.o: $(FELIX_QUERY_SRC)
+	mkdir -p $(STATIC_OBJ_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Dmain=felixla_query_main -c $< -o $@
 
 test: all
 	BIN_DIR="$(abspath $(BIN_DIR))" bash tests/run_tiny.sh
@@ -205,4 +226,4 @@ test-static: static
 	BIN_DIR="$(abspath $(STATIC_BIN_DIR))" bash tests/run_tiny.sh
 
 clean:
-	rm -rf $(BIN_DIR) $(STATIC_BIN_DIR)
+	rm -rf $(BIN_DIR) $(STATIC_BIN_DIR) $(BUILD_DIR)

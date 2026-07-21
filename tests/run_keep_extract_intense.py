@@ -244,7 +244,7 @@ def read_samples(prefix: pathlib.Path) -> list[str]:
 
 def export_prefix(bin_dir: pathlib.Path, prefix: pathlib.Path) -> pathlib.Path:
     out_vcf = pathlib.Path(str(prefix) + ".roundtrip.vcf.gz")
-    run([str(bin_dir / "tractor_hybrid_to_vcf"), str(prefix), str(out_vcf)])
+    run([str(bin_dir / "felixla"), "to-vcf", str(prefix), str(out_vcf)])
     return out_vcf
 
 
@@ -427,9 +427,14 @@ def main() -> int:
 
     try:
         bin_dir = args.bin_dir.resolve()
-        for tool in ["felixla", "flare_subset_to_tractor_hybrid", "tractor_hybrid_to_vcf"]:
-            if not (bin_dir / tool).exists():
-                fail(f"missing tool: {bin_dir / tool}")
+        if not (bin_dir / "felixla").exists():
+            fail(f"missing tool: {bin_dir / 'felixla'}")
+        unexpected = sorted(
+            path.name for path in bin_dir.iterdir()
+            if path.name != "felixla"
+        )
+        if unexpected:
+            fail(f"unexpected files in {bin_dir}; only felixla should be present: {unexpected}")
 
         samples, records, ancestry, genotype_path, flare_path = build_inputs(work)
         all_indices = list(range(len(samples)))
@@ -442,7 +447,8 @@ def main() -> int:
         legacy_prefix = work / "full.legacy"
         run(
             [
-                str(bin_dir / "flare_subset_to_tractor_hybrid"),
+                str(bin_dir / "felixla"),
+                "from-flare",
                 str(genotype_path),
                 str(flare_path),
                 str(N_ANCESTRIES),

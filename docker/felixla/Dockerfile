@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# FELIXla standalone tools image.
+# FELIXla single-binary image.
 
 FROM debian:bookworm-slim AS build
 ARG DEBIAN_FRONTEND=noninteractive
@@ -20,7 +20,6 @@ WORKDIR /src
 
 COPY Makefile README.md ./
 COPY src ./src
-COPY scripts ./scripts
 COPY tests ./tests
 COPY testdata ./testdata
 COPY resources ./resources
@@ -32,18 +31,17 @@ FROM debian:bookworm-slim
 ARG DEBIAN_FRONTEND=noninteractive
 
 LABEL org.opencontainers.image.title="FELIXla"
-LABEL org.opencontainers.image.description="FELIX local-ancestry storage tools for scalable ancestry-aware mixed-model analyses"
+LABEL org.opencontainers.image.description="Single-binary FELIX local-ancestry storage command for scalable ancestry-aware mixed-model analyses"
 LABEL org.opencontainers.image.source="https://github.com/yorkklause/FELIXla"
 LABEL org.opencontainers.image.licenses="GPL-3.0"
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        bash \
         ca-certificates \
         libhts3 && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=build /src/bin/ /usr/local/bin/
+COPY --from=build /src/bin/felixla /usr/local/bin/felixla
 COPY --from=build /src/README.md /opt/felixla/README.md
 COPY --from=build /src/resources/shapeit5_chunks /opt/felixla/resources/shapeit5_chunks
 

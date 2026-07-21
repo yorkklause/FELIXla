@@ -3,9 +3,12 @@
 .DS_Store
 bin
 bin-static
+build
 __pycache__
 *.pyc
 *.dSYM
+prebuilt
+scripts
 SAIGE-Tractor-upstream
 docker/saigetractor-hybrid-debug
 docker/saigetractor-hybrid-debug2
@@ -13,7 +16,6 @@ io_mac_dsub_runs
 outputs
 side_versions
 step2_work
-scripts/calc_tractor_admixture.py
 *.common.geno.bin
 *.common.variant.idx
 *.common.variant.mks

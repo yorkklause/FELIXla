@@ -7,14 +7,29 @@ BIN_DIR="${BIN_DIR:-$ROOT_DIR/bin}"
 OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tractor-hybrid-tiny.XXXXXX")"
 trap 'rm -rf "$OUT_DIR"' EXIT
 
-"$BIN_DIR/flare_subset_to_tractor_hybrid" \
+python3 - "$BIN_DIR" <<'PY'
+import pathlib
+import sys
+
+bin_dir = pathlib.Path(sys.argv[1])
+unexpected = sorted(
+    path.name for path in bin_dir.iterdir()
+    if path.name != "felixla"
+)
+assert not unexpected, unexpected
+assert (bin_dir / "felixla").is_file(), bin_dir
+PY
+
+"$BIN_DIR/felixla" \
+  from-flare \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   "$ROOT_DIR/testdata/tiny.flare.vcf" \
   2 \
   1 \
   "$OUT_DIR/tiny" >/dev/null
 
-"$BIN_DIR/tractor_hybrid_to_vcf" \
+"$BIN_DIR/felixla" \
+  to-vcf \
   "$OUT_DIR/tiny" \
   "$OUT_DIR/tiny.roundtrip.vcf.gz" >/dev/null
 
@@ -116,7 +131,8 @@ PY
   --out \
   "$OUT_DIR/tiny.keep_extract" >/dev/null
 
-"$BIN_DIR/tractor_hybrid_to_vcf" \
+"$BIN_DIR/felixla" \
+  to-vcf \
   "$OUT_DIR/tiny.keep_extract" \
   "$OUT_DIR/tiny.keep_extract.roundtrip.vcf.gz" >/dev/null
 
@@ -226,7 +242,8 @@ assert [[pathlib.Path(row[0]), pathlib.Path(row[1]), row[2], row[3], pathlib.Pat
 ], rows
 PY
 
-"$BIN_DIR/compare_vcfs" \
+"$BIN_DIR/felixla" \
+  compare-vcfs \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   "$OUT_DIR/tiny.roundtrip.vcf.gz" \
   --split-multiallelic \
@@ -234,16 +251,19 @@ PY
 
 grep -q "Differences:             0" "$OUT_DIR/compare.txt"
 
-"$BIN_DIR/tractor_hybrid_extract_region" \
+"$BIN_DIR/felixla" \
+  extract \
   "$OUT_DIR/tiny" \
   chr1:100-160 \
   "$OUT_DIR/tiny.chr1_100_160" >/dev/null
 
-"$BIN_DIR/tractor_hybrid_to_vcf" \
+"$BIN_DIR/felixla" \
+  to-vcf \
   "$OUT_DIR/tiny.chr1_100_160" \
   "$OUT_DIR/tiny.chr1_100_160.roundtrip.vcf.gz" >/dev/null
 
-"$BIN_DIR/flare_subset_to_tractor_hybrid" \
+"$BIN_DIR/felixla" \
+  from-flare \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   "$ROOT_DIR/testdata/tiny.flare.vcf" \
   2 \
@@ -253,11 +273,13 @@ grep -q "Differences:             0" "$OUT_DIR/compare.txt"
 
 grep -q $'selected_region\tchr1:100-160' "$OUT_DIR/tiny.direct_region.meta"
 
-"$BIN_DIR/tractor_hybrid_to_vcf" \
+"$BIN_DIR/felixla" \
+  to-vcf \
   "$OUT_DIR/tiny.direct_region" \
   "$OUT_DIR/tiny.direct_region.roundtrip.vcf.gz" >/dev/null
 
-"$BIN_DIR/compare_vcfs" \
+"$BIN_DIR/felixla" \
+  compare-vcfs \
   "$OUT_DIR/tiny.chr1_100_160.roundtrip.vcf.gz" \
   "$OUT_DIR/tiny.direct_region.roundtrip.vcf.gz" \
   --split-multiallelic \
@@ -268,18 +290,21 @@ grep -q "Differences:             0" "$OUT_DIR/direct_region.compare.txt"
 grep -v '^##contig=' "$ROOT_DIR/testdata/tiny.genotypes.vcf" >"$OUT_DIR/tiny.genotypes.no_contig.vcf"
 grep -v '^##contig=' "$ROOT_DIR/testdata/tiny.flare.vcf" >"$OUT_DIR/tiny.flare.no_contig.vcf"
 
-"$BIN_DIR/flare_subset_to_tractor_hybrid" \
+"$BIN_DIR/felixla" \
+  from-flare \
   "$OUT_DIR/tiny.genotypes.no_contig.vcf" \
   "$OUT_DIR/tiny.flare.no_contig.vcf" \
   2 \
   1 \
   "$OUT_DIR/tiny.no_contig" >/dev/null
 
-"$BIN_DIR/tractor_hybrid_to_vcf" \
+"$BIN_DIR/felixla" \
+  to-vcf \
   "$OUT_DIR/tiny.no_contig" \
   "$OUT_DIR/tiny.no_contig.roundtrip.vcf.gz" >/dev/null
 
-"$BIN_DIR/compare_vcfs" \
+"$BIN_DIR/felixla" \
+  compare-vcfs \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   "$OUT_DIR/tiny.no_contig.roundtrip.vcf.gz" \
   --split-multiallelic \
@@ -287,7 +312,8 @@ grep -v '^##contig=' "$ROOT_DIR/testdata/tiny.flare.vcf" >"$OUT_DIR/tiny.flare.n
 
 grep -q "Differences:             0" "$OUT_DIR/no_contig.compare.txt"
 
-"$BIN_DIR/flare_subset_to_tractor_hybrid" \
+"$BIN_DIR/felixla" \
+  from-flare \
   "$OUT_DIR/tiny.genotypes.no_contig.vcf" \
   "$OUT_DIR/tiny.flare.no_contig.vcf" \
   2 \
@@ -297,11 +323,13 @@ grep -q "Differences:             0" "$OUT_DIR/no_contig.compare.txt"
 
 grep -q $'selected_region\tchr1:100-160' "$OUT_DIR/tiny.no_contig_region.meta"
 
-"$BIN_DIR/tractor_hybrid_to_vcf" \
+"$BIN_DIR/felixla" \
+  to-vcf \
   "$OUT_DIR/tiny.no_contig_region" \
   "$OUT_DIR/tiny.no_contig_region.roundtrip.vcf.gz" >/dev/null
 
-"$BIN_DIR/compare_vcfs" \
+"$BIN_DIR/felixla" \
+  compare-vcfs \
   "$OUT_DIR/tiny.direct_region.roundtrip.vcf.gz" \
   "$OUT_DIR/tiny.no_contig_region.roundtrip.vcf.gz" \
   --split-multiallelic \
@@ -319,11 +347,13 @@ grep -q "Differences:             0" "$OUT_DIR/no_contig_region.compare.txt"
   --out \
   "$OUT_DIR/rfmix" >/dev/null
 
-"$BIN_DIR/tractor_hybrid_to_vcf" \
+"$BIN_DIR/felixla" \
+  to-vcf \
   "$OUT_DIR/rfmix" \
   "$OUT_DIR/rfmix.roundtrip.vcf.gz" >/dev/null
 
-"$BIN_DIR/compare_vcfs" \
+"$BIN_DIR/felixla" \
+  compare-vcfs \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   "$OUT_DIR/rfmix.roundtrip.vcf.gz" \
   --split-multiallelic \
@@ -339,7 +369,8 @@ grep -q "Differences:             0" "$OUT_DIR/rfmix.compare.txt"
   --out \
   "$OUT_DIR/dosage" >/dev/null
 
-"$BIN_DIR/tractor_hybrid_to_vcf" \
+"$BIN_DIR/felixla" \
+  to-vcf \
   "$OUT_DIR/dosage" \
   "$OUT_DIR/dosage.roundtrip.vcf.gz" >/dev/null
 
@@ -664,7 +695,8 @@ assert "rfmix_subpopulation_order_codes" in meta, meta
 assert samples == ["s1", "s2"], samples
 PY
 
-if "$BIN_DIR/flare_subset_to_tractor_hybrid" \
+if "$BIN_DIR/felixla" \
+  from-flare \
   "$ROOT_DIR/testdata/tiny.missing_gt.vcf" \
   "$ROOT_DIR/testdata/tiny.flare.vcf" \
   2 \
@@ -676,7 +708,8 @@ fi
 
 grep -q "missing genotype" "$OUT_DIR/missing_gt.err"
 
-if "$BIN_DIR/flare_subset_to_tractor_hybrid" \
+if "$BIN_DIR/felixla" \
+  from-flare \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   "$ROOT_DIR/testdata/tiny.missing_flare.vcf" \
   2 \
@@ -688,7 +721,8 @@ fi
 
 grep -q "missing FORMAT/AN1" "$OUT_DIR/missing_flare.err"
 
-if "$BIN_DIR/flare_subset_to_tractor_hybrid" \
+if "$BIN_DIR/felixla" \
+  from-flare \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   "$ROOT_DIR/testdata/tiny.flare_swapped_samples.vcf" \
   2 \
@@ -700,7 +734,8 @@ fi
 
 grep -q "sample IDs must be identical" "$OUT_DIR/swapped_samples.err"
 
-"$BIN_DIR/flare_subset_to_tractor_hybrid" \
+"$BIN_DIR/felixla" \
+  from-flare \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   "$ROOT_DIR/testdata/tiny.duplicate_flare.vcf" \
   2 \

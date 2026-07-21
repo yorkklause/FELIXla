@@ -49,16 +49,15 @@ GitHub repository and record the commit hash used in the analysis.
 
     `make`
 
-- Once the compiling is done, the executable `felixla` and the standalone helper
-  tools will be found in the `bin` folder. Type
+- Once the compiling is done, the single executable `felixla` will be found in
+  the `bin` folder. Type
 
     `bin/felixla --help` or `bin/felixla -h`
 
     to print a list of command-line options.
 
-- Static Linux binaries, when available, are distributed in
-  `prebuilt/linux-x86_64-static`. These binaries are intended for local VCF/BCF
-  paths and do not require conda or shared runtime libraries.
+- FELIXla is a complete binary entry point. It does not invoke separate FELIXla
+  helper executables at runtime.
 
 - A Docker image is published through GitHub Container Registry:
 
@@ -72,7 +71,7 @@ GitHub repository and record the commit hash used in the analysis.
 
 ## Using FELIXla
 
-The preferred entry point is the PLINK-style `felixla` wrapper:
+The preferred entry point is the PLINK-style `felixla` command:
 
 ```
 felixla \
@@ -120,7 +119,7 @@ felixla \
   comma-separated. REF must be known, and a REF mismatch against the genotype
   VCF is a fatal error.
 
-The wrapper also dispatches to compatible standalone tools:
+The same binary also dispatches to compatibility subcommands:
 
 ```
 felixla --phase-vcf PHASED_VCF --rfmix-msp MSP_FILE --n-ancestries N --make-felixla --out OUT_PREFIX
@@ -133,11 +132,11 @@ felixla --compare-vcfs EXPECTED_VCF OBSERVED_VCF [ --split-multiallelic ]
 felixla --recommend-mac-threshold --n-samples N_SAMPLES
 ```
 
-For compatibility with older scripts, the original command names are still
-available, including `flare_subset_to_tractor_hybrid`,
-`rfmix_msp_to_tractor_hybrid`, `tractor_dosage_vcf_to_hybrid`,
-`tractor_hybrid_to_vcf`, `tractor_hybrid_extract_region`, `felixla_query`,
-`calc_tractor_admixture`, and `compare_vcfs`.
+For compatibility with older command lines, the original command names are
+accepted as `felixla` subcommands, for example
+`felixla flare_subset_to_tractor_hybrid ...` and
+`felixla tractor_hybrid_to_vcf ...`. They are not installed as separate
+executables.
 
 ## Output
 
@@ -184,13 +183,13 @@ global_variant_index    chr    pos    id    ref    alt    sample    DSALL    DS1
 ```
 
 `DS1` corresponds to ancestry code `0`, `DS2` to ancestry code `1`, and so on.
-For common variants, `felixla_query` computes `DSk` by intersecting the dense
-ALT bit vector with the ancestry `k` haplotype mask. For rare variants, it
-uses the sparse carrier list directly.
+For common variants, `felixla` computes `DSk` by intersecting the dense ALT bit
+vector with the ancestry `k` haplotype mask. For rare variants, it uses the
+sparse carrier list directly.
 
 ## Example
 
-The following commands build the tools, create a FELIXla prefix from the tiny
+The following commands build the binary, create a FELIXla prefix from the tiny
 phased genotype and FLARE local ancestry fixtures, query one ancestry-specific
 dosage vector, and export the packed data back to split-biallelic VCF:
 
@@ -242,7 +241,7 @@ docker run --rm -v "$PWD":/data -w /data ghcr.io/yorkklause/felixla:latest \
   --out hybrid/chr22.subset
 ```
 
-The SHAPEIT/GLIMPSE chunk helper can generate converter argument rows for
+The SHAPEIT/GLIMPSE chunk mode can generate converter argument rows for
 chromosome-scale jobs:
 
 ```
@@ -273,8 +272,8 @@ make test-intense
 ```
 
 `test-intense` synthesizes multi-chromosome, multi-allelic phased genotype and
-FLARE inputs, compares the PLINK-style wrapper against the legacy positional
-converter, verifies `--keep`, `--extract`, `--region`, and `felixla --query`
+FLARE inputs, compares the PLINK-style command against the compatibility
+subcommand path, verifies `--keep`, `--extract`, `--region`, and `felixla --query`
 against a known truth table, and checks that malformed keep/extract files fail
 with specific errors.
 
@@ -293,9 +292,9 @@ make static
 make test-static
 ```
 
-`make static` writes binaries to `bin-static/` and links `libhts.a` directly
-when a static htslib archive is available. On Linux, fully static executables
-can be requested with:
+`make static` writes `bin-static/felixla` and links `libhts.a` directly when a
+static htslib archive is available. On Linux, a fully static executable can be
+requested with:
 
 ```
 make static STATIC_FULLY=1

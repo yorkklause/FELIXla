@@ -1,5 +1,6 @@
 bin/
 bin-static/
+build/
 __pycache__/
 *.pyc
 .DS_Store
@@ -9,7 +10,8 @@ docker/saigetractor-hybrid-debug2/
 io_mac_dsub_runs/
 outputs/
 side_versions/
-scripts/calc_tractor_admixture.py
+prebuilt/
+scripts/
 *.common.geno.bin
 *.common.variant.idx
 *.common.variant.mks
