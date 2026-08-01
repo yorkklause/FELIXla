@@ -721,18 +721,38 @@ fi
 
 grep -q "missing FORMAT/AN1" "$OUT_DIR/missing_flare.err"
 
-if "$BIN_DIR/felixla" \
+"$BIN_DIR/felixla" \
   from-flare \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   "$ROOT_DIR/testdata/tiny.flare_swapped_samples.vcf" \
   2 \
   1 \
-  "$OUT_DIR/swapped_samples" >/dev/null 2>"$OUT_DIR/swapped_samples.err"; then
-  echo "expected swapped sample fixture to fail" >&2
-  exit 1
-fi
+  "$OUT_DIR/swapped_samples" >/dev/null 2>"$OUT_DIR/swapped_samples.err"
 
-grep -q "sample IDs must be identical" "$OUT_DIR/swapped_samples.err"
+grep -q "Using genotype/FLARE sample intersection" "$OUT_DIR/swapped_samples.err"
+
+"$BIN_DIR/felixla" \
+  --felixla "$OUT_DIR/swapped_samples" \
+  --query chr1:100 \
+  --ref A \
+  --alt C \
+  > "$OUT_DIR/swapped_samples.query.tsv"
+
+python3 - "$OUT_DIR/swapped_samples" "$OUT_DIR/swapped_samples.query.tsv" <<'PY'
+import pathlib
+import sys
+
+prefix = pathlib.Path(sys.argv[1])
+query = pathlib.Path(sys.argv[2]).read_text().strip().splitlines()
+samples = pathlib.Path(str(prefix) + ".samples").read_text().strip().splitlines()
+
+assert samples == ["s1", "s2"], samples
+assert query == [
+    "global_variant_index\tchr\tpos\tid\tref\talt\tsample\tDSALL\tDS1\tDS2",
+    "1\tchr1\t100\tmulti_A_C\tA\tC\ts1\t1\t0\t1",
+    "1\tchr1\t100\tmulti_A_C\tA\tC\ts2\t0\t0\t0",
+], query
+PY
 
 "$BIN_DIR/felixla" \
   from-flare \

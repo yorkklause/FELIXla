@@ -52,7 +52,7 @@ PLINK-style examples:
 
 Primary input flags:
   --phase-vcf PATH              Phased diploid genotype VCF/BCF.
-  --flare-vcf PATH              FLARE local ancestry VCF/BCF with AN1/AN2.
+  --flare-vcf PATH              FLARE local ancestry VCF/BCF with AN1/AN2; samples matched by ID.
   --rfmix-msp PATH              RFMix MSP file.
   --tractor-dosage-vcf PATH     TRACTOR dosage VCF/BCF with ANC#/DS# fields.
   --felixla PREFIX              Existing FELIXla/tractor_hybrid prefix.

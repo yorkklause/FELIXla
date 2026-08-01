@@ -67,10 +67,20 @@ struct Region {
     int geno_rid = -1;
 };
 
-struct SampleSubset {
+struct KeepSamples {
     bool active = false;
     std::string path;
-    std::vector<int> raw_indices;
+    std::unordered_set<std::string> ids;
+};
+
+struct SampleSelection {
+    std::vector<int> genotype_raw_indices;
+    std::vector<int> flare_raw_indices;
+    std::vector<std::string> sample_ids;
+    int genotype_raw_sample_count = 0;
+    int flare_raw_sample_count = 0;
+    bool keep_active = false;
+    std::string keep_path;
 };
 
 struct ExtractPosition {
@@ -218,16 +228,15 @@ static std::string allele_key(
     return position_key(chr, pos) + "\t" + ref + "\t" + alt;
 }
 
-static SampleSubset load_keep_samples(bcf_hdr_t* ghdr, const std::string& path) {
-    SampleSubset subset;
-    if (path.empty()) return subset;
+static KeepSamples load_keep_samples(const std::string& path) {
+    KeepSamples keep;
+    if (path.empty()) return keep;
 
-    subset.active = true;
-    subset.path = path;
+    keep.active = true;
+    keep.path = path;
 
     TextLineReader reader(path, "--keep sample list");
 
-    std::unordered_set<std::string> requested;
     std::string line;
     uint64_t line_no = 0;
     while (reader.next(line)) {
@@ -244,32 +253,136 @@ static SampleSubset load_keep_samples(bcf_hdr_t* ghdr, const std::string& path) 
             die("--keep expects one sample ID per line at %s:%llu", path.c_str(),
                 static_cast<unsigned long long>(line_no));
         }
-        if (!requested.insert(sample_id).second) {
+        if (!keep.ids.insert(sample_id).second) {
             die("duplicate sample ID in --keep list at %s:%llu: %s", path.c_str(),
                 static_cast<unsigned long long>(line_no), sample_id.c_str());
         }
     }
 
-    if (requested.empty()) {
+    if (keep.ids.empty()) {
         die("--keep sample list is empty: %s", path.c_str());
     }
 
-    int n_raw_samples = bcf_hdr_nsamples(ghdr);
-    for (int raw_i = 0; raw_i < n_raw_samples; ++raw_i) {
-        const char* sample = ghdr->samples[raw_i];
-        if (requested.erase(sample) > 0) {
-            subset.raw_indices.push_back(raw_i);
+    return keep;
+}
+
+static bool sample_headers_identical(bcf_hdr_t* ghdr, bcf_hdr_t* ahdr) {
+    int n_genotype = bcf_hdr_nsamples(ghdr);
+    int n_flare = bcf_hdr_nsamples(ahdr);
+    if (n_genotype != n_flare) return false;
+
+    for (int i = 0; i < n_genotype; ++i) {
+        if (std::strcmp(ghdr->samples[i], ahdr->samples[i]) != 0) {
+            return false;
         }
     }
+    return true;
+}
 
-    if (!requested.empty()) {
+static std::unordered_map<std::string, int> build_sample_index(
+    bcf_hdr_t* hdr,
+    const char* label
+) {
+    int n_samples = bcf_hdr_nsamples(hdr);
+    std::unordered_map<std::string, int> by_id;
+    by_id.reserve(static_cast<size_t>(n_samples) * 2);
+
+    for (int i = 0; i < n_samples; ++i) {
+        std::string sample(hdr->samples[i]);
+        if (!by_id.emplace(sample, i).second) {
+            die("duplicate sample ID in %s VCF header: %s", label, sample.c_str());
+        }
+    }
+    return by_id;
+}
+
+static SampleSelection build_sample_selection(
+    bcf_hdr_t* ghdr,
+    bcf_hdr_t* ahdr,
+    const std::string& keep_path
+) {
+    SampleSelection selection;
+    selection.genotype_raw_sample_count = bcf_hdr_nsamples(ghdr);
+    selection.flare_raw_sample_count = bcf_hdr_nsamples(ahdr);
+    if (selection.genotype_raw_sample_count <= 0) die("genotype VCF has no samples");
+    if (selection.flare_raw_sample_count <= 0) die("FLARE VCF has no samples");
+
+    KeepSamples keep = load_keep_samples(keep_path);
+    selection.keep_active = keep.active;
+    selection.keep_path = keep.path;
+    std::unordered_set<std::string> keep_missing_from_genotype = keep.ids;
+
+    std::unordered_set<std::string> genotype_seen;
+    genotype_seen.reserve(static_cast<size_t>(selection.genotype_raw_sample_count) * 2);
+
+    bool identical = sample_headers_identical(ghdr, ahdr);
+    std::unordered_map<std::string, int> flare_index;
+    if (!identical) {
+        flare_index = build_sample_index(ahdr, "FLARE");
+    }
+
+    selection.genotype_raw_indices.reserve(static_cast<size_t>(selection.genotype_raw_sample_count));
+    selection.flare_raw_indices.reserve(static_cast<size_t>(selection.genotype_raw_sample_count));
+    selection.sample_ids.reserve(static_cast<size_t>(selection.genotype_raw_sample_count));
+
+    for (int genotype_i = 0; genotype_i < selection.genotype_raw_sample_count; ++genotype_i) {
+        std::string sample(ghdr->samples[genotype_i]);
+        if (!genotype_seen.insert(sample).second) {
+            die("duplicate sample ID in genotype VCF header: %s", sample.c_str());
+        }
+
+        if (keep.active) {
+            auto keep_it = keep.ids.find(sample);
+            if (keep_it == keep.ids.end()) continue;
+            keep_missing_from_genotype.erase(sample);
+        }
+
+        int flare_i = genotype_i;
+        if (!identical) {
+            auto flare_it = flare_index.find(sample);
+            if (flare_it == flare_index.end()) continue;
+            flare_i = flare_it->second;
+        }
+
+        selection.genotype_raw_indices.push_back(genotype_i);
+        selection.flare_raw_indices.push_back(flare_i);
+        selection.sample_ids.push_back(sample);
+    }
+
+    if (keep.active && !keep_missing_from_genotype.empty()) {
         die("sample ID in --keep list is absent from genotype VCF: %s",
-            requested.begin()->c_str());
+            keep_missing_from_genotype.begin()->c_str());
     }
-    if (subset.raw_indices.empty()) {
-        die("--keep retained zero samples: %s", path.c_str());
+
+    if (selection.sample_ids.empty()) {
+        if (keep.active) {
+            die("--keep retained zero samples after genotype/FLARE intersection: %s",
+                keep.path.c_str());
+        }
+        die("genotype and FLARE sample intersection is empty");
     }
-    return subset;
+
+    if (keep.active) {
+        std::fprintf(
+            stderr,
+            "Loaded --keep sample list: retaining %llu of %llu requested sample(s) after genotype/FLARE intersection.\n",
+            static_cast<unsigned long long>(selection.sample_ids.size()),
+            static_cast<unsigned long long>(keep.ids.size())
+        );
+    }
+
+    if (!identical || static_cast<int>(selection.sample_ids.size()) != selection.genotype_raw_sample_count ||
+        static_cast<int>(selection.sample_ids.size()) != selection.flare_raw_sample_count) {
+        std::fprintf(
+            stderr,
+            "Using genotype/FLARE sample intersection: retaining %llu sample(s) in genotype VCF order (genotype %d, FLARE %d).\n",
+            static_cast<unsigned long long>(selection.sample_ids.size()),
+            selection.genotype_raw_sample_count,
+            selection.flare_raw_sample_count
+        );
+    }
+
+    return selection;
 }
 
 static ExtractSites load_extract_sites(const std::string& path) {
@@ -736,13 +849,11 @@ static void write_anc_mks_record(
 }
 
 static void write_sidecars(
-    bcf_hdr_t* ghdr,
     const std::string& samples_path,
     const std::string& meta_path,
     const char* geno_vcf,
     const char* flare_vcf,
-    const std::vector<int>& keep_raw_indices,
-    int n_samples,
+    const std::vector<std::string>& sample_ids,
     uint64_t n_haps,
     int n_words,
     int n_ancestries,
@@ -752,14 +863,15 @@ static void write_sidecars(
     const char* extract_path
 ) {
     FILE* samples_fp = open_output_or_die(samples_path, "w");
-    for (int i = 0; i < n_samples; ++i) {
-        std::fprintf(samples_fp, "%s\n", ghdr->samples[keep_raw_indices[i]]);
+    for (const std::string& sample_id : sample_ids) {
+        std::fprintf(samples_fp, "%s\n", sample_id.c_str());
     }
     std::fclose(samples_fp);
 
     FILE* meta_fp = open_output_or_die(meta_path, "w");
     std::fprintf(meta_fp, "format_version\t1\n");
-    std::fprintf(meta_fp, "n_samples\t%d\n", n_samples);
+    std::fprintf(meta_fp, "n_samples\t%llu\n",
+        static_cast<unsigned long long>(sample_ids.size()));
     std::fprintf(meta_fp, "n_haps\t%llu\n", static_cast<unsigned long long>(n_haps));
     std::fprintf(meta_fp, "n_words\t%d\n", n_words);
     std::fprintf(meta_fp, "n_ancestries\t%d\n", n_ancestries);
@@ -812,32 +924,11 @@ static void write_anc_block(
     write_anc_offset_idx_record(anc_idx_fp, block_id, mks_offset, offset);
 }
 
-static int check_sample_order(bcf_hdr_t* h1, bcf_hdr_t* h2) {
-    int n1 = bcf_hdr_nsamples(h1);
-    int n2 = bcf_hdr_nsamples(h2);
-    if (n1 != n2) return 0;
-
-    for (int i = 0; i < n1; ++i) {
-        if (std::strcmp(h1->samples[i], h2->samples[i]) != 0) {
-            std::fprintf(
-                stderr,
-                "Sample mismatch at %d: %s vs %s\n",
-                i,
-                h1->samples[i],
-                h2->samples[i]
-            );
-            return 0;
-        }
-    }
-
-    return 1;
-}
-
 static void build_state_from_flare(
     bcf_hdr_t* ahdr,
     bcf1_t* arec,
-    int raw_n_samples,
-    const std::vector<int>& keep_raw_indices,
+    int flare_raw_n_samples,
+    const std::vector<int>& flare_raw_indices,
     int n_ancestries,
     int n_words,
     int32_t** an1_arr,
@@ -853,11 +944,11 @@ static void build_state_from_flare(
         die("FLARE VCF must contain FORMAT/AN1 and FORMAT/AN2");
     }
 
-    if (n_an1 != raw_n_samples || n_an2 != raw_n_samples) {
+    if (n_an1 != flare_raw_n_samples || n_an2 != flare_raw_n_samples) {
         die("FLARE VCF must contain scalar FORMAT/AN1 and FORMAT/AN2");
     }
 
-    int n_output_samples = static_cast<int>(keep_raw_indices.size());
+    int n_output_samples = static_cast<int>(flare_raw_indices.size());
     state.masks.assign(
         static_cast<size_t>(n_ancestries),
         std::vector<uint64_t>(static_cast<size_t>(n_words), 0)
@@ -865,7 +956,7 @@ static void build_state_from_flare(
     state.hap_ancestry.assign(static_cast<size_t>(2 * n_output_samples), -1);
 
     for (int out_i = 0; out_i < n_output_samples; ++out_i) {
-        int raw_i = keep_raw_indices[out_i];
+        int raw_i = flare_raw_indices[out_i];
         int32_t raw_a1 = (*an1_arr)[raw_i];
         int32_t raw_a2 = (*an2_arr)[raw_i];
 
@@ -1046,8 +1137,8 @@ static void process_genotypes(
     bcf_hdr_t* ghdr,
     bcf1_t* grec,
     const OpenAncestryBlock& block,
-    int raw_n_samples,
-    const std::vector<int>& keep_raw_indices,
+    int genotype_raw_n_samples,
+    const std::vector<int>& genotype_raw_indices,
     int32_t** gt_arr,
     int* ngt_arr,
     std::vector<std::vector<CarrierHap>>& carriers_by_alt
@@ -1060,20 +1151,20 @@ static void process_genotypes(
         die("missing FORMAT/GT at %s:%lld", chr, static_cast<long long>(pos));
     }
 
-    if (ngt % raw_n_samples != 0) {
+    if (ngt % genotype_raw_n_samples != 0) {
         die("GT field length is not divisible by sample count at %s:%lld", chr, static_cast<long long>(pos));
     }
 
-    int ploidy = ngt / raw_n_samples;
+    int ploidy = ngt / genotype_raw_n_samples;
     if (ploidy < 2) {
         die("expected diploid GT at %s:%lld", chr, static_cast<long long>(pos));
     }
 
     carriers_by_alt.assign(static_cast<size_t>(grec->n_allele), std::vector<CarrierHap>{});
 
-    int n_output_samples = static_cast<int>(keep_raw_indices.size());
+    int n_output_samples = static_cast<int>(genotype_raw_indices.size());
     for (int out_i = 0; out_i < n_output_samples; ++out_i) {
-        int raw_i = keep_raw_indices[out_i];
+        int raw_i = genotype_raw_indices[out_i];
         const int32_t* sample_gt = *gt_arr + static_cast<size_t>(raw_i) * ploidy;
         int32_t g0 = sample_gt[0];
         int32_t g1 = sample_gt[1];
@@ -1489,8 +1580,8 @@ static bool read_next_lai_record(
     bcf_hdr_t* ghdr,
     bcf1_t* rec,
     bcf_srs_t* synced_reader,
-    int raw_n_samples,
-    const std::vector<int>& keep_raw_indices,
+    int flare_raw_n_samples,
+    const std::vector<int>& flare_raw_indices,
     int n_ancestries,
     int n_words,
     int32_t** an1_arr,
@@ -1525,8 +1616,8 @@ static bool read_next_lai_record(
         build_state_from_flare(
             ahdr,
             rec,
-            raw_n_samples,
-            keep_raw_indices,
+            flare_raw_n_samples,
+            flare_raw_indices,
             n_ancestries,
             n_words,
             an1_arr,
@@ -1625,33 +1716,12 @@ int main(int argc, char** argv) {
         die("cannot read input headers");
     }
 
-    if (!check_sample_order(ghdr, ahdr)) {
-        die("genotype and FLARE sample IDs must be identical and in the same order");
-    }
-
-    int raw_n_samples = bcf_hdr_nsamples(ghdr);
-    if (raw_n_samples <= 0) {
-        die("genotype VCF has no samples");
-    }
-
-    SampleSubset keep = load_keep_samples(ghdr, keep_path);
-    std::vector<int> keep_raw_indices;
-    if (keep.active) {
-        keep_raw_indices = keep.raw_indices;
-        std::fprintf(
-            stderr,
-            "Loaded --keep sample list: retaining %llu of %d samples.\n",
-            static_cast<unsigned long long>(keep_raw_indices.size()),
-            raw_n_samples
-        );
-    } else {
-        keep_raw_indices.reserve(static_cast<size_t>(raw_n_samples));
-        for (int i = 0; i < raw_n_samples; ++i) keep_raw_indices.push_back(i);
-    }
-
-    int n_samples = static_cast<int>(keep_raw_indices.size());
+    SampleSelection sample_selection = build_sample_selection(ghdr, ahdr, keep_path);
+    int genotype_raw_n_samples = sample_selection.genotype_raw_sample_count;
+    int flare_raw_n_samples = sample_selection.flare_raw_sample_count;
+    int n_samples = static_cast<int>(sample_selection.sample_ids.size());
     if (n_samples <= 0) {
-        die("--keep retained zero samples");
+        die("retained zero samples");
     }
 
     ExtractSites extract_sites = load_extract_sites(extract_path);
@@ -1873,13 +1943,11 @@ int main(int argc, char** argv) {
     write_magic_header(anc_idx_fp, anc_idx_magic);
 
     write_sidecars(
-        ghdr,
         samples_path,
         meta_path,
         geno_vcf,
         flare_vcf,
-        keep_raw_indices,
-        n_samples,
+        sample_selection.sample_ids,
         n_haps,
         n_words,
         n_ancestries,
@@ -1917,8 +1985,8 @@ int main(int argc, char** argv) {
             ghdr,
             arec,
             flare_region_reader,
-            raw_n_samples,
-            keep_raw_indices,
+            flare_raw_n_samples,
+            sample_selection.flare_raw_indices,
             n_ancestries,
             n_words,
             &an1_arr,
@@ -1962,8 +2030,8 @@ int main(int argc, char** argv) {
                 ghdr,
                 arec,
                 flare_region_reader,
-                raw_n_samples,
-                keep_raw_indices,
+                flare_raw_n_samples,
+                sample_selection.flare_raw_indices,
                 n_ancestries,
                 n_words,
                 &an1_arr,
@@ -1984,8 +2052,8 @@ int main(int argc, char** argv) {
                     ghdr,
                     arec,
                     flare_region_reader,
-                    raw_n_samples,
-                    keep_raw_indices,
+                    flare_raw_n_samples,
+                    sample_selection.flare_raw_indices,
                     n_ancestries,
                     n_words,
                     &an1_arr,
@@ -2111,8 +2179,8 @@ int main(int argc, char** argv) {
             ghdr,
             grec,
             block,
-            raw_n_samples,
-            keep_raw_indices,
+            genotype_raw_n_samples,
+            sample_selection.genotype_raw_indices,
             &gt_arr,
             &ngt_arr,
             carriers_by_alt

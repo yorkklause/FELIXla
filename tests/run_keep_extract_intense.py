@@ -309,6 +309,30 @@ def write_keep_file(work: pathlib.Path, samples: list[str], keep_indices: list[i
     return keep
 
 
+def write_reordered_subset_flare(
+    work: pathlib.Path,
+    flare_path: pathlib.Path,
+    sample_order_indices: list[int],
+) -> pathlib.Path:
+    out_path = work / "synthetic.flare.reordered_subset.vcf"
+    with flare_path.open() as src, out_path.open("w") as out:
+        for line in src:
+            line = line.rstrip("\n")
+            if line.startswith("#CHROM"):
+                fields = line.split("\t")
+                header_samples = fields[9:]
+                reordered_samples = [header_samples[i] for i in sample_order_indices]
+                out.write("\t".join(fields[:9] + reordered_samples) + "\n")
+            elif line.startswith("#"):
+                out.write(line + "\n")
+            else:
+                fields = line.split("\t")
+                sample_values = fields[9:]
+                reordered_values = [sample_values[i] for i in sample_order_indices]
+                out.write("\t".join(fields[:9] + reordered_values) + "\n")
+    return out_path
+
+
 def query_rows(
     bin_dir: pathlib.Path,
     prefix: pathlib.Path,
@@ -556,6 +580,38 @@ def main() -> int:
         assert_vcf_matches(pvar_vcf, keep_samples, subset_expected)
         if read_roundtrip_vcf(pvar_vcf) != read_roundtrip_vcf(subset_vcf):
             fail("PVAR extract output differs from gzipped VCF extract output")
+
+        missing_from_flare = {keep_indices[1], keep_indices[8], keep_indices[-2]}
+        flare_subset_indices = [i for i in all_indices if i not in missing_from_flare]
+        reordered_flare_indices = (
+            flare_subset_indices[3::5]
+            + flare_subset_indices[0::5]
+            + flare_subset_indices[4::5]
+            + flare_subset_indices[1::5]
+            + flare_subset_indices[2::5]
+        )
+        reordered_flare_path = write_reordered_subset_flare(work, flare_path, reordered_flare_indices)
+        intersection_indices = [i for i in keep_indices if i not in missing_from_flare]
+        intersection_samples = [samples[i] for i in intersection_indices]
+        intersection_expected = split_records(records, intersection_indices, selected=selected)
+        intersection_prefix = work / "subset.reordered_flare_intersection"
+        intersection_vcf = build_with_cli(
+            bin_dir,
+            genotype_path,
+            reordered_flare_path,
+            intersection_prefix,
+            "--keep",
+            str(keep_path),
+            "--extract",
+            str(pvar_path),
+        )
+        assert_vcf_matches(intersection_vcf, intersection_samples, intersection_expected)
+        check_queries(bin_dir, intersection_prefix, intersection_expected, samples, intersection_indices, ancestry)
+        intersection_meta = read_meta(intersection_prefix)
+        assert intersection_meta["n_samples"] == str(len(intersection_indices)), intersection_meta
+        assert intersection_meta["n_words"] == str(math.ceil(2 * len(intersection_indices) / 64)), intersection_meta
+        assert intersection_meta["rare_threshold"] == str(math.ceil(len(intersection_indices) / 32)), intersection_meta
+        assert read_samples(intersection_prefix) == intersection_samples
 
         indexed_selected = {
             (split["chrom"], split["pos"], split["ref"], split["alt"])

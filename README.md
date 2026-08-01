@@ -97,8 +97,8 @@ felixla \
 
 - FLARE_VCF (required): Full path and filename of a FLARE local ancestry
   VCF/BCF. It must contain scalar integer `FORMAT/AN1` and `FORMAT/AN2` fields
-  encoded as `0..N_ANCESTRIES-1`. Sample IDs must be identical to the genotype
-  VCF and in the same order.
+  encoded as `0..N_ANCESTRIES-1`. Sample IDs are matched by ID; FELIXla keeps
+  the genotype/FLARE intersection in genotype VCF order.
 
 - N_ANCESTRIES (required): Number of local ancestry labels. The packed format
   stores ancestry codes in 5 bits, so at most 32 labels are supported.
@@ -327,7 +327,9 @@ docker build -t felixla:local -f docker/felixla/Dockerfile .
 
 - Genotypes are diploid, phased, and non-missing.
 
-- Genotype and local ancestry sample IDs are identical and in the same order.
+- Genotype and local ancestry sample IDs are matched by ID. If the two inputs
+  differ, FELIXla keeps only their intersection and writes retained samples in
+  genotype VCF order. `--keep` applies as an additional sample filter.
 
 - FLARE local ancestry uses non-missing integer `AN1` and `AN2` hard calls.
 
