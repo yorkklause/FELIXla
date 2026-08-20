@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# FELIXla single-binary image.
+# FELIXla image with the complete FELIXla binary and VCF chunk planner.
 
 FROM debian:bookworm-slim AS build
 ARG DEBIAN_FRONTEND=noninteractive
@@ -42,6 +42,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /src/bin/felixla /usr/local/bin/felixla
+COPY --from=build /src/bin/vcf_tbi_chunks /usr/local/bin/vcf_tbi_chunks
 COPY --from=build /src/README.md /opt/felixla/README.md
 COPY --from=build /src/resources/shapeit5_chunks /opt/felixla/resources/shapeit5_chunks
 

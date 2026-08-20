@@ -14,10 +14,11 @@ import sys
 bin_dir = pathlib.Path(sys.argv[1])
 unexpected = sorted(
     path.name for path in bin_dir.iterdir()
-    if path.name != "felixla"
+    if path.name not in {"felixla", "vcf_tbi_chunks"}
 )
 assert not unexpected, unexpected
 assert (bin_dir / "felixla").is_file(), bin_dir
+assert (bin_dir / "vcf_tbi_chunks").is_file(), bin_dir
 PY
 
 "$BIN_DIR/felixla" \
@@ -32,6 +33,72 @@ PY
   to-vcf \
   "$OUT_DIR/tiny" \
   "$OUT_DIR/tiny.roundtrip.vcf.gz" >/dev/null
+
+"$BIN_DIR/vcf_tbi_chunks" \
+  --phase-vcf "$OUT_DIR/tiny.roundtrip.vcf.gz" \
+  --chunk-bp 100 \
+  --out "$OUT_DIR/tiny.chunks.tsv" \
+  --command-template 'felixla --phase-vcf {phase_vcf_q} --region {region_q} --out chunks/{chrom}.chunk{chrom_chunk0}' \
+  --commands-out "$OUT_DIR/tiny.commands.txt" \
+  >/dev/null
+
+"$BIN_DIR/vcf_tbi_chunks" \
+  --phase-vcf "$OUT_DIR/tiny.roundtrip.vcf.gz" \
+  --tbi "$OUT_DIR/tiny.roundtrip.vcf.gz.tbi" \
+  --chrom chr2 \
+  --chunk-mb 1 \
+  --out "$OUT_DIR/tiny.chr2.mb.tsv" \
+  >/dev/null
+
+python3 - \
+  "$OUT_DIR/tiny.chunks.tsv" \
+  "$OUT_DIR/tiny.commands.txt" \
+  "$OUT_DIR/tiny.chr2.mb.tsv" \
+  "$OUT_DIR/tiny.roundtrip.vcf.gz" <<'PY'
+import pathlib
+import sys
+
+manifest_path = pathlib.Path(sys.argv[1])
+commands_path = pathlib.Path(sys.argv[2])
+chr2_path = pathlib.Path(sys.argv[3])
+phase_vcf = sys.argv[4]
+
+header = [
+    "global_chunk",
+    "chrom_chunk",
+    "chrom",
+    "start",
+    "end",
+    "region",
+    "contig_first_pos",
+    "contig_last_pos",
+    "contig_records",
+]
+rows = [line.split("\t") for line in manifest_path.read_text().splitlines()]
+assert rows[0] == header, rows[0]
+assert rows[1:] == [
+    ["1", "1", "chr1", "1", "100", "chr1:1-100", "50", "250", "6"],
+    ["2", "2", "chr1", "101", "200", "chr1:101-200", "50", "250", "6"],
+    ["3", "3", "chr1", "201", "300", "chr1:201-300", "50", "250", "6"],
+    ["4", "1", "chr2", "1", "100", "chr2:1-100", "50", "150", "3"],
+    ["5", "2", "chr2", "101", "200", "chr2:101-200", "50", "150", "3"],
+], rows
+
+quoted_vcf = "'" + phase_vcf + "'"
+assert commands_path.read_text().splitlines() == [
+    f"felixla --phase-vcf {quoted_vcf} --region 'chr1:1-100' --out chunks/chr1.chunk0001",
+    f"felixla --phase-vcf {quoted_vcf} --region 'chr1:101-200' --out chunks/chr1.chunk0002",
+    f"felixla --phase-vcf {quoted_vcf} --region 'chr1:201-300' --out chunks/chr1.chunk0003",
+    f"felixla --phase-vcf {quoted_vcf} --region 'chr2:1-100' --out chunks/chr2.chunk0001",
+    f"felixla --phase-vcf {quoted_vcf} --region 'chr2:101-200' --out chunks/chr2.chunk0002",
+]
+
+chr2_rows = [line.split("\t") for line in chr2_path.read_text().splitlines()]
+assert chr2_rows[0] == header, chr2_rows[0]
+assert chr2_rows[1:] == [
+    ["1", "1", "chr2", "1", "1000000", "chr2:1-1000000", "50", "150", "3"],
+], chr2_rows
+PY
 
 "$BIN_DIR/felixla" \
   --felixla \

@@ -12,7 +12,7 @@ env:
 
 jobs:
   linux-x86-64:
-    name: linux-x86_64 static binary
+    name: linux-x86_64 static binaries
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -55,25 +55,34 @@ jobs:
           make -j"$(nproc)"
           sudo make install
 
-      - name: Build and test FELIXla static binary
+      - name: Build and test static binaries
         run: |
           set -euo pipefail
           export PKG_CONFIG_PATH=/opt/htslib-static/lib/pkgconfig
           make static STATIC_FULLY=1 CXXFLAGS="${FELIXLA_CXXFLAGS}"
           make test-static STATIC_FULLY=1 CXXFLAGS="${FELIXLA_CXXFLAGS}"
           file bin-static/felixla
+          file bin-static/vcf_tbi_chunks
           ldd bin-static/felixla 2>&1 | tee /tmp/ldd.txt || true
           grep -q "not a dynamic executable" /tmp/ldd.txt
+          ldd bin-static/vcf_tbi_chunks 2>&1 | tee /tmp/ldd-chunks.txt || true
+          grep -q "not a dynamic executable" /tmp/ldd-chunks.txt
           mkdir -p dist
           cp bin-static/felixla dist/felixla-linux-x86_64-static
-          strip dist/felixla-linux-x86_64-static
+          cp bin-static/vcf_tbi_chunks dist/vcf_tbi_chunks-linux-x86_64-static
+          strip dist/felixla-linux-x86_64-static dist/vcf_tbi_chunks-linux-x86_64-static
           dist/felixla-linux-x86_64-static --version
+          dist/vcf_tbi_chunks-linux-x86_64-static --version
           file dist/felixla-linux-x86_64-static
+          file dist/vcf_tbi_chunks-linux-x86_64-static
           ldd dist/felixla-linux-x86_64-static 2>&1 | tee /tmp/ldd-stripped.txt || true
           grep -q "not a dynamic executable" /tmp/ldd-stripped.txt
+          ldd dist/vcf_tbi_chunks-linux-x86_64-static 2>&1 | tee /tmp/ldd-chunks-stripped.txt || true
+          grep -q "not a dynamic executable" /tmp/ldd-chunks-stripped.txt
           (
             cd dist
             sha256sum felixla-linux-x86_64-static > felixla-linux-x86_64-static.sha256
+            sha256sum vcf_tbi_chunks-linux-x86_64-static > vcf_tbi_chunks-linux-x86_64-static.sha256
           )
 
       - name: Upload workflow artifact
@@ -83,6 +92,8 @@ jobs:
           path: |
             dist/felixla-linux-x86_64-static
             dist/felixla-linux-x86_64-static.sha256
+            dist/vcf_tbi_chunks-linux-x86_64-static
+            dist/vcf_tbi_chunks-linux-x86_64-static.sha256
 
       - name: Publish release asset
         if: startsWith(github.ref, 'refs/tags/')
@@ -94,9 +105,11 @@ jobs:
           if ! gh release view "${tag}" >/dev/null 2>&1; then
             gh release create "${tag}" \
               --title "${tag}" \
-              --notes "FELIXla ${tag} static Linux x86_64 binary."
+              --notes "FELIXla ${tag} Linux x86_64 static binaries: felixla and vcf_tbi_chunks."
           fi
           gh release upload "${tag}" \
             dist/felixla-linux-x86_64-static \
             dist/felixla-linux-x86_64-static.sha256 \
+            dist/vcf_tbi_chunks-linux-x86_64-static \
+            dist/vcf_tbi_chunks-linux-x86_64-static.sha256 \
             --clobber

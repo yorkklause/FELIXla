@@ -38,7 +38,7 @@ struct VariantRecord {
     uint32_t mac = 0;
 };
 
-struct Args {
+struct QueryArgs {
     std::string prefix;
     bool by_global_index = false;
     uint32_t global_index = 0;
@@ -110,14 +110,14 @@ static void parse_chr_pos(const std::string& text, std::string& chr, int64_t& po
     if (pos <= 0) die("position must be positive: %s", text.c_str());
 }
 
-static Args parse_args(int argc, char** argv) {
+static QueryArgs parse_args(int argc, char** argv) {
     if (argc == 1) {
         usage(stderr, argv[0]);
         std::exit(2);
     }
 
     std::vector<std::string> positional;
-    Args args;
+    QueryArgs args;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -345,7 +345,7 @@ static VariantRecord read_variant_record(FILE* fp, const std::string& path, bool
     return record;
 }
 
-static bool matches_query(const VariantRecord& record, const Args& args) {
+static bool matches_query(const VariantRecord& record, const QueryArgs& args) {
     if (args.by_global_index) {
         return record.global_variant_index == args.global_index;
     }
@@ -357,7 +357,7 @@ static bool matches_query(const VariantRecord& record, const Args& args) {
 static void collect_matches(
     const std::string& prefix,
     bool common,
-    const Args& args,
+    const QueryArgs& args,
     std::vector<VariantRecord>& out
 ) {
     std::string path = prefix + (common ? ".common.variant.mks" : ".rare.variant.mks");
@@ -533,7 +533,7 @@ static void query_rare(
 }
 
 int main(int argc, char** argv) {
-    Args args = parse_args(argc, argv);
+    QueryArgs args = parse_args(argc, argv);
     Meta meta = read_meta(args.prefix + ".meta");
     std::vector<std::string> samples = read_samples(args.prefix + ".samples", meta.n_samples);
 

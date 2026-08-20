@@ -7,6 +7,7 @@
 #include <htslib/hts.h>
 #include <htslib/kstring.h>
 #include <htslib/synced_bcf_reader.h>
+#include <htslib/tbx.h>
 #include <htslib/vcf.h>
 
 #include <algorithm>
@@ -30,9 +31,10 @@ struct RareCarrierPacked {
     uint32_t anc_hap;   // high 5 bits ancestry, low 27 bits hap_id
 };
 
-struct CarrierHap {
-    uint32_t hap_id;
-    uint8_t ancestry;
+struct AltCarrierBuilder {
+    uint32_t mac = 0;
+    std::vector<uint32_t> sparse_haps;
+    std::vector<uint64_t> dense_bits;
 };
 
 struct AncestryState {
@@ -50,12 +52,24 @@ struct OpenAncestryBlock {
     AncestryState state;
 };
 
+struct AncestryChange {
+    uint32_t hap_id = 0;
+    int8_t ancestry = -1;
+};
+
 struct LaiRecord {
     bool valid = false;
+    bool reset_state = false;
+    bool merged_duplicate = false;
     int geno_rid = -1;
     std::string chr;
     int64_t pos = 0;
-    AncestryState state;
+    std::vector<AncestryChange> changes;
+};
+
+struct FlareDeltaDecoder {
+    int geno_rid = -1;
+    std::vector<int8_t> hap_ancestry;
 };
 
 struct Region {
@@ -76,32 +90,64 @@ struct KeepSamples {
 struct SampleSelection {
     std::vector<int> genotype_raw_indices;
     std::vector<int> flare_raw_indices;
+    std::vector<int> genotype_text_indices;
+    std::vector<int> flare_text_indices;
     std::vector<std::string> sample_ids;
     int genotype_raw_sample_count = 0;
     int flare_raw_sample_count = 0;
+    bool genotype_subset_active = false;
+    bool flare_subset_active = false;
+    std::string genotype_decode_samples;
+    std::string flare_decode_samples;
     bool keep_active = false;
     std::string keep_path;
+};
+
+struct FastTextVcfReader {
+    htsFile* fp = nullptr;
+    bool owns_fp = false;
+    tbx_t* tbx = nullptr;
+    hts_itr_t* itr = nullptr;
+    std::vector<std::string> queries;
+    size_t query_index = 0;
+    kstring_t line = {0, 0, nullptr};
+};
+
+struct FastGenotypeRecord {
+    int rid = -1;
+    int64_t pos = 0;
+    char* chr = nullptr;
+    char* id = nullptr;
+    char* ref = nullptr;
+    std::vector<char*> alleles;
+    char* samples = nullptr;
+    size_t samples_length = 0;
+    int gt_field_index = -1;
+    bool gt_only = false;
 };
 
 struct ExtractPosition {
     std::string chr;
     int64_t pos = 0;
     std::string ref;
+    std::vector<std::string> alts;
+    int geno_rid = -1;
+    uint64_t line_no = 0;
 };
 
 struct ExtractSites {
     bool active = false;
     std::string path;
-    std::unordered_set<std::string> allele_keys;
-    std::unordered_map<std::string, std::string> ref_by_position;
     std::unordered_set<std::string> contigs;
     std::vector<ExtractPosition> positions;
+    uint64_t allele_count = 0;
 };
 
 static constexpr uint32_t kMaxPackedHapId = (1u << 27) - 1u;
 static constexpr uint64_t kProgressRecordInterval = 10000;
 static constexpr int kProgressSecondsInterval = 2;
 static constexpr int64_t kMaxVcfCoordinate = 2147483647LL;
+static constexpr int kInputBlockSize = 8 * 1024 * 1024;
 
 [[noreturn]] static void die(const char* fmt, ...) {
     va_list args;
@@ -215,19 +261,6 @@ static std::vector<std::string> split_commas(const std::string& value) {
     return parts;
 }
 
-static std::string position_key(const std::string& chr, int64_t pos) {
-    return chr + "\t" + std::to_string(pos);
-}
-
-static std::string allele_key(
-    const std::string& chr,
-    int64_t pos,
-    const std::string& ref,
-    const std::string& alt
-) {
-    return position_key(chr, pos) + "\t" + ref + "\t" + alt;
-}
-
 static KeepSamples load_keep_samples(const std::string& path) {
     KeepSamples keep;
     if (path.empty()) return keep;
@@ -258,7 +291,6 @@ static KeepSamples load_keep_samples(const std::string& path) {
                 static_cast<unsigned long long>(line_no), sample_id.c_str());
         }
     }
-
     if (keep.ids.empty()) {
         die("--keep sample list is empty: %s", path.c_str());
     }
@@ -279,21 +311,36 @@ static bool sample_headers_identical(bcf_hdr_t* ghdr, bcf_hdr_t* ahdr) {
     return true;
 }
 
-static std::unordered_map<std::string, int> build_sample_index(
+struct HeaderSample {
+    std::string id;
+    int raw_index = -1;
+};
+
+static std::vector<HeaderSample> sorted_header_samples(
     bcf_hdr_t* hdr,
     const char* label
 ) {
     int n_samples = bcf_hdr_nsamples(hdr);
-    std::unordered_map<std::string, int> by_id;
-    by_id.reserve(static_cast<size_t>(n_samples) * 2);
+    std::vector<HeaderSample> samples;
+    samples.reserve(static_cast<size_t>(n_samples));
 
     for (int i = 0; i < n_samples; ++i) {
-        std::string sample(hdr->samples[i]);
-        if (!by_id.emplace(sample, i).second) {
-            die("duplicate sample ID in %s VCF header: %s", label, sample.c_str());
+        samples.push_back(HeaderSample{hdr->samples[i], i});
+    }
+    std::sort(
+        samples.begin(),
+        samples.end(),
+        [](const HeaderSample& a, const HeaderSample& b) {
+            return a.id < b.id;
+        }
+    );
+
+    for (size_t i = 1; i < samples.size(); ++i) {
+        if (samples[i - 1].id == samples[i].id) {
+            die("duplicate sample ID in %s VCF header: %s", label, samples[i].id.c_str());
         }
     }
-    return by_id;
+    return samples;
 }
 
 static SampleSelection build_sample_selection(
@@ -312,41 +359,77 @@ static SampleSelection build_sample_selection(
     selection.keep_path = keep.path;
     std::unordered_set<std::string> keep_missing_from_genotype = keep.ids;
 
-    std::unordered_set<std::string> genotype_seen;
-    genotype_seen.reserve(static_cast<size_t>(selection.genotype_raw_sample_count) * 2);
-
     bool identical = sample_headers_identical(ghdr, ahdr);
-    std::unordered_map<std::string, int> flare_index;
-    if (!identical) {
-        flare_index = build_sample_index(ahdr, "FLARE");
-    }
 
     selection.genotype_raw_indices.reserve(static_cast<size_t>(selection.genotype_raw_sample_count));
     selection.flare_raw_indices.reserve(static_cast<size_t>(selection.genotype_raw_sample_count));
     selection.sample_ids.reserve(static_cast<size_t>(selection.genotype_raw_sample_count));
 
-    for (int genotype_i = 0; genotype_i < selection.genotype_raw_sample_count; ++genotype_i) {
-        std::string sample(ghdr->samples[genotype_i]);
-        if (!genotype_seen.insert(sample).second) {
-            die("duplicate sample ID in genotype VCF header: %s", sample.c_str());
+    if (identical) {
+        (void)sorted_header_samples(ghdr, "genotype");
+        for (int i = 0; i < selection.genotype_raw_sample_count; ++i) {
+            std::string sample(ghdr->samples[i]);
+            if (keep.active) {
+                if (keep.ids.count(sample) == 0) continue;
+                keep_missing_from_genotype.erase(sample);
+            }
+            selection.genotype_raw_indices.push_back(i);
+            selection.flare_raw_indices.push_back(i);
+            selection.sample_ids.push_back(std::move(sample));
         }
-
+    } else {
+        std::vector<HeaderSample> genotype_samples =
+            sorted_header_samples(ghdr, "genotype");
+        std::vector<HeaderSample> flare_samples =
+            sorted_header_samples(ahdr, "FLARE");
         if (keep.active) {
-            auto keep_it = keep.ids.find(sample);
-            if (keep_it == keep.ids.end()) continue;
-            keep_missing_from_genotype.erase(sample);
+            for (const HeaderSample& sample : genotype_samples) {
+                keep_missing_from_genotype.erase(sample.id);
+            }
         }
 
-        int flare_i = genotype_i;
-        if (!identical) {
-            auto flare_it = flare_index.find(sample);
-            if (flare_it == flare_index.end()) continue;
-            flare_i = flare_it->second;
+        struct MatchedSample {
+            std::string id;
+            int genotype_raw_index = -1;
+            int flare_raw_index = -1;
+        };
+        std::vector<MatchedSample> matches;
+        matches.reserve(std::min(genotype_samples.size(), flare_samples.size()));
+
+        size_t genotype_i = 0;
+        size_t flare_i = 0;
+        while (genotype_i < genotype_samples.size() && flare_i < flare_samples.size()) {
+            const HeaderSample& genotype_sample = genotype_samples[genotype_i];
+            const HeaderSample& flare_sample = flare_samples[flare_i];
+            if (genotype_sample.id < flare_sample.id) {
+                ++genotype_i;
+            } else if (flare_sample.id < genotype_sample.id) {
+                ++flare_i;
+            } else {
+                if (!keep.active || keep.ids.count(genotype_sample.id) != 0) {
+                    matches.push_back(MatchedSample{
+                        genotype_sample.id,
+                        genotype_sample.raw_index,
+                        flare_sample.raw_index
+                    });
+                }
+                ++genotype_i;
+                ++flare_i;
+            }
         }
 
-        selection.genotype_raw_indices.push_back(genotype_i);
-        selection.flare_raw_indices.push_back(flare_i);
-        selection.sample_ids.push_back(sample);
+        std::sort(
+            matches.begin(),
+            matches.end(),
+            [](const MatchedSample& a, const MatchedSample& b) {
+                return a.genotype_raw_index < b.genotype_raw_index;
+            }
+        );
+        for (MatchedSample& match : matches) {
+            selection.genotype_raw_indices.push_back(match.genotype_raw_index);
+            selection.flare_raw_indices.push_back(match.flare_raw_index);
+            selection.sample_ids.push_back(std::move(match.id));
+        }
     }
 
     if (keep.active && !keep_missing_from_genotype.empty()) {
@@ -383,6 +466,90 @@ static SampleSelection build_sample_selection(
     }
 
     return selection;
+}
+
+static std::string comma_join_samples(const std::vector<std::string>& samples) {
+    std::string joined;
+    size_t total_bytes = samples.empty() ? 0 : samples.size() - 1;
+    for (const std::string& sample : samples) total_bytes += sample.size();
+    joined.reserve(total_bytes);
+
+    for (size_t i = 0; i < samples.size(); ++i) {
+        if (i != 0) joined.push_back(',');
+        joined += samples[i];
+    }
+    return joined;
+}
+
+static void set_header_samples_or_die(
+    bcf_hdr_t* hdr,
+    const std::string& samples,
+    const char* label
+) {
+    int ret = bcf_hdr_set_samples(hdr, samples.c_str(), 0);
+    if (ret < 0) {
+        die("failed to configure %s sample subset", label);
+    }
+    if (ret > 0) {
+        die("failed to configure %s sample subset: selected sample is absent", label);
+    }
+}
+
+static void apply_decode_sample_subsets(
+    bcf_hdr_t* ghdr,
+    bcf_hdr_t* ahdr,
+    SampleSelection& selection
+) {
+    int n_selected = static_cast<int>(selection.sample_ids.size());
+
+    if (n_selected < selection.genotype_raw_sample_count) {
+        selection.genotype_subset_active = true;
+        selection.genotype_decode_samples = comma_join_samples(selection.sample_ids);
+        set_header_samples_or_die(
+            ghdr,
+            selection.genotype_decode_samples,
+            "genotype VCF"
+        );
+        selection.genotype_raw_indices.resize(static_cast<size_t>(n_selected));
+        for (int i = 0; i < n_selected; ++i) {
+            selection.genotype_raw_indices[static_cast<size_t>(i)] = i;
+        }
+        selection.genotype_raw_sample_count = n_selected;
+    }
+
+    if (n_selected < selection.flare_raw_sample_count) {
+        selection.flare_subset_active = true;
+
+        std::vector<std::pair<int, int>> raw_and_output;
+        raw_and_output.reserve(static_cast<size_t>(n_selected));
+        for (int output_i = 0; output_i < n_selected; ++output_i) {
+            raw_and_output.emplace_back(
+                selection.flare_raw_indices[static_cast<size_t>(output_i)],
+                output_i
+            );
+        }
+        std::sort(raw_and_output.begin(), raw_and_output.end());
+
+        std::vector<std::string> flare_source_order_ids;
+        flare_source_order_ids.reserve(static_cast<size_t>(n_selected));
+        std::vector<int> compact_flare_indices(static_cast<size_t>(n_selected), -1);
+        for (int compact_i = 0; compact_i < n_selected; ++compact_i) {
+            int output_i = raw_and_output[static_cast<size_t>(compact_i)].second;
+            flare_source_order_ids.push_back(
+                selection.sample_ids[static_cast<size_t>(output_i)]
+            );
+            compact_flare_indices[static_cast<size_t>(output_i)] = compact_i;
+        }
+
+        selection.flare_decode_samples = comma_join_samples(flare_source_order_ids);
+        set_header_samples_or_die(
+            ahdr,
+            selection.flare_decode_samples,
+            "FLARE VCF"
+        );
+        selection.flare_raw_indices = std::move(compact_flare_indices);
+        selection.flare_raw_sample_count = n_selected;
+    }
 }
 
 static ExtractSites load_extract_sites(const std::string& path) {
@@ -425,66 +592,36 @@ static ExtractSites load_extract_sites(const std::string& path) {
                 static_cast<unsigned long long>(line_no));
         }
 
-        std::string pos_key = position_key(chr, pos);
-        auto ref_it = sites.ref_by_position.find(pos_key);
-        if (ref_it == sites.ref_by_position.end()) {
-            sites.ref_by_position.emplace(pos_key, ref);
-            sites.contigs.insert(chr);
-            sites.positions.push_back(ExtractPosition{chr, pos, ref});
-        } else if (ref_it->second != ref) {
-            die("conflicting REF values in --extract list at %s:%llu for %s:%lld: %s vs %s",
-                path.c_str(), static_cast<unsigned long long>(line_no), chr.c_str(),
-                static_cast<long long>(pos), ref_it->second.c_str(), ref.c_str());
-        }
-
-        for (const std::string& alt : split_commas(alts)) {
-            std::string key = allele_key(chr, pos, ref, alt);
-            if (!sites.allele_keys.insert(key).second) {
-                die("duplicate allele in --extract list at %s:%llu: %s:%lld %s>%s",
-                    path.c_str(), static_cast<unsigned long long>(line_no), chr.c_str(),
-                    static_cast<long long>(pos), ref.c_str(), alt.c_str());
+        ExtractPosition position;
+        position.chr = chr;
+        position.pos = pos;
+        position.ref = ref;
+        position.alts = split_commas(alts);
+        position.line_no = line_no;
+        std::sort(position.alts.begin(), position.alts.end());
+        for (size_t i = 1; i < position.alts.size(); ++i) {
+            if (position.alts[i - 1] == position.alts[i]) {
+                die(
+                    "duplicate allele in --extract list at %s:%llu: %s:%lld %s>%s",
+                    path.c_str(),
+                    static_cast<unsigned long long>(line_no),
+                    chr.c_str(),
+                    static_cast<long long>(pos),
+                    ref.c_str(),
+                    position.alts[i].c_str()
+                );
             }
         }
+        sites.allele_count += position.alts.size();
+        sites.contigs.insert(position.chr);
+        sites.positions.push_back(std::move(position));
     }
 
-    if (sites.allele_keys.empty()) {
+    if (sites.positions.empty()) {
         die("--extract site list is empty: %s", path.c_str());
     }
+
     return sites;
-}
-
-static bool extract_record_position_matches(
-    const ExtractSites& sites,
-    const char* chr,
-    int64_t pos,
-    const char* ref
-) {
-    if (!sites.active) return true;
-
-    std::string pos_key = position_key(chr, pos);
-    auto it = sites.ref_by_position.find(pos_key);
-    if (it == sites.ref_by_position.end()) return false;
-
-    if (!ref || !*ref || std::strcmp(ref, ".") == 0) {
-        die("genotype VCF has unknown REF at --extract position %s:%lld",
-            chr, static_cast<long long>(pos));
-    }
-    if (it->second != ref) {
-        die("REF mismatch for --extract site %s:%lld: list has %s, genotype VCF has %s",
-            chr, static_cast<long long>(pos), it->second.c_str(), ref);
-    }
-    return true;
-}
-
-static bool extract_allele_matches(
-    const ExtractSites& sites,
-    const char* chr,
-    int64_t pos,
-    const char* ref,
-    const char* alt
-) {
-    if (!sites.active) return true;
-    return sites.allele_keys.count(allele_key(chr, pos, ref, alt)) > 0;
 }
 
 static IndexRecordCount get_index_record_count(const char* path) {
@@ -658,21 +795,66 @@ static inline void set_bit(std::vector<uint64_t>& bits, uint32_t h) {
     bits[h >> 6] |= (1ULL << (h & 63));
 }
 
-static inline bool is_gt_vector_end(int32_t value) {
-    return value == bcf_int32_vector_end;
+static inline void clear_bit(std::vector<uint64_t>& bits, uint32_t h) {
+    bits[h >> 6] &= ~(1ULL << (h & 63));
 }
 
-static bool same_masks(
-    const std::vector<std::vector<uint64_t>>& a,
-    const std::vector<std::vector<uint64_t>>& b
+static int integer_format_width(const bcf_fmt_t* fmt, const char* label) {
+    if (fmt->type == BCF_BT_INT8) return 1;
+    if (fmt->type == BCF_BT_INT16) return 2;
+    if (fmt->type == BCF_BT_INT32) return 4;
+    if (fmt->type == BCF_BT_INT64) return 8;
+    die("%s FORMAT field is not integer encoded", label);
+}
+
+static int64_t integer_format_value(
+    const bcf_fmt_t* fmt,
+    int sample_index,
+    int value_index,
+    const char* label
 ) {
-    if (a.size() != b.size()) return false;
-
-    for (size_t k = 0; k < a.size(); ++k) {
-        if (a[k] != b[k]) return false;
+    if (sample_index < 0 || value_index < 0 || value_index >= fmt->n) {
+        die("internal %s FORMAT index out of range", label);
     }
+    int width = integer_format_width(fmt, label);
+    const uint8_t* value_ptr = fmt->p +
+        static_cast<size_t>(sample_index) * static_cast<size_t>(fmt->size) +
+        static_cast<size_t>(value_index) * static_cast<size_t>(width);
+    uint8_t* next = nullptr;
+    int64_t value = bcf_dec_int1(value_ptr, fmt->type, &next);
+    if (!next) die("failed to decode %s FORMAT integer", label);
+    return value;
+}
 
-    return true;
+static bool integer_format_missing(const bcf_fmt_t* fmt, int64_t value) {
+    if (fmt->type == BCF_BT_INT8) return value == bcf_int8_missing;
+    if (fmt->type == BCF_BT_INT16) return value == bcf_int16_missing;
+    if (fmt->type == BCF_BT_INT32) return value == bcf_int32_missing;
+    if (fmt->type == BCF_BT_INT64) return value == bcf_int64_missing;
+    return false;
+}
+
+static bool integer_format_vector_end(const bcf_fmt_t* fmt, int64_t value) {
+    if (fmt->type == BCF_BT_INT8) return value == bcf_int8_vector_end;
+    if (fmt->type == BCF_BT_INT16) return value == bcf_int16_vector_end;
+    if (fmt->type == BCF_BT_INT32) return value == bcf_int32_vector_end;
+    if (fmt->type == BCF_BT_INT64) return value == bcf_int64_vector_end;
+    return false;
+}
+
+static bcf_fmt_t* require_integer_format(
+    bcf_hdr_t* hdr,
+    bcf1_t* rec,
+    const char* tag
+) {
+    bcf_unpack(rec, BCF_UN_FMT);
+    bcf_fmt_t* fmt = bcf_get_fmt(hdr, rec, tag);
+    if (!fmt) die("missing FORMAT/%s", tag);
+    int width = integer_format_width(fmt, tag);
+    if (fmt->n <= 0 || fmt->size < fmt->n * width || !fmt->p) {
+        die("invalid FORMAT/%s storage", tag);
+    }
+    return fmt;
 }
 
 static uint64_t tell_or_die(FILE* fp, const char* path) {
@@ -924,47 +1106,43 @@ static void write_anc_block(
     write_anc_offset_idx_record(anc_idx_fp, block_id, mks_offset, offset);
 }
 
-static void build_state_from_flare(
+static void decode_flare_changes(
     bcf_hdr_t* ahdr,
     bcf1_t* arec,
     int flare_raw_n_samples,
     const std::vector<int>& flare_raw_indices,
     int n_ancestries,
-    int n_words,
-    int32_t** an1_arr,
-    int* nan1_arr,
-    int32_t** an2_arr,
-    int* nan2_arr,
-    AncestryState& state
+    int flare_geno_rid,
+    FlareDeltaDecoder& decoder,
+    LaiRecord& out
 ) {
-    int n_an1 = bcf_get_format_int32(ahdr, arec, "AN1", an1_arr, nan1_arr);
-    int n_an2 = bcf_get_format_int32(ahdr, arec, "AN2", an2_arr, nan2_arr);
-
-    if (n_an1 <= 0 || n_an2 <= 0) {
-        die("FLARE VCF must contain FORMAT/AN1 and FORMAT/AN2");
-    }
-
-    if (n_an1 != flare_raw_n_samples || n_an2 != flare_raw_n_samples) {
+    bcf_fmt_t* an1 = require_integer_format(ahdr, arec, "AN1");
+    bcf_fmt_t* an2 = require_integer_format(ahdr, arec, "AN2");
+    if (arec->n_sample != flare_raw_n_samples || an1->n != 1 || an2->n != 1) {
         die("FLARE VCF must contain scalar FORMAT/AN1 and FORMAT/AN2");
     }
 
     int n_output_samples = static_cast<int>(flare_raw_indices.size());
-    state.masks.assign(
-        static_cast<size_t>(n_ancestries),
-        std::vector<uint64_t>(static_cast<size_t>(n_words), 0)
-    );
-    state.hap_ancestry.assign(static_cast<size_t>(2 * n_output_samples), -1);
+    size_t n_haps = static_cast<size_t>(2 * n_output_samples);
+    out.reset_state = decoder.geno_rid != flare_geno_rid ||
+                      decoder.hap_ancestry.size() != n_haps;
+    out.changes.clear();
+    if (out.reset_state) {
+        decoder.geno_rid = flare_geno_rid;
+        decoder.hap_ancestry.assign(n_haps, -1);
+        out.changes.reserve(n_haps);
+    }
 
     for (int out_i = 0; out_i < n_output_samples; ++out_i) {
         int raw_i = flare_raw_indices[out_i];
-        int32_t raw_a1 = (*an1_arr)[raw_i];
-        int32_t raw_a2 = (*an2_arr)[raw_i];
+        int64_t raw_a1 = integer_format_value(an1, raw_i, 0, "AN1");
+        int64_t raw_a2 = integer_format_value(an2, raw_i, 0, "AN2");
 
-        if (raw_a1 == bcf_int32_missing || raw_a1 == bcf_int32_vector_end) {
+        if (integer_format_missing(an1, raw_a1) || integer_format_vector_end(an1, raw_a1)) {
             die("missing FORMAT/AN1 in FLARE record at sample index %d", raw_i);
         }
 
-        if (raw_a2 == bcf_int32_missing || raw_a2 == bcf_int32_vector_end) {
+        if (integer_format_missing(an2, raw_a2) || integer_format_vector_end(an2, raw_a2)) {
             die("missing FORMAT/AN2 in FLARE record at sample index %d", raw_i);
         }
 
@@ -981,11 +1159,72 @@ static void build_state_from_flare(
 
         uint32_t hap0 = static_cast<uint32_t>(2 * out_i);
         uint32_t hap1 = static_cast<uint32_t>(2 * out_i + 1);
-        set_bit(state.masks[a1], hap0);
-        set_bit(state.masks[a2], hap1);
-        state.hap_ancestry[hap0] = static_cast<int8_t>(a1);
-        state.hap_ancestry[hap1] = static_cast<int8_t>(a2);
+        int8_t next_a1 = static_cast<int8_t>(a1);
+        int8_t next_a2 = static_cast<int8_t>(a2);
+        if (decoder.hap_ancestry[hap0] != next_a1) {
+            decoder.hap_ancestry[hap0] = next_a1;
+            out.changes.push_back(AncestryChange{hap0, next_a1});
+        }
+        if (decoder.hap_ancestry[hap1] != next_a2) {
+            decoder.hap_ancestry[hap1] = next_a2;
+            out.changes.push_back(AncestryChange{hap1, next_a2});
+        }
     }
+}
+
+static void reset_ancestry_state(
+    AncestryState& state,
+    int n_ancestries,
+    int n_words,
+    size_t n_haps
+) {
+    state.masks.resize(static_cast<size_t>(n_ancestries));
+    for (std::vector<uint64_t>& mask : state.masks) {
+        mask.assign(static_cast<size_t>(n_words), 0);
+    }
+    state.hap_ancestry.assign(n_haps, -1);
+}
+
+static void apply_ancestry_changes(
+    AncestryState& state,
+    const LaiRecord& record,
+    int n_ancestries,
+    int n_words,
+    size_t n_haps
+) {
+    if (record.reset_state || state.hap_ancestry.size() != n_haps) {
+        reset_ancestry_state(state, n_ancestries, n_words, n_haps);
+    }
+
+    for (const AncestryChange& change : record.changes) {
+        if (change.hap_id >= n_haps || change.ancestry < 0 ||
+            change.ancestry >= n_ancestries) {
+            die("internal FLARE ancestry delta out of range");
+        }
+        int8_t previous = state.hap_ancestry[change.hap_id];
+        if (previous >= 0) clear_bit(state.masks[previous], change.hap_id);
+        set_bit(state.masks[change.ancestry], change.hap_id);
+        state.hap_ancestry[change.hap_id] = change.ancestry;
+    }
+}
+
+static bool ancestry_record_changes_state(
+    const AncestryState& state,
+    const LaiRecord& record,
+    int current_rid
+) {
+    if (record.reset_state || current_rid != record.geno_rid) return true;
+    if (record.changes.empty()) return false;
+    if (!record.merged_duplicate) return true;
+
+    std::vector<int8_t> final_ancestry = state.hap_ancestry;
+    for (const AncestryChange& change : record.changes) {
+        if (change.hap_id >= final_ancestry.size()) {
+            die("internal duplicate-coordinate FLARE delta out of range");
+        }
+        final_ancestry[change.hap_id] = change.ancestry;
+    }
+    return final_ancestry != state.hap_ancestry;
 }
 
 static void close_open_block(
@@ -1017,6 +1256,7 @@ static void close_open_block(
     );
 
     ++n_blocks_written;
+    block.active = false;
 }
 
 static void update_open_block_from_flare(
@@ -1033,7 +1273,7 @@ static void update_open_block_from_flare(
     const char* flare_chr,
     int64_t interval_start,
     int64_t interval_end,
-    AncestryState& new_state
+    bool state_changed
 ) {
     if (interval_start > interval_end) {
         die(
@@ -1044,36 +1284,25 @@ static void update_open_block_from_flare(
         );
     }
 
-    if (!block.active) {
-        block.active = true;
-        block.block_id = n_blocks_written;
-        block.geno_rid = flare_geno_rid;
-        block.chr = flare_chr;
-        block.start_pos = interval_start;
-        block.end_pos = interval_end;
-        block.state = std::move(new_state);
-        return;
-    }
-
     bool same_chromosome = block.geno_rid == flare_geno_rid;
-    bool unchanged = same_chromosome && same_masks(block.state.masks, new_state.masks);
-
-    if (unchanged) {
+    if (block.active && same_chromosome && !state_changed) {
         block.end_pos = std::max(block.end_pos, interval_end);
         return;
     }
 
-    close_open_block(
-        anc_fp,
-        anc_bin_path,
-        anc_mks_fp,
-        anc_mks_path,
-        anc_idx_fp,
-        block,
-        n_blocks_written,
-        n_ancestries,
-        n_words
-    );
+    if (block.active) {
+        close_open_block(
+            anc_fp,
+            anc_bin_path,
+            anc_mks_fp,
+            anc_mks_path,
+            anc_idx_fp,
+            block,
+            n_blocks_written,
+            n_ancestries,
+            n_words
+        );
+    }
 
     block.active = true;
     block.block_id = n_blocks_written;
@@ -1081,7 +1310,6 @@ static void update_open_block_from_flare(
     block.chr = flare_chr;
     block.start_pos = interval_start;
     block.end_pos = interval_end;
-    block.state = std::move(new_state);
 }
 
 static std::string make_split_id(
@@ -1098,32 +1326,77 @@ static std::string make_split_id(
     return std::string(raw_id) + "_" + ref + "_" + alt;
 }
 
-static void add_alt_carrier(
-    std::vector<std::vector<CarrierHap>>& carriers_by_alt,
+static void add_alt_haplotype(
+    std::vector<AltCarrierBuilder>& builders_by_alt,
+    const std::vector<uint8_t>& selected_alts,
     const AncestryState& state,
     int allele,
-    uint32_t hap_id
+    uint32_t hap_id,
+    int rare_threshold,
+    int n_words
 ) {
-    if (allele <= 0 || allele >= static_cast<int>(carriers_by_alt.size())) return;
+    if (allele <= 0 || allele >= static_cast<int>(builders_by_alt.size()) ||
+        !selected_alts[static_cast<size_t>(allele)]) {
+        return;
+    }
 
     int8_t ancestry = state.hap_ancestry[hap_id];
     if (ancestry < 0) return;
 
-    carriers_by_alt[allele].push_back(
-        CarrierHap{hap_id, static_cast<uint8_t>(ancestry)}
-    );
+    AltCarrierBuilder& builder = builders_by_alt[static_cast<size_t>(allele)];
+    ++builder.mac;
+
+    if (!builder.dense_bits.empty()) {
+        set_bit(builder.dense_bits, hap_id);
+        return;
+    }
+
+    if (builder.sparse_haps.size() < static_cast<size_t>(rare_threshold)) {
+        builder.sparse_haps.push_back(hap_id);
+        return;
+    }
+
+    builder.dense_bits.assign(static_cast<size_t>(n_words), 0);
+    for (uint32_t previous_hap : builder.sparse_haps) {
+        set_bit(builder.dense_bits, previous_hap);
+    }
+    builder.sparse_haps.clear();
+    set_bit(builder.dense_bits, hap_id);
+}
+
+static inline void add_biallelic_haplotype(
+    AltCarrierBuilder& builder,
+    const AncestryState& state,
+    uint32_t hap_id,
+    int rare_threshold,
+    int n_words
+) {
+    if (state.hap_ancestry[hap_id] < 0) return;
+    ++builder.mac;
+
+    if (!builder.dense_bits.empty()) {
+        set_bit(builder.dense_bits, hap_id);
+    } else if (builder.sparse_haps.size() < static_cast<size_t>(rare_threshold)) {
+        builder.sparse_haps.push_back(hap_id);
+    } else {
+        builder.dense_bits.assign(static_cast<size_t>(n_words), 0);
+        for (uint32_t previous_hap : builder.sparse_haps) {
+            set_bit(builder.dense_bits, previous_hap);
+        }
+        builder.sparse_haps.clear();
+        set_bit(builder.dense_bits, hap_id);
+    }
 }
 
 static void validate_extra_ploidy(
-    const int32_t* sample_gt,
-    int ploidy,
+    const bcf_fmt_t* gt,
+    int sample_index,
     const char* chr,
-    int64_t pos,
-    int sample_index
+    int64_t pos
 ) {
-    for (int p = 2; p < ploidy; ++p) {
-        int32_t gt = sample_gt[p];
-        if (is_gt_vector_end(gt)) break;
+    for (int p = 2; p < gt->n; ++p) {
+        int64_t value = integer_format_value(gt, sample_index, p, "GT");
+        if (integer_format_vector_end(gt, value)) break;
         die(
             "non-diploid genotype at %s:%lld sample index %d",
             chr,
@@ -1139,42 +1412,71 @@ static void process_genotypes(
     const OpenAncestryBlock& block,
     int genotype_raw_n_samples,
     const std::vector<int>& genotype_raw_indices,
-    int32_t** gt_arr,
-    int* ngt_arr,
-    std::vector<std::vector<CarrierHap>>& carriers_by_alt
+    const std::vector<uint8_t>& selected_alts,
+    int rare_threshold,
+    int n_words,
+    std::vector<AltCarrierBuilder>& builders_by_alt
 ) {
     const char* chr = bcf_hdr_id2name(ghdr, grec->rid);
     int64_t pos = static_cast<int64_t>(grec->pos) + 1;
 
-    int ngt = bcf_get_genotypes(ghdr, grec, gt_arr, ngt_arr);
-    if (ngt <= 0) {
-        die("missing FORMAT/GT at %s:%lld", chr, static_cast<long long>(pos));
+    bcf_fmt_t* gt = require_integer_format(ghdr, grec, "GT");
+    if (grec->n_sample != genotype_raw_n_samples) {
+        die("GT sample count mismatch at %s:%lld", chr, static_cast<long long>(pos));
     }
-
-    if (ngt % genotype_raw_n_samples != 0) {
-        die("GT field length is not divisible by sample count at %s:%lld", chr, static_cast<long long>(pos));
-    }
-
-    int ploidy = ngt / genotype_raw_n_samples;
-    if (ploidy < 2) {
+    if (gt->n < 2) {
         die("expected diploid GT at %s:%lld", chr, static_cast<long long>(pos));
     }
 
-    carriers_by_alt.assign(static_cast<size_t>(grec->n_allele), std::vector<CarrierHap>{});
+    if (selected_alts.size() != static_cast<size_t>(grec->n_allele)) {
+        die("internal selected ALT mask mismatch at %s:%lld", chr, static_cast<long long>(pos));
+    }
+
+    builders_by_alt.resize(static_cast<size_t>(grec->n_allele));
+    for (AltCarrierBuilder& builder : builders_by_alt) {
+        builder.mac = 0;
+        builder.sparse_haps.clear();
+        builder.dense_bits.clear();
+    }
 
     int n_output_samples = static_cast<int>(genotype_raw_indices.size());
+    bool biallelic_fast_path = grec->n_allele == 2 && selected_alts[1] != 0;
     for (int out_i = 0; out_i < n_output_samples; ++out_i) {
         int raw_i = genotype_raw_indices[out_i];
-        const int32_t* sample_gt = *gt_arr + static_cast<size_t>(raw_i) * ploidy;
-        int32_t g0 = sample_gt[0];
-        int32_t g1 = sample_gt[1];
+        int64_t raw_g0 = integer_format_value(gt, raw_i, 0, "GT");
+        int64_t raw_g1 = integer_format_value(gt, raw_i, 1, "GT");
 
-        validate_extra_ploidy(sample_gt, ploidy, chr, pos, raw_i);
+        validate_extra_ploidy(gt, raw_i, chr, pos);
 
-        if (is_gt_vector_end(g0) || is_gt_vector_end(g1) ||
-            bcf_gt_is_missing(g0) || bcf_gt_is_missing(g1)) {
+        if (integer_format_vector_end(gt, raw_g0) ||
+            integer_format_vector_end(gt, raw_g1) ||
+            integer_format_missing(gt, raw_g0) ||
+            integer_format_missing(gt, raw_g1) ||
+            raw_g0 < 0 || raw_g0 > std::numeric_limits<int32_t>::max() ||
+            raw_g1 < 0 || raw_g1 > std::numeric_limits<int32_t>::max()) {
             die(
                 "missing genotype at %s:%lld sample index %d",
+                chr,
+                static_cast<long long>(pos),
+                raw_i
+            );
+        }
+
+        int32_t g0 = static_cast<int32_t>(raw_g0);
+        int32_t g1 = static_cast<int32_t>(raw_g1);
+        if (bcf_gt_is_missing(g0) || bcf_gt_is_missing(g1)) {
+            die(
+                "missing genotype at %s:%lld sample index %d",
+                chr,
+                static_cast<long long>(pos),
+                raw_i
+            );
+        }
+
+        if (bcf_gt_allele(g0) >= grec->n_allele ||
+            bcf_gt_allele(g1) >= grec->n_allele) {
+            die(
+                "GT allele out of range at %s:%lld sample index %d",
                 chr,
                 static_cast<long long>(pos),
                 raw_i
@@ -1193,22 +1495,883 @@ static void process_genotypes(
             );
         }
 
-        add_alt_carrier(
-            carriers_by_alt,
-            block.state,
-            allele0,
-            static_cast<uint32_t>(2 * out_i)
-        );
-        add_alt_carrier(
-            carriers_by_alt,
-            block.state,
-            allele1,
-            static_cast<uint32_t>(2 * out_i + 1)
-        );
+        if (biallelic_fast_path) {
+            AltCarrierBuilder& builder = builders_by_alt[1];
+            if (allele0 == 1) {
+                add_biallelic_haplotype(
+                    builder,
+                    block.state,
+                    static_cast<uint32_t>(2 * out_i),
+                    rare_threshold,
+                    n_words
+                );
+            }
+            if (allele1 == 1) {
+                add_biallelic_haplotype(
+                    builder,
+                    block.state,
+                    static_cast<uint32_t>(2 * out_i + 1),
+                    rare_threshold,
+                    n_words
+                );
+            }
+        } else {
+            add_alt_haplotype(
+                builders_by_alt,
+                selected_alts,
+                block.state,
+                allele0,
+                static_cast<uint32_t>(2 * out_i),
+                rare_threshold,
+                n_words
+            );
+            add_alt_haplotype(
+                builders_by_alt,
+                selected_alts,
+                block.state,
+                allele1,
+                static_cast<uint32_t>(2 * out_i + 1),
+                rare_threshold,
+                n_words
+            );
+        }
     }
 }
 
+static std::vector<std::string> split_region_queries(const std::string& query) {
+    return query.empty() ? std::vector<std::string>{} : split_commas(query);
+}
+
+static void init_fast_text_reader(
+    FastTextVcfReader& reader,
+    htsFile* sequential_fp,
+    const char* path,
+    const std::string& indexed_query
+) {
+    if (indexed_query.empty()) {
+        reader.fp = sequential_fp;
+        return;
+    }
+
+    reader.fp = hts_open(path, "r");
+    reader.tbx = tbx_index_load3(path, nullptr, HTS_IDX_SILENT_FAIL);
+    if (!reader.fp || !reader.tbx) {
+        if (reader.fp) hts_close(reader.fp);
+        if (reader.tbx) tbx_destroy(reader.tbx);
+        reader = FastTextVcfReader{};
+        reader.fp = sequential_fp;
+        return;
+    }
+    reader.owns_fp = true;
+    reader.queries = split_region_queries(indexed_query);
+    hts_set_opt(reader.fp, HTS_OPT_BLOCK_SIZE, kInputBlockSize);
+}
+
+static int fast_text_next_line(FastTextVcfReader& reader) {
+    if (!reader.tbx) {
+        return hts_getline(reader.fp, '\n', &reader.line) >= 0 ? 0 : -1;
+    }
+
+    while (true) {
+        if (reader.itr && tbx_itr_next(reader.fp, reader.tbx, reader.itr, &reader.line) >= 0) {
+            return 0;
+        }
+        if (reader.itr) {
+            tbx_itr_destroy(reader.itr);
+            reader.itr = nullptr;
+        }
+        if (reader.query_index >= reader.queries.size()) return -1;
+        reader.itr = tbx_itr_querys(
+            reader.tbx,
+            reader.queries[reader.query_index++].c_str()
+        );
+        if (!reader.itr) continue;
+    }
+}
+
+static void destroy_fast_text_reader(FastTextVcfReader& reader) {
+    if (reader.itr) tbx_itr_destroy(reader.itr);
+    if (reader.tbx) tbx_destroy(reader.tbx);
+    if (reader.owns_fp && reader.fp) hts_close(reader.fp);
+    std::free(reader.line.s);
+    reader = FastTextVcfReader{};
+}
+
+static char* find_and_terminate_tab(char* cursor, const char* label) {
+    char* tab = std::strchr(cursor, '\t');
+    if (!tab) die("malformed VCF record: missing %s column separator", label);
+    *tab = '\0';
+    return tab + 1;
+}
+
+static int find_format_field_index(const char* format, const char* tag) {
+    int index = 0;
+    const char* start = format;
+    size_t tag_len = std::strlen(tag);
+    while (*start) {
+        const char* end = std::strchr(start, ':');
+        size_t len = end ? static_cast<size_t>(end - start) : std::strlen(start);
+        if (len == tag_len && std::memcmp(start, tag, len) == 0) return index;
+        if (!end) break;
+        start = end + 1;
+        ++index;
+    }
+    return -1;
+}
+
+static void split_fast_vcf_fixed_fields(char* line, char* fields[9], char*& samples) {
+    char* cursor = line;
+    for (int i = 0; i < 9; ++i) {
+        fields[i] = cursor;
+        if (i < 8) cursor = find_and_terminate_tab(cursor, "fixed VCF");
+    }
+    samples = find_and_terminate_tab(fields[8], "FORMAT");
+}
+
+static int64_t parse_fast_positive_pos(const char* text) {
+    char* end = nullptr;
+    long long value = std::strtoll(text, &end, 10);
+    if (end == text || *end != '\0' || value <= 0) {
+        die("invalid VCF POS: %s", text);
+    }
+    return static_cast<int64_t>(value);
+}
+
+static void parse_fast_genotype_record(
+    FastTextVcfReader& reader,
+    bcf_hdr_t* ghdr,
+    FastGenotypeRecord& record
+) {
+    char* fields[9];
+    split_fast_vcf_fixed_fields(reader.line.s, fields, record.samples);
+    record.samples_length = reader.line.l -
+        static_cast<size_t>(record.samples - reader.line.s);
+    record.chr = fields[0];
+    record.rid = bcf_hdr_name2id(ghdr, record.chr);
+    record.pos = parse_fast_positive_pos(fields[1]);
+    record.id = fields[2];
+    record.ref = fields[3];
+    record.gt_field_index = find_format_field_index(fields[8], "GT");
+    record.gt_only = std::strcmp(fields[8], "GT") == 0;
+    if (record.gt_field_index < 0) {
+        die("missing FORMAT/GT at %s:%lld", record.chr, static_cast<long long>(record.pos));
+    }
+
+    record.alleles.clear();
+    record.alleles.push_back(record.ref);
+    char* alt = fields[4];
+    while (true) {
+        record.alleles.push_back(alt);
+        char* comma = std::strchr(alt, ',');
+        if (!comma) break;
+        *comma = '\0';
+        alt = comma + 1;
+    }
+}
+
+static const char* locate_sample_subfield(
+    const char* sample_start,
+    const char* sample_end,
+    int field_index,
+    const char*& field_end
+) {
+    const char* start = sample_start;
+    for (int field = 0; field < field_index; ++field) {
+        const char* colon = static_cast<const char*>(
+            std::memchr(start, ':', static_cast<size_t>(sample_end - start))
+        );
+        if (!colon) return nullptr;
+        start = colon + 1;
+    }
+    const char* colon = static_cast<const char*>(
+        std::memchr(start, ':', static_cast<size_t>(sample_end - start))
+    );
+    field_end = colon ? colon : sample_end;
+    return start;
+}
+
+static int parse_fast_nonnegative_int(const char* start, const char* end, const char* label) {
+    if (start >= end || *start == '.') die("missing %s", label);
+    int value = 0;
+    for (const char* p = start; p < end; ++p) {
+        if (*p < '0' || *p > '9') die("invalid %s value", label);
+        if (value > (std::numeric_limits<int>::max() - (*p - '0')) / 10) {
+            die("%s value out of range", label);
+        }
+        value = value * 10 + (*p - '0');
+    }
+    return value;
+}
+
+static void parse_fast_phased_gt(
+    const char* start,
+    const char* end,
+    int& allele0,
+    int& allele1,
+    const char* chr,
+    int64_t pos,
+    int sample_index
+) {
+    const char* separator = static_cast<const char*>(
+        std::memchr(start, '|', static_cast<size_t>(end - start))
+    );
+    if (!separator) {
+        if (std::memchr(start, '/', static_cast<size_t>(end - start))) {
+            die("unphased genotype at %s:%lld sample index %d", chr,
+                static_cast<long long>(pos), sample_index);
+        }
+        die("expected diploid GT at %s:%lld", chr, static_cast<long long>(pos));
+    }
+    if (std::memchr(separator + 1, '|', static_cast<size_t>(end - separator - 1)) ||
+        std::memchr(separator + 1, '/', static_cast<size_t>(end - separator - 1))) {
+        die("non-diploid genotype at %s:%lld sample index %d", chr,
+            static_cast<long long>(pos), sample_index);
+    }
+    allele0 = parse_fast_nonnegative_int(start, separator, "genotype");
+    allele1 = parse_fast_nonnegative_int(separator + 1, end, "genotype");
+}
+
+static void reset_carrier_builders(
+    std::vector<AltCarrierBuilder>& builders_by_alt,
+    size_t n_alleles
+) {
+    builders_by_alt.resize(n_alleles);
+    for (AltCarrierBuilder& builder : builders_by_alt) {
+        builder.mac = 0;
+        builder.sparse_haps.clear();
+        builder.dense_bits.clear();
+    }
+}
+
+static inline void append_carrier_word(
+    AltCarrierBuilder& builder,
+    uint64_t carrier_word,
+    size_t word_index,
+    int rare_threshold,
+    int n_words
+) {
+    if (carrier_word == 0) return;
+
+    uint32_t word_mac = static_cast<uint32_t>(__builtin_popcountll(carrier_word));
+    builder.mac += word_mac;
+    if (!builder.dense_bits.empty()) {
+        builder.dense_bits[word_index] = carrier_word;
+        return;
+    }
+
+    if (builder.mac <= static_cast<uint32_t>(rare_threshold)) {
+        uint64_t remaining = carrier_word;
+        uint32_t word_hap = static_cast<uint32_t>(word_index * 64);
+        while (remaining != 0) {
+            uint32_t bit = static_cast<uint32_t>(__builtin_ctzll(remaining));
+            builder.sparse_haps.push_back(word_hap + bit);
+            remaining &= remaining - 1;
+        }
+        return;
+    }
+
+    builder.dense_bits.assign(static_cast<size_t>(n_words), 0);
+    for (uint32_t previous_hap : builder.sparse_haps) {
+        set_bit(builder.dense_bits, previous_hap);
+    }
+    builder.sparse_haps.clear();
+    builder.dense_bits[word_index] = carrier_word;
+}
+
+static bool process_compact_gt_words(
+    const FastGenotypeRecord& record,
+    int genotype_text_n_samples,
+    const std::vector<int>& genotype_text_indices,
+    const std::vector<uint8_t>& selected_alts,
+    int rare_threshold,
+    int n_words,
+    std::vector<AltCarrierBuilder>& builders_by_alt
+) {
+    if (!record.gt_only) return false;
+    size_t expected_length = genotype_text_n_samples > 0
+        ? static_cast<size_t>(genotype_text_n_samples) * 4 - 1
+        : 0;
+    if (record.samples_length != expected_length) return false;
+
+    bool identity_sample_order =
+        genotype_text_indices.size() == static_cast<size_t>(genotype_text_n_samples) &&
+        !genotype_text_indices.empty() &&
+        genotype_text_indices.front() == 0 &&
+        genotype_text_indices.back() == genotype_text_n_samples - 1;
+    bool biallelic = record.alleles.size() == 2 && selected_alts[1] != 0;
+    if (identity_sample_order) {
+        const char* cursor = record.samples;
+        int out_i = 0;
+        if (biallelic) {
+            AltCarrierBuilder& builder = builders_by_alt[1];
+            for (size_t word_index = 0; word_index < static_cast<size_t>(n_words);
+                 ++word_index) {
+                int samples_in_word = std::min(32, genotype_text_n_samples - out_i);
+                uint64_t carrier_word = 0;
+                for (int sample_in_word = 0; sample_in_word < samples_in_word;
+                     ++sample_in_word, ++out_i) {
+                    char expected_delimiter =
+                        out_i + 1 == genotype_text_n_samples ? '\0' : '\t';
+                    if (cursor[0] < '0' || cursor[0] > '9' || cursor[1] != '|' ||
+                        cursor[2] < '0' || cursor[2] > '9' ||
+                        cursor[3] != expected_delimiter) {
+                        return false;
+                    }
+                    int allele0 = cursor[0] - '0';
+                    int allele1 = cursor[2] - '0';
+                    if (allele0 >= 2 || allele1 >= 2) {
+                        die("GT allele out of range at %s:%lld sample index %d", record.chr,
+                            static_cast<long long>(record.pos), out_i);
+                    }
+                    carrier_word |= static_cast<uint64_t>(allele0 == 1)
+                                    << (2 * sample_in_word);
+                    carrier_word |= static_cast<uint64_t>(allele1 == 1)
+                                    << (2 * sample_in_word + 1);
+                    cursor += expected_delimiter == '\t' ? 4 : 3;
+                }
+                append_carrier_word(
+                    builder, carrier_word, word_index, rare_threshold, n_words);
+            }
+            return true;
+        }
+
+        std::vector<uint64_t> words_by_alt(record.alleles.size(), 0);
+        for (size_t word_index = 0; word_index < static_cast<size_t>(n_words);
+             ++word_index) {
+            std::fill(words_by_alt.begin(), words_by_alt.end(), 0);
+            int samples_in_word = std::min(32, genotype_text_n_samples - out_i);
+            for (int sample_in_word = 0; sample_in_word < samples_in_word;
+                 ++sample_in_word, ++out_i) {
+                char expected_delimiter =
+                    out_i + 1 == genotype_text_n_samples ? '\0' : '\t';
+                if (cursor[0] < '0' || cursor[0] > '9' || cursor[1] != '|' ||
+                    cursor[2] < '0' || cursor[2] > '9' ||
+                    cursor[3] != expected_delimiter) {
+                    return false;
+                }
+                int allele0 = cursor[0] - '0';
+                int allele1 = cursor[2] - '0';
+                if (allele0 >= static_cast<int>(record.alleles.size()) ||
+                    allele1 >= static_cast<int>(record.alleles.size())) {
+                    die("GT allele out of range at %s:%lld sample index %d", record.chr,
+                        static_cast<long long>(record.pos), out_i);
+                }
+                if (allele0 > 0 && selected_alts[static_cast<size_t>(allele0)] != 0) {
+                    words_by_alt[static_cast<size_t>(allele0)] |=
+                        uint64_t{1} << (2 * sample_in_word);
+                }
+                if (allele1 > 0 && selected_alts[static_cast<size_t>(allele1)] != 0) {
+                    words_by_alt[static_cast<size_t>(allele1)] |=
+                        uint64_t{1} << (2 * sample_in_word + 1);
+                }
+                cursor += expected_delimiter == '\t' ? 4 : 3;
+            }
+            for (size_t alt_index = 1; alt_index < words_by_alt.size(); ++alt_index) {
+                if (selected_alts[alt_index] == 0) continue;
+                append_carrier_word(
+                    builders_by_alt[alt_index],
+                    words_by_alt[alt_index],
+                    word_index,
+                    rare_threshold,
+                    n_words
+                );
+            }
+        }
+        return true;
+    }
+
+    int out_i = 0;
+    int n_output_samples = static_cast<int>(genotype_text_indices.size());
+    if (biallelic) {
+        AltCarrierBuilder& builder = builders_by_alt[1];
+        for (size_t word_index = 0; word_index < static_cast<size_t>(n_words);
+             ++word_index) {
+            int samples_in_word = std::min(32, n_output_samples - out_i);
+            uint64_t carrier_word = 0;
+            for (int sample_in_word = 0; sample_in_word < samples_in_word;
+                 ++sample_in_word, ++out_i) {
+                int raw_i = genotype_text_indices[static_cast<size_t>(out_i)];
+                const char* sample = record.samples + static_cast<size_t>(raw_i) * 4;
+                char expected_delimiter =
+                    raw_i + 1 == genotype_text_n_samples ? '\0' : '\t';
+                if (sample[0] < '0' || sample[0] > '9' || sample[1] != '|' ||
+                    sample[2] < '0' || sample[2] > '9' ||
+                    sample[3] != expected_delimiter) {
+                    return false;
+                }
+                int allele0 = sample[0] - '0';
+                int allele1 = sample[2] - '0';
+                if (allele0 >= 2 || allele1 >= 2) {
+                    die("GT allele out of range at %s:%lld sample index %d", record.chr,
+                        static_cast<long long>(record.pos), raw_i);
+                }
+                carrier_word |= static_cast<uint64_t>(allele0 == 1)
+                                << (2 * sample_in_word);
+                carrier_word |= static_cast<uint64_t>(allele1 == 1)
+                                << (2 * sample_in_word + 1);
+            }
+            append_carrier_word(
+                builder, carrier_word, word_index, rare_threshold, n_words);
+        }
+        return true;
+    }
+
+    std::vector<uint64_t> words_by_alt(record.alleles.size(), 0);
+    for (size_t word_index = 0; word_index < static_cast<size_t>(n_words);
+         ++word_index) {
+        std::fill(words_by_alt.begin(), words_by_alt.end(), 0);
+        int samples_in_word = std::min(32, n_output_samples - out_i);
+        for (int sample_in_word = 0; sample_in_word < samples_in_word;
+             ++sample_in_word, ++out_i) {
+            int raw_i = genotype_text_indices[static_cast<size_t>(out_i)];
+            const char* sample = record.samples + static_cast<size_t>(raw_i) * 4;
+            char expected_delimiter = raw_i + 1 == genotype_text_n_samples ? '\0' : '\t';
+            if (sample[0] < '0' || sample[0] > '9' || sample[1] != '|' ||
+                sample[2] < '0' || sample[2] > '9' || sample[3] != expected_delimiter) {
+                return false;
+            }
+            int allele0 = sample[0] - '0';
+            int allele1 = sample[2] - '0';
+            if (allele0 >= static_cast<int>(record.alleles.size()) ||
+                allele1 >= static_cast<int>(record.alleles.size())) {
+                die("GT allele out of range at %s:%lld sample index %d", record.chr,
+                    static_cast<long long>(record.pos), raw_i);
+            }
+            if (allele0 > 0 && selected_alts[static_cast<size_t>(allele0)] != 0) {
+                words_by_alt[static_cast<size_t>(allele0)] |=
+                    uint64_t{1} << (2 * sample_in_word);
+            }
+            if (allele1 > 0 && selected_alts[static_cast<size_t>(allele1)] != 0) {
+                words_by_alt[static_cast<size_t>(allele1)] |=
+                    uint64_t{1} << (2 * sample_in_word + 1);
+            }
+        }
+        for (size_t alt_index = 1; alt_index < words_by_alt.size(); ++alt_index) {
+            if (selected_alts[alt_index] == 0) continue;
+            append_carrier_word(
+                builders_by_alt[alt_index],
+                words_by_alt[alt_index],
+                word_index,
+                rare_threshold,
+                n_words
+            );
+        }
+    }
+    return true;
+}
+
+static void process_fast_text_genotypes(
+    const FastGenotypeRecord& record,
+    const OpenAncestryBlock& block,
+    int genotype_text_n_samples,
+    const std::vector<int>& genotype_text_indices,
+    const std::vector<uint8_t>& selected_alts,
+    int rare_threshold,
+    int n_words,
+    std::vector<AltCarrierBuilder>& builders_by_alt
+) {
+    if (selected_alts.size() != record.alleles.size()) {
+        die("internal selected ALT mask mismatch at %s:%lld", record.chr,
+            static_cast<long long>(record.pos));
+    }
+    reset_carrier_builders(builders_by_alt, record.alleles.size());
+    bool biallelic_fast_path = record.alleles.size() == 2 && selected_alts[1] != 0;
+
+    bool identity_sample_order =
+        genotype_text_indices.size() == static_cast<size_t>(genotype_text_n_samples) &&
+        !genotype_text_indices.empty() &&
+        genotype_text_indices.front() == 0 &&
+        genotype_text_indices.back() == genotype_text_n_samples - 1;
+    if (process_compact_gt_words(
+            record,
+            genotype_text_n_samples,
+            genotype_text_indices,
+            selected_alts,
+            rare_threshold,
+            n_words,
+            builders_by_alt)) {
+        return;
+    }
+    reset_carrier_builders(builders_by_alt, record.alleles.size());
+    if (identity_sample_order && record.gt_field_index == 0) {
+        const char* cursor = record.samples;
+        for (int out_i = 0; out_i < genotype_text_n_samples; ++out_i) {
+            int allele0 = 0;
+            int allele1 = 0;
+            const char* sample_end = nullptr;
+            char delimiter = '\0';
+            bool compact_gt =
+                cursor[0] >= '0' && cursor[0] <= '9' &&
+                cursor[1] == '|' &&
+                cursor[2] >= '0' && cursor[2] <= '9' &&
+                (cursor[3] == '\t' || cursor[3] == ':' || cursor[3] == '\0');
+            if (compact_gt) {
+                delimiter = cursor[3];
+                allele0 = cursor[0] - '0';
+                allele1 = cursor[2] - '0';
+            } else {
+                sample_end = std::strchr(cursor, '\t');
+                if (!sample_end) sample_end = cursor + std::strlen(cursor);
+                const char* gt_end = nullptr;
+                const char* gt_start = locate_sample_subfield(cursor, sample_end, 0, gt_end);
+                parse_fast_phased_gt(
+                    gt_start,
+                    gt_end,
+                    allele0,
+                    allele1,
+                    record.chr,
+                    record.pos,
+                    out_i
+                );
+                delimiter = *gt_end;
+            }
+
+            if (allele0 >= static_cast<int>(record.alleles.size()) ||
+                allele1 >= static_cast<int>(record.alleles.size())) {
+                die("GT allele out of range at %s:%lld sample index %d", record.chr,
+                    static_cast<long long>(record.pos), out_i);
+            }
+            if (biallelic_fast_path) {
+                AltCarrierBuilder& builder = builders_by_alt[1];
+                if (allele0 == 1) {
+                    add_biallelic_haplotype(builder, block.state,
+                        static_cast<uint32_t>(2 * out_i), rare_threshold, n_words);
+                }
+                if (allele1 == 1) {
+                    add_biallelic_haplotype(builder, block.state,
+                        static_cast<uint32_t>(2 * out_i + 1), rare_threshold, n_words);
+                }
+            } else {
+                add_alt_haplotype(builders_by_alt, selected_alts, block.state, allele0,
+                    static_cast<uint32_t>(2 * out_i), rare_threshold, n_words);
+                add_alt_haplotype(builders_by_alt, selected_alts, block.state, allele1,
+                    static_cast<uint32_t>(2 * out_i + 1), rare_threshold, n_words);
+            }
+
+            if (compact_gt && delimiter == ':') {
+                sample_end = std::strchr(cursor + 4, '\t');
+                if (!sample_end) sample_end = cursor + std::strlen(cursor);
+            }
+            bool has_next_sample = compact_gt
+                ? (delimiter == '\t' || (delimiter == ':' && *sample_end == '\t'))
+                : *sample_end == '\t';
+            if ((out_i + 1 == genotype_text_n_samples) == has_next_sample) {
+                die("GT sample count mismatch at %s:%lld", record.chr,
+                    static_cast<long long>(record.pos));
+            }
+            if (!compact_gt) {
+                cursor = *sample_end ? sample_end + 1 : sample_end;
+            } else if (delimiter == '\t') {
+                cursor += 4;
+            } else if (delimiter == '\0') {
+                if (out_i + 1 != genotype_text_n_samples) {
+                    die("GT sample count mismatch at %s:%lld", record.chr,
+                        static_cast<long long>(record.pos));
+                }
+                cursor += 3;
+            } else {
+                cursor = *sample_end ? sample_end + 1 : sample_end;
+            }
+        }
+        if (*cursor != '\0') {
+            die("GT sample count mismatch at %s:%lld", record.chr,
+                static_cast<long long>(record.pos));
+        }
+        return;
+    }
+
+    const char* sample_cursor = record.samples;
+    int raw_cursor = 0;
+    for (size_t out_i = 0; out_i < genotype_text_indices.size(); ++out_i) {
+        int target_raw = genotype_text_indices[out_i];
+        while (raw_cursor < target_raw) {
+            const char* tab = std::strchr(sample_cursor, '\t');
+            if (!tab) die("GT sample count mismatch at %s:%lld", record.chr,
+                static_cast<long long>(record.pos));
+            sample_cursor = tab + 1;
+            ++raw_cursor;
+        }
+        const char* sample_end = std::strchr(sample_cursor, '\t');
+        if (!sample_end) sample_end = sample_cursor + std::strlen(sample_cursor);
+        const char* gt_end = nullptr;
+        const char* gt_start = locate_sample_subfield(
+            sample_cursor,
+            sample_end,
+            record.gt_field_index,
+            gt_end
+        );
+        if (!gt_start) {
+            die("missing FORMAT/GT at %s:%lld sample index %d", record.chr,
+                static_cast<long long>(record.pos), target_raw);
+        }
+        int allele0 = 0;
+        int allele1 = 0;
+        if (gt_end - gt_start == 3 && gt_start[1] == '|' &&
+            gt_start[0] >= '0' && gt_start[0] <= '9' &&
+            gt_start[2] >= '0' && gt_start[2] <= '9') {
+            allele0 = gt_start[0] - '0';
+            allele1 = gt_start[2] - '0';
+        } else {
+            parse_fast_phased_gt(
+                gt_start,
+                gt_end,
+                allele0,
+                allele1,
+                record.chr,
+                record.pos,
+                target_raw
+            );
+        }
+        if (allele0 >= static_cast<int>(record.alleles.size()) ||
+            allele1 >= static_cast<int>(record.alleles.size())) {
+            die("GT allele out of range at %s:%lld sample index %d", record.chr,
+                static_cast<long long>(record.pos), target_raw);
+        }
+
+        if (biallelic_fast_path) {
+            AltCarrierBuilder& builder = builders_by_alt[1];
+            if (allele0 == 1) {
+                add_biallelic_haplotype(builder, block.state,
+                    static_cast<uint32_t>(2 * out_i), rare_threshold, n_words);
+            }
+            if (allele1 == 1) {
+                add_biallelic_haplotype(builder, block.state,
+                    static_cast<uint32_t>(2 * out_i + 1), rare_threshold, n_words);
+            }
+        } else {
+            add_alt_haplotype(builders_by_alt, selected_alts, block.state, allele0,
+                static_cast<uint32_t>(2 * out_i), rare_threshold, n_words);
+            add_alt_haplotype(builders_by_alt, selected_alts, block.state, allele1,
+                static_cast<uint32_t>(2 * out_i + 1), rare_threshold, n_words);
+        }
+
+        bool has_next_sample = *sample_end == '\t';
+        if (target_raw + 1 == genotype_text_n_samples && has_next_sample) {
+            die("GT sample count mismatch at %s:%lld", record.chr,
+                static_cast<long long>(record.pos));
+        }
+        sample_cursor = *sample_end ? sample_end + 1 : sample_end;
+        raw_cursor = target_raw + 1;
+    }
+
+    while (raw_cursor < genotype_text_n_samples && *sample_cursor != '\0') {
+        const char* tab = std::strchr(sample_cursor, '\t');
+        if (tab && raw_cursor + 1 == genotype_text_n_samples) {
+            die("GT sample count mismatch at %s:%lld", record.chr,
+                static_cast<long long>(record.pos));
+        }
+        ++raw_cursor;
+        if (!tab) {
+            sample_cursor += std::strlen(sample_cursor);
+            break;
+        }
+        sample_cursor = tab + 1;
+    }
+    if (raw_cursor != genotype_text_n_samples || *sample_cursor != '\0') {
+        die("GT sample count mismatch at %s:%lld", record.chr,
+            static_cast<long long>(record.pos));
+    }
+}
+
+static void decode_fast_flare_samples(
+    const char* samples,
+    int an1_index,
+    int an2_index,
+    const std::vector<int>& raw_to_output,
+    int n_output_samples,
+    int n_ancestries,
+    int flare_geno_rid,
+    FlareDeltaDecoder& decoder,
+    LaiRecord& out
+) {
+    size_t n_haps = static_cast<size_t>(2 * n_output_samples);
+    out.reset_state = decoder.geno_rid != flare_geno_rid ||
+                      decoder.hap_ancestry.size() != n_haps;
+    out.changes.clear();
+    if (out.reset_state) {
+        decoder.geno_rid = flare_geno_rid;
+        decoder.hap_ancestry.assign(n_haps, -1);
+        out.changes.reserve(n_haps);
+    }
+
+    const char* cursor = samples;
+    for (size_t raw_i = 0; raw_i < raw_to_output.size(); ++raw_i) {
+        int out_i = raw_to_output[raw_i];
+        const char* sample_end = nullptr;
+        const char* next_cursor = nullptr;
+        bool has_next_sample = false;
+        if (out_i >= 0) {
+            int a1 = 0;
+            int a2 = 0;
+            bool compact_ancestry_first =
+                an1_index == 0 && an2_index == 1 &&
+                cursor[0] >= '0' && cursor[0] <= '9' &&
+                cursor[1] == ':' &&
+                cursor[2] >= '0' && cursor[2] <= '9' &&
+                (cursor[3] == '\t' || cursor[3] == ':' || cursor[3] == '\0');
+            bool compact_flare_layout =
+                an1_index == 1 && an2_index == 2 &&
+                cursor[0] >= '0' && cursor[0] <= '9' &&
+                cursor[1] == '|' &&
+                cursor[2] >= '0' && cursor[2] <= '9' &&
+                cursor[3] == ':' &&
+                cursor[4] >= '0' && cursor[4] <= '9' &&
+                cursor[5] == ':' &&
+                cursor[6] >= '0' && cursor[6] <= '9' &&
+                (cursor[7] == '\t' || cursor[7] == ':' || cursor[7] == '\0');
+            if (compact_ancestry_first) {
+                a1 = cursor[0] - '0';
+                a2 = cursor[2] - '0';
+                if (cursor[3] == '\t') {
+                    has_next_sample = true;
+                    next_cursor = cursor + 4;
+                } else if (cursor[3] == '\0') {
+                    next_cursor = cursor + 3;
+                } else {
+                    sample_end = std::strchr(cursor + 4, '\t');
+                    has_next_sample = sample_end != nullptr;
+                    next_cursor = sample_end ? sample_end + 1
+                                             : cursor + std::strlen(cursor);
+                }
+            } else if (compact_flare_layout) {
+                a1 = cursor[4] - '0';
+                a2 = cursor[6] - '0';
+                if (cursor[7] == '\t') {
+                    has_next_sample = true;
+                    next_cursor = cursor + 8;
+                } else if (cursor[7] == '\0') {
+                    next_cursor = cursor + 7;
+                } else {
+                    sample_end = std::strchr(cursor + 8, '\t');
+                    has_next_sample = sample_end != nullptr;
+                    next_cursor = sample_end ? sample_end + 1
+                                             : cursor + std::strlen(cursor);
+                }
+            } else {
+                sample_end = std::strchr(cursor, '\t');
+                if (!sample_end) sample_end = cursor + std::strlen(cursor);
+                const char* an1_end = nullptr;
+                const char* an2_end = nullptr;
+                const char* an1_start = locate_sample_subfield(
+                    cursor, sample_end, an1_index, an1_end);
+                const char* an2_start = locate_sample_subfield(
+                    cursor, sample_end, an2_index, an2_end);
+                if (!an1_start || !an2_start) {
+                    die("missing FORMAT/AN1 or FORMAT/AN2 in FLARE record at sample index %llu",
+                        static_cast<unsigned long long>(raw_i));
+                }
+                a1 = parse_fast_nonnegative_int(an1_start, an1_end, "FORMAT/AN1");
+                a2 = parse_fast_nonnegative_int(an2_start, an2_end, "FORMAT/AN2");
+                has_next_sample = *sample_end == '\t';
+                next_cursor = *sample_end ? sample_end + 1 : sample_end;
+            }
+            if (a1 >= n_ancestries) {
+                die("FORMAT/AN1 value out of range at sample index %llu: %d",
+                    static_cast<unsigned long long>(raw_i), a1);
+            }
+            if (a2 >= n_ancestries) {
+                die("FORMAT/AN2 value out of range at sample index %llu: %d",
+                    static_cast<unsigned long long>(raw_i), a2);
+            }
+            uint32_t hap0 = static_cast<uint32_t>(2 * out_i);
+            uint32_t hap1 = hap0 + 1;
+            int8_t next_a1 = static_cast<int8_t>(a1);
+            int8_t next_a2 = static_cast<int8_t>(a2);
+            if (decoder.hap_ancestry[hap0] != next_a1) {
+                decoder.hap_ancestry[hap0] = next_a1;
+                out.changes.push_back(AncestryChange{hap0, next_a1});
+            }
+            if (decoder.hap_ancestry[hap1] != next_a2) {
+                decoder.hap_ancestry[hap1] = next_a2;
+                out.changes.push_back(AncestryChange{hap1, next_a2});
+            }
+        } else {
+            sample_end = std::strchr(cursor, '\t');
+            if (!sample_end) sample_end = cursor + std::strlen(cursor);
+            has_next_sample = *sample_end == '\t';
+            next_cursor = *sample_end ? sample_end + 1 : sample_end;
+        }
+
+        if ((raw_i + 1 == raw_to_output.size()) == has_next_sample) {
+            die("FLARE sample count mismatch");
+        }
+        cursor = next_cursor;
+    }
+}
+
+static bool read_next_fast_lai_record(
+    FastTextVcfReader& reader,
+    bcf_hdr_t* ghdr,
+    const std::vector<int>& raw_to_output,
+    int n_output_samples,
+    int n_ancestries,
+    FlareDeltaDecoder& decoder,
+    std::unordered_set<std::string>& warned_missing_flare_contigs,
+    LaiRecord& out
+) {
+    while (fast_text_next_line(reader) == 0) {
+        char* fields[9];
+        char* samples = nullptr;
+        split_fast_vcf_fixed_fields(reader.line.s, fields, samples);
+        int geno_rid = bcf_hdr_name2id(ghdr, fields[0]);
+        if (geno_rid < 0) {
+            if (warned_missing_flare_contigs.insert(fields[0]).second) {
+                std::fprintf(stderr,
+                    "WARNING: skipping FLARE contig absent from genotype header: %s\n",
+                    fields[0]);
+            }
+            continue;
+        }
+        int an1_index = find_format_field_index(fields[8], "AN1");
+        int an2_index = find_format_field_index(fields[8], "AN2");
+        if (an1_index < 0 || an2_index < 0) {
+            die("FLARE VCF must contain scalar FORMAT/AN1 and FORMAT/AN2");
+        }
+        out.valid = true;
+        out.merged_duplicate = false;
+        out.geno_rid = geno_rid;
+        out.chr = fields[0];
+        out.pos = parse_fast_positive_pos(fields[1]);
+        decode_fast_flare_samples(
+            samples,
+            an1_index,
+            an2_index,
+            raw_to_output,
+            n_output_samples,
+            n_ancestries,
+            geno_rid,
+            decoder,
+            out
+        );
+        return true;
+    }
+    out = LaiRecord{};
+    return false;
+}
+
+static int read_next_fast_genotype_record(
+    FastTextVcfReader& reader,
+    bcf_hdr_t* ghdr,
+    FastGenotypeRecord& record,
+    const Region& region
+) {
+    while (fast_text_next_line(reader) == 0) {
+        parse_fast_genotype_record(reader, ghdr, record);
+        if (record.rid < 0) {
+            if (region.active) continue;
+            die("VCF contig absent from genotype header: %s", record.chr);
+        }
+        if (!region.active ||
+            (record.rid == region.geno_rid &&
+             record.pos >= region.start && record.pos <= region.end)) {
+            return 0;
+        }
+    }
+    return -1;
+}
+
 static int read_next_record(htsFile* fp, bcf_hdr_t* hdr, bcf1_t* rec, hts_itr_t* itr = nullptr) {
+    rec->max_unpack = BCF_UN_STR | BCF_UN_FMT;
     int ret = itr ? bcf_itr_next(fp, itr, rec) : bcf_read(fp, hdr, rec);
     if (ret == 0) bcf_unpack(rec, BCF_UN_STR);
     return ret;
@@ -1303,34 +2466,223 @@ static int extract_position_sort_rid(bcf_hdr_t* hdr, const std::string& chr) {
     return std::numeric_limits<int>::max();
 }
 
-static std::vector<ExtractPosition> sorted_extract_positions(
-    const ExtractSites& extract_sites,
-    bcf_hdr_t* ghdr,
-    const Region& region
-) {
-    std::vector<ExtractPosition> positions;
-    if (!extract_sites.active) return positions;
+static bool extract_position_less(const ExtractPosition& a, const ExtractPosition& b) {
+    if (a.geno_rid != b.geno_rid) return a.geno_rid < b.geno_rid;
+    if (a.chr != b.chr) return a.chr < b.chr;
+    if (a.pos != b.pos) return a.pos < b.pos;
+    return a.ref < b.ref;
+}
 
-    positions.reserve(extract_sites.positions.size());
-    for (const ExtractPosition& position : extract_sites.positions) {
-        if (extract_position_in_region(position, region)) {
-            positions.push_back(position);
+static void merge_extract_alts(
+    ExtractPosition& destination,
+    const ExtractPosition& source,
+    const std::string& path
+) {
+    std::vector<std::string> merged;
+    merged.reserve(destination.alts.size() + source.alts.size());
+
+    size_t destination_i = 0;
+    size_t source_i = 0;
+    while (destination_i < destination.alts.size() && source_i < source.alts.size()) {
+        const std::string& destination_alt = destination.alts[destination_i];
+        const std::string& source_alt = source.alts[source_i];
+        if (destination_alt < source_alt) {
+            merged.push_back(destination_alt);
+            ++destination_i;
+        } else if (source_alt < destination_alt) {
+            merged.push_back(source_alt);
+            ++source_i;
+        } else {
+            die(
+                "duplicate allele in --extract list at %s:%llu: %s:%lld %s>%s",
+                path.c_str(),
+                static_cast<unsigned long long>(source.line_no),
+                source.chr.c_str(),
+                static_cast<long long>(source.pos),
+                source.ref.c_str(),
+                source_alt.c_str()
+            );
+        }
+    }
+    merged.insert(
+        merged.end(),
+        destination.alts.begin() + static_cast<std::ptrdiff_t>(destination_i),
+        destination.alts.end()
+    );
+    merged.insert(
+        merged.end(),
+        source.alts.begin() + static_cast<std::ptrdiff_t>(source_i),
+        source.alts.end()
+    );
+    destination.alts = std::move(merged);
+}
+
+static void prepare_extract_positions(ExtractSites& extract_sites, bcf_hdr_t* ghdr) {
+    if (!extract_sites.active) return;
+
+    for (ExtractPosition& position : extract_sites.positions) {
+        position.geno_rid = bcf_hdr_name2id(ghdr, position.chr.c_str());
+        if (position.geno_rid < 0) {
+            position.geno_rid = extract_position_sort_rid(ghdr, position.chr);
         }
     }
 
-    std::sort(
-        positions.begin(),
-        positions.end(),
-        [ghdr](const ExtractPosition& a, const ExtractPosition& b) {
-            int arid = extract_position_sort_rid(ghdr, a.chr);
-            int brid = extract_position_sort_rid(ghdr, b.chr);
-            if (arid != brid) return arid < brid;
-            if (a.chr != b.chr) return a.chr < b.chr;
-            return a.pos < b.pos;
-        }
+    bool already_sorted = std::is_sorted(
+        extract_sites.positions.begin(),
+        extract_sites.positions.end(),
+        extract_position_less
     );
+    if (!already_sorted) {
+        std::sort(
+            extract_sites.positions.begin(),
+            extract_sites.positions.end(),
+            extract_position_less
+        );
+    }
 
-    return positions;
+    size_t write_i = 0;
+    for (size_t read_i = 0; read_i < extract_sites.positions.size(); ++read_i) {
+        ExtractPosition& source = extract_sites.positions[read_i];
+        if (write_i == 0 ||
+            extract_sites.positions[write_i - 1].geno_rid != source.geno_rid ||
+            extract_sites.positions[write_i - 1].chr != source.chr ||
+            extract_sites.positions[write_i - 1].pos != source.pos) {
+            if (write_i != read_i) {
+                extract_sites.positions[write_i] = std::move(source);
+            }
+            ++write_i;
+            continue;
+        }
+
+        ExtractPosition& destination = extract_sites.positions[write_i - 1];
+        if (destination.ref != source.ref) {
+            die(
+                "conflicting REF values in --extract list at %s:%llu for %s:%lld: %s vs %s",
+                extract_sites.path.c_str(),
+                static_cast<unsigned long long>(source.line_no),
+                source.chr.c_str(),
+                static_cast<long long>(source.pos),
+                destination.ref.c_str(),
+                source.ref.c_str()
+            );
+        }
+        merge_extract_alts(destination, source, extract_sites.path);
+    }
+    extract_sites.positions.resize(write_i);
+
+    std::fprintf(
+        stderr,
+        "Prepared --extract site list: %llu position(s), %llu split allele(s), %s input order; using linear merge.\n",
+        static_cast<unsigned long long>(extract_sites.positions.size()),
+        static_cast<unsigned long long>(extract_sites.allele_count),
+        already_sorted ? "preserved" : "sorted"
+    );
+}
+
+static int compare_extract_position_to_record(
+    const ExtractPosition& position,
+    int record_rid,
+    int64_t record_pos
+) {
+    if (position.geno_rid != record_rid) {
+        return position.geno_rid < record_rid ? -1 : 1;
+    }
+    if (position.pos != record_pos) {
+        return position.pos < record_pos ? -1 : 1;
+    }
+    return 0;
+}
+
+static const ExtractPosition* match_next_extract_position(
+    const std::vector<ExtractPosition>& positions,
+    size_t& cursor,
+    int record_rid,
+    const char* record_chr,
+    int64_t record_pos,
+    const char* record_ref
+) {
+    while (cursor < positions.size() &&
+           compare_extract_position_to_record(positions[cursor], record_rid, record_pos) < 0) {
+        ++cursor;
+    }
+
+    if (cursor >= positions.size() ||
+        compare_extract_position_to_record(positions[cursor], record_rid, record_pos) != 0) {
+        return nullptr;
+    }
+
+    // Keep the cursor on an equal position until the VCF advances. This allows
+    // multiple VCF records with the same CHROM/POS/REF to contribute different
+    // ALT alleles from one multiallelic extract site.
+    const ExtractPosition& position = positions[cursor];
+    if (!record_ref || !*record_ref || std::strcmp(record_ref, ".") == 0) {
+        die(
+            "genotype VCF has unknown REF at --extract position %s:%lld",
+            record_chr,
+            static_cast<long long>(record_pos)
+        );
+    }
+    if (position.ref != record_ref) {
+        die(
+            "REF mismatch for --extract site %s:%lld: list has %s, genotype VCF has %s",
+            record_chr,
+            static_cast<long long>(record_pos),
+            position.ref.c_str(),
+            record_ref
+        );
+    }
+    return &position;
+}
+
+static bool fill_selected_alt_mask(
+    bcf1_t* rec,
+    const ExtractPosition* extract_position,
+    std::vector<uint8_t>& selected
+) {
+    selected.assign(static_cast<size_t>(rec->n_allele), 0);
+    if (!extract_position) return false;
+
+    bool any_selected = false;
+    for (int alt_idx = 1; alt_idx < rec->n_allele; ++alt_idx) {
+        const char* alt = rec->d.allele[alt_idx];
+        auto it = std::lower_bound(
+            extract_position->alts.begin(),
+            extract_position->alts.end(),
+            alt,
+            [](const std::string& value, const char* query) {
+                return value.compare(query) < 0;
+            }
+        );
+        bool matched = it != extract_position->alts.end() && *it == alt;
+        selected[static_cast<size_t>(alt_idx)] = static_cast<uint8_t>(matched);
+        any_selected = any_selected || matched;
+    }
+    return any_selected;
+}
+
+static bool fill_selected_alt_mask_fast(
+    const FastGenotypeRecord& rec,
+    const ExtractPosition* extract_position,
+    std::vector<uint8_t>& selected
+) {
+    selected.assign(rec.alleles.size(), 0);
+    if (!extract_position) return false;
+    bool any_selected = false;
+    for (size_t alt_idx = 1; alt_idx < rec.alleles.size(); ++alt_idx) {
+        const char* alt = rec.alleles[alt_idx];
+        auto it = std::lower_bound(
+            extract_position->alts.begin(),
+            extract_position->alts.end(),
+            alt,
+            [](const std::string& value, const char* query) {
+                return value.compare(query) < 0;
+            }
+        );
+        bool matched = it != extract_position->alts.end() && *it == alt;
+        selected[alt_idx] = static_cast<uint8_t>(matched);
+        any_selected = any_selected || matched;
+    }
+    return any_selected;
 }
 
 static std::string region_contig_token(const std::string& chr) {
@@ -1356,15 +2708,12 @@ static void append_region_query(
 
 static std::string build_extract_genotype_region_query(
     const ExtractSites& extract_sites,
-    bcf_hdr_t* ghdr,
     const Region& region,
     uint64_t& n_positions,
     uint64_t& n_intervals
 ) {
     n_positions = 0;
     n_intervals = 0;
-    std::vector<ExtractPosition> positions =
-        sorted_extract_positions(extract_sites, ghdr, region);
 
     std::string query;
     int64_t last_pos = -1;
@@ -1380,7 +2729,8 @@ static std::string build_extract_genotype_region_query(
         ++n_intervals;
     };
 
-    for (const ExtractPosition& position : positions) {
+    for (const ExtractPosition& position : extract_sites.positions) {
+        if (!extract_position_in_region(position, region)) continue;
         if (position.chr == last_chr && position.pos == last_pos) continue;
 
         if (!have_interval) {
@@ -1409,17 +2759,15 @@ static std::string build_extract_genotype_region_query(
 
 static std::string build_extract_flare_region_query(
     const ExtractSites& extract_sites,
-    bcf_hdr_t* ghdr,
     const Region& region,
     uint64_t& n_contigs
 ) {
     n_contigs = 0;
-    std::vector<ExtractPosition> positions =
-        sorted_extract_positions(extract_sites, ghdr, region);
 
     std::string query;
     std::string last_chr;
-    for (const ExtractPosition& position : positions) {
+    for (const ExtractPosition& position : extract_sites.positions) {
+        if (!extract_position_in_region(position, region)) continue;
         if (position.chr == last_chr) continue;
         append_region_query(query, position.chr, 1, kMaxVcfCoordinate);
         last_chr = position.chr;
@@ -1484,10 +2832,20 @@ static bool ends_with(const std::string& value, const char* suffix) {
 
 static bool looks_indexable_variant_path(const char* path) {
     std::string value(path);
-    return ends_with(value, ".bcf") ||
-           ends_with(value, ".vcf.gz") ||
-           ends_with(value, ".vcf.bgz") ||
-           ends_with(value, ".bcf.gz");
+    bool indexed_suffix = ends_with(value, ".bcf") ||
+                          ends_with(value, ".vcf.gz") ||
+                          ends_with(value, ".vcf.bgz") ||
+                          ends_with(value, ".bcf.gz");
+    if (!indexed_suffix) return false;
+
+    htsFile* probe = hts_open(path, "r");
+    if (!probe) return false;
+    const htsFormat* format = hts_get_format(probe);
+    bool supported = format &&
+                     (format->format == bcf ||
+                      (format->format == vcf && format->compression == bgzf));
+    hts_close(probe);
+    return supported;
 }
 
 static bool init_synced_region_reader(
@@ -1495,7 +2853,8 @@ static bool init_synced_region_reader(
     const char* path,
     const std::string& query,
     const char* label,
-    const char* query_label = nullptr
+    const char* query_label = nullptr,
+    const std::string* decode_samples = nullptr
 ) {
     const char* shown_query = query_label ? query_label : query.c_str();
 
@@ -1510,6 +2869,7 @@ static bool init_synced_region_reader(
 
     bcf_srs_t* reader = bcf_sr_init();
     if (!reader) die("failed to initialize synced reader for %s", label);
+    reader->max_unpack = BCF_UN_STR | BCF_UN_FMT;
 
     if (bcf_sr_set_regions(reader, query.c_str(), 0) != 0) {
         std::fprintf(
@@ -1520,6 +2880,12 @@ static bool init_synced_region_reader(
         );
         bcf_sr_destroy(reader);
         return false;
+    }
+
+    if (decode_samples &&
+        !bcf_sr_set_samples(reader, decode_samples->c_str(), 0)) {
+        bcf_sr_destroy(reader);
+        die("failed to configure indexed %s sample subset", label);
     }
 
     if (!bcf_sr_add_reader(reader, path)) {
@@ -1534,16 +2900,24 @@ static bool init_synced_region_reader(
         return false;
     }
 
+    if (reader->nreaders > 0 && reader->readers[0].file) {
+        hts_set_opt(reader->readers[0].file, HTS_OPT_BLOCK_SIZE, kInputBlockSize);
+    }
+
     *out = reader;
     return true;
 }
 
-static int read_next_synced_record(bcf_srs_t* reader, bcf1_t* rec) {
+static int read_next_synced_record(bcf_srs_t* reader, bcf_hdr_t* hdr, bcf1_t*& rec) {
     while (bcf_sr_next_line(reader)) {
         bcf1_t* line = bcf_sr_get_line(reader, 0);
         if (!line) continue;
-        if (!bcf_copy(rec, line)) die("failed to copy synced VCF record");
-        bcf_unpack(rec, BCF_UN_STR);
+        if (hdr->keep_samples && line->n_sample != bcf_hdr_nsamples(hdr) &&
+            bcf_subset_format(hdr, line) != 0) {
+            die("failed to subset indexed VCF record samples");
+        }
+        bcf_unpack(line, BCF_UN_STR);
+        rec = line;
         return 0;
     }
     return -1;
@@ -1559,14 +2933,20 @@ static bool record_in_region(bcf1_t* rec, const Region& region) {
 static int read_next_genotype_record(
     htsFile* fp,
     bcf_hdr_t* hdr,
-    bcf1_t* rec,
+    bcf1_t*& rec,
+    bcf1_t* storage,
     bcf_srs_t* synced_reader,
     const Region& region
 ) {
     if (synced_reader) {
-        return read_next_synced_record(synced_reader, rec);
+        int ret = 0;
+        while ((ret = read_next_synced_record(synced_reader, hdr, rec)) == 0) {
+            if (record_in_region(rec, region)) return 0;
+        }
+        return ret;
     }
 
+    rec = storage;
     int ret = 0;
     while ((ret = read_next_record(fp, hdr, rec)) == 0) {
         if (record_in_region(rec, region)) return 0;
@@ -1578,20 +2958,18 @@ static bool read_next_lai_record(
     htsFile* fp,
     bcf_hdr_t* ahdr,
     bcf_hdr_t* ghdr,
-    bcf1_t* rec,
+    bcf1_t*& rec,
+    bcf1_t* storage,
     bcf_srs_t* synced_reader,
     int flare_raw_n_samples,
     const std::vector<int>& flare_raw_indices,
     int n_ancestries,
-    int n_words,
-    int32_t** an1_arr,
-    int* nan1_arr,
-    int32_t** an2_arr,
-    int* nan2_arr,
+    FlareDeltaDecoder& decoder,
     std::unordered_set<std::string>& warned_missing_flare_contigs,
     LaiRecord& out
 ) {
-    while ((synced_reader ? read_next_synced_record(synced_reader, rec)
+    if (!synced_reader) rec = storage;
+    while ((synced_reader ? read_next_synced_record(synced_reader, ahdr, rec)
                           : read_next_record(fp, ahdr, rec)) == 0) {
         const char* a_chr = bcf_hdr_id2name(ahdr, rec->rid);
         int a_geno_rid = bcf_hdr_name2id(ghdr, a_chr);
@@ -1609,22 +2987,20 @@ static bool read_next_lai_record(
         }
 
         out.valid = true;
+        out.merged_duplicate = false;
         out.geno_rid = a_geno_rid;
         out.chr = a_chr;
         out.pos = static_cast<int64_t>(rec->pos) + 1;
 
-        build_state_from_flare(
+        decode_flare_changes(
             ahdr,
             rec,
             flare_raw_n_samples,
             flare_raw_indices,
             n_ancestries,
-            n_words,
-            an1_arr,
-            nan1_arr,
-            an2_arr,
-            nan2_arr,
-            out.state
+            a_geno_rid,
+            decoder,
+            out
         );
 
         return true;
@@ -1709,6 +3085,9 @@ int main(int argc, char** argv) {
         die("cannot open input VCF/BCF");
     }
 
+    hts_set_opt(gfp, HTS_OPT_BLOCK_SIZE, kInputBlockSize);
+    hts_set_opt(afp, HTS_OPT_BLOCK_SIZE, kInputBlockSize);
+
     bcf_hdr_t* ghdr = bcf_hdr_read(gfp);
     bcf_hdr_t* ahdr = bcf_hdr_read(afp);
 
@@ -1716,7 +3095,17 @@ int main(int argc, char** argv) {
         die("cannot read input headers");
     }
 
+    const htsFormat* genotype_format = hts_get_format(gfp);
+    const htsFormat* flare_format = hts_get_format(afp);
+    bool fast_genotype_text = genotype_format && genotype_format->format == vcf;
+    bool fast_flare_text = flare_format && flare_format->format == vcf;
+
     SampleSelection sample_selection = build_sample_selection(ghdr, ahdr, keep_path);
+    int genotype_text_n_samples = sample_selection.genotype_raw_sample_count;
+    int flare_text_n_samples = sample_selection.flare_raw_sample_count;
+    sample_selection.genotype_text_indices = sample_selection.genotype_raw_indices;
+    sample_selection.flare_text_indices = sample_selection.flare_raw_indices;
+    apply_decode_sample_subsets(ghdr, ahdr, sample_selection);
     int genotype_raw_n_samples = sample_selection.genotype_raw_sample_count;
     int flare_raw_n_samples = sample_selection.flare_raw_sample_count;
     int n_samples = static_cast<int>(sample_selection.sample_ids.size());
@@ -1729,7 +3118,7 @@ int main(int argc, char** argv) {
         std::fprintf(
             stderr,
             "Loaded --extract site list: retaining up to %llu split allele(s).\n",
-            static_cast<unsigned long long>(extract_sites.allele_keys.size())
+            static_cast<unsigned long long>(extract_sites.allele_count)
         );
     }
 
@@ -1744,12 +3133,15 @@ int main(int argc, char** argv) {
             infer_contigs_from_records(geno_vcf, ghdr, "genotype");
         }
     }
+    add_contigs_from_extract_if_missing(ghdr, extract_sites, "genotype");
 
     bcf_srs_t* genotype_region_reader = nullptr;
     bcf_srs_t* flare_region_reader = nullptr;
     bool skip_genotype_loop = false;
     bool bounded_extract_reader = false;
     std::string progress_scope;
+    std::string genotype_indexed_query;
+    std::string flare_indexed_query;
 
     if (region.active) {
         add_contig_to_header_if_missing(ghdr, region.chr, "genotype");
@@ -1758,13 +3150,13 @@ int main(int argc, char** argv) {
             die("failed to add region chromosome to genotype header: %s", region.chr.c_str());
         }
     }
+    prepare_extract_positions(extract_sites, ghdr);
 
     if (extract_sites.active) {
         uint64_t n_extract_positions = 0;
         uint64_t n_extract_intervals = 0;
         std::string genotype_query = build_extract_genotype_region_query(
             extract_sites,
-            ghdr,
             region,
             n_extract_positions,
             n_extract_intervals
@@ -1783,10 +3175,14 @@ int main(int argc, char** argv) {
                 geno_vcf,
                 genotype_query,
                 "genotype VCF",
-                "--extract bounded intervals"
+                "--extract bounded intervals",
+                sample_selection.genotype_subset_active
+                    ? &sample_selection.genotype_decode_samples
+                    : nullptr
             );
 
             if (have_genotype_extract_reader) {
+                genotype_indexed_query = genotype_query;
                 bounded_extract_reader = true;
                 progress_scope = "--extract bounded intervals";
                 std::fprintf(
@@ -1794,7 +3190,7 @@ int main(int argc, char** argv) {
                     "Using indexed --extract bounded genotype reader: %llu target position(s) across %llu interval(s), %llu split allele(s).\n",
                     static_cast<unsigned long long>(n_extract_positions),
                     static_cast<unsigned long long>(n_extract_intervals),
-                    static_cast<unsigned long long>(extract_sites.allele_keys.size())
+                    static_cast<unsigned long long>(extract_sites.allele_count)
                 );
             } else {
                 std::fprintf(
@@ -1812,16 +3208,25 @@ int main(int argc, char** argv) {
             &genotype_region_reader,
             geno_vcf,
             region.label,
-            "genotype VCF"
+            "genotype VCF",
+            nullptr,
+            sample_selection.genotype_subset_active
+                ? &sample_selection.genotype_decode_samples
+                : nullptr
         );
         if (have_genotype_region_reader) {
             progress_scope = region.label;
+            genotype_indexed_query = region.label;
         }
         bool have_flare_region_reader = init_synced_region_reader(
             &flare_region_reader,
             flare_vcf,
             flare_query,
-            "FLARE VCF"
+            "FLARE VCF",
+            nullptr,
+            sample_selection.flare_subset_active
+                ? &sample_selection.flare_decode_samples
+                : nullptr
         );
 
         if (!have_genotype_region_reader || !have_flare_region_reader) {
@@ -1833,11 +3238,15 @@ int main(int argc, char** argv) {
                 bcf_sr_destroy(flare_region_reader);
                 flare_region_reader = nullptr;
             }
+            genotype_indexed_query.clear();
+            flare_indexed_query.clear();
             std::fprintf(
                 stderr,
                 "WARNING: indexed region reader unavailable; scanning inputs and filtering %s.\n",
                 region.label.c_str()
             );
+        } else {
+            flare_indexed_query = flare_query;
         }
     } else if (region.active) {
         std::string flare_query =
@@ -1846,19 +3255,24 @@ int main(int argc, char** argv) {
             &flare_region_reader,
             flare_vcf,
             flare_query,
-            "FLARE VCF"
+            "FLARE VCF",
+            nullptr,
+            sample_selection.flare_subset_active
+                ? &sample_selection.flare_decode_samples
+                : nullptr
         );
         if (!have_flare_region_reader) {
             std::fprintf(
                 stderr,
                 "WARNING: indexed FLARE reader unavailable; scanning FLARE records while using --extract filter.\n"
             );
+        } else {
+            flare_indexed_query = flare_query;
         }
     } else if (extract_sites.active && !skip_genotype_loop) {
         uint64_t n_extract_contigs = 0;
         std::string flare_query = build_extract_flare_region_query(
             extract_sites,
-            ghdr,
             region,
             n_extract_contigs
         );
@@ -1867,9 +3281,13 @@ int main(int argc, char** argv) {
             flare_vcf,
             flare_query,
             "FLARE VCF",
-            "--extract contig list"
+            "--extract contig list",
+            sample_selection.flare_subset_active
+                ? &sample_selection.flare_decode_samples
+                : nullptr
         );
         if (have_flare_extract_reader) {
+            flare_indexed_query = flare_query;
             std::fprintf(
                 stderr,
                 "Using indexed FLARE reader for --extract: %llu contig(s).\n",
@@ -1881,6 +3299,60 @@ int main(int argc, char** argv) {
                 "WARNING: indexed FLARE reader unavailable for --extract contigs; scanning FLARE records.\n"
             );
         }
+    }
+
+    FastTextVcfReader fast_genotype_reader;
+    FastTextVcfReader fast_flare_reader;
+    std::vector<int> flare_text_raw_to_output;
+    if (fast_genotype_text && !skip_genotype_loop) {
+        int previous_index = -1;
+        for (int raw_index : sample_selection.genotype_text_indices) {
+            if (raw_index <= previous_index || raw_index >= genotype_text_n_samples) {
+                die("internal genotype text sample indices are not sorted and in range");
+            }
+            previous_index = raw_index;
+        }
+        if (genotype_region_reader) {
+            bcf_sr_destroy(genotype_region_reader);
+            genotype_region_reader = nullptr;
+        }
+        init_fast_text_reader(
+            fast_genotype_reader,
+            gfp,
+            geno_vcf,
+            genotype_indexed_query
+        );
+    }
+    if (fast_flare_text && !skip_genotype_loop) {
+        if (flare_region_reader) {
+            bcf_sr_destroy(flare_region_reader);
+            flare_region_reader = nullptr;
+        }
+        init_fast_text_reader(
+            fast_flare_reader,
+            afp,
+            flare_vcf,
+            flare_indexed_query
+        );
+        flare_text_raw_to_output.assign(
+            static_cast<size_t>(flare_text_n_samples),
+            -1
+        );
+        for (size_t out_i = 0; out_i < sample_selection.flare_text_indices.size(); ++out_i) {
+            int raw_i = sample_selection.flare_text_indices[out_i];
+            if (raw_i < 0 || raw_i >= flare_text_n_samples) {
+                die("internal FLARE text sample index out of range");
+            }
+            flare_text_raw_to_output[static_cast<size_t>(raw_i)] = static_cast<int>(out_i);
+        }
+    }
+    if (fast_genotype_text || fast_flare_text) {
+        std::fprintf(
+            stderr,
+            "Using FELIXla direct text VCF parser for%s%s input.\n",
+            fast_genotype_text ? " genotype" : "",
+            fast_flare_text ? " FLARE" : ""
+        );
     }
 
     ProgressReporter progress(
@@ -1957,112 +3429,133 @@ int main(int argc, char** argv) {
         extract_path.empty() ? nullptr : extract_path.c_str()
     );
 
-    bcf1_t* grec = bcf_init();
-    bcf1_t* arec = bcf_init();
-
-    int32_t* gt_arr = nullptr;
-    int ngt_arr = 0;
-    int32_t* an1_arr = nullptr;
-    int nan1_arr = 0;
-    int32_t* an2_arr = nullptr;
-    int nan2_arr = 0;
+    bcf1_t* grec_storage = bcf_init();
+    bcf1_t* arec_storage = bcf_init();
+    bcf1_t* grec = grec_storage;
+    bcf1_t* arec = arec_storage;
+    FastGenotypeRecord fast_grec;
 
     OpenAncestryBlock block;
-    std::vector<std::vector<CarrierHap>> carriers_by_alt;
+    std::vector<AltCarrierBuilder> builders_by_alt;
+    std::vector<uint8_t> selected_alts;
+    std::vector<RareCarrierPacked> rare_carrier_batch;
     std::unordered_set<std::string> warned_missing_flare_contigs;
+    const std::vector<ExtractPosition>& ordered_extract_positions = extract_sites.positions;
+    size_t extract_cursor = 0;
 
     uint32_t n_blocks_written = 0;
     uint64_t common_index = 0;
     uint64_t rare_index = 0;
     uint32_t global_variant_index = 0;
 
+    FlareDeltaDecoder flare_decoder;
     LaiRecord lai_record;
-    bool has_lai_record = false;
-    if (!skip_genotype_loop) {
-        has_lai_record = read_next_lai_record(
+    auto next_lai_record = [&]() -> bool {
+        if (fast_flare_text) {
+            return read_next_fast_lai_record(
+                fast_flare_reader,
+                ghdr,
+                flare_text_raw_to_output,
+                n_samples,
+                n_ancestries,
+                flare_decoder,
+                warned_missing_flare_contigs,
+                lai_record
+            );
+        }
+        return read_next_lai_record(
             afp,
             ahdr,
             ghdr,
             arec,
+            arec_storage,
             flare_region_reader,
             flare_raw_n_samples,
             sample_selection.flare_raw_indices,
             n_ancestries,
-            n_words,
-            &an1_arr,
-            &nan1_arr,
-            &an2_arr,
-            &nan2_arr,
+            flare_decoder,
             warned_missing_flare_contigs,
             lai_record
         );
+    };
+    auto next_genotype_record = [&]() -> int {
+        if (fast_genotype_text) {
+            return read_next_fast_genotype_record(
+                fast_genotype_reader,
+                ghdr,
+                fast_grec,
+                region
+            );
+        }
+        return read_next_genotype_record(
+            gfp,
+            ghdr,
+            grec,
+            grec_storage,
+            genotype_region_reader,
+            region
+        );
+    };
+    bool has_lai_record = false;
+    if (!skip_genotype_loop) {
+        has_lai_record = next_lai_record();
     }
     int last_flare_geno_rid = -1;
     int64_t last_flare_pos = 0;
 
-    AncestryState pre_region_state;
-    int pre_region_rid = -1;
-    std::string pre_region_chr;
-    bool has_pre_region_state = false;
+    int ancestry_state_rid = -1;
+    std::string ancestry_state_chr;
+    bool ancestry_state_ready = false;
 
-    while (!skip_genotype_loop &&
-           read_next_genotype_record(gfp, ghdr, grec, genotype_region_reader, region) == 0) {
+    while (!skip_genotype_loop && next_genotype_record() == 0) {
         progress.record_scanned();
 
-        const char* g_chr = bcf_hdr_id2name(ghdr, grec->rid);
-        int64_t g_pos = static_cast<int64_t>(grec->pos) + 1;
+        int g_rid = fast_genotype_text ? fast_grec.rid : grec->rid;
+        const char* g_chr = fast_genotype_text
+            ? fast_grec.chr
+            : bcf_hdr_id2name(ghdr, grec->rid);
+        int64_t g_pos = fast_genotype_text
+            ? fast_grec.pos
+            : static_cast<int64_t>(grec->pos) + 1;
+        int g_n_allele = fast_genotype_text
+            ? static_cast<int>(fast_grec.alleles.size())
+            : grec->n_allele;
+        const char* g_ref = fast_genotype_text
+            ? fast_grec.ref
+            : (grec->n_allele > 0 ? grec->d.allele[0] : nullptr);
+        const char* g_raw_id = fast_genotype_text ? fast_grec.id : grec->d.id;
+        auto g_allele = [&](int allele_index) -> const char* {
+            return fast_genotype_text
+                ? fast_grec.alleles[static_cast<size_t>(allele_index)]
+                : grec->d.allele[allele_index];
+        };
 
         while (has_lai_record) {
             bool current_block_covers =
                 block.active &&
-                block.geno_rid == grec->rid &&
+                block.geno_rid == g_rid &&
                 g_pos <= block.end_pos;
 
-            if (lai_record.geno_rid > grec->rid ||
-                (lai_record.geno_rid == grec->rid && current_block_covers)) {
+            if (lai_record.geno_rid > g_rid ||
+                (lai_record.geno_rid == g_rid && current_block_covers)) {
                 break;
             }
 
             LaiRecord interval_record = std::move(lai_record);
-            has_lai_record = read_next_lai_record(
-                afp,
-                ahdr,
-                ghdr,
-                arec,
-                flare_region_reader,
-                flare_raw_n_samples,
-                sample_selection.flare_raw_indices,
-                n_ancestries,
-                n_words,
-                &an1_arr,
-                &nan1_arr,
-                &an2_arr,
-                &nan2_arr,
-                warned_missing_flare_contigs,
-                lai_record
-            );
+            has_lai_record = next_lai_record();
 
             while (has_lai_record &&
                    lai_record.geno_rid == interval_record.geno_rid &&
                    lai_record.pos == interval_record.pos) {
-                interval_record = std::move(lai_record);
-                has_lai_record = read_next_lai_record(
-                    afp,
-                    ahdr,
-                    ghdr,
-                    arec,
-                    flare_region_reader,
-                    flare_raw_n_samples,
-                    sample_selection.flare_raw_indices,
-                    n_ancestries,
-                    n_words,
-                    &an1_arr,
-                    &nan1_arr,
-                    &an2_arr,
-                    &nan2_arr,
-                    warned_missing_flare_contigs,
-                    lai_record
+                interval_record.reset_state =
+                    interval_record.reset_state || lai_record.reset_state;
+                interval_record.merged_duplicate = true;
+                interval_record.changes.insert(
+                    interval_record.changes.end(),
+                    lai_record.changes.begin(),
+                    lai_record.changes.end()
                 );
+                has_lai_record = next_lai_record();
             }
 
             if (last_flare_geno_rid > interval_record.geno_rid) {
@@ -2082,6 +3575,36 @@ int main(int argc, char** argv) {
             }
 
             int64_t interval_end = interval_record.pos;
+            bool state_changed = ancestry_record_changes_state(
+                block.state,
+                interval_record,
+                ancestry_state_rid
+            );
+            if (block.active &&
+                (state_changed || block.geno_rid != interval_record.geno_rid)) {
+                close_open_block(
+                    anc_fp,
+                    anc_bin.c_str(),
+                    anc_mks_fp,
+                    anc_mks.c_str(),
+                    anc_idx_fp,
+                    block,
+                    n_blocks_written,
+                    n_ancestries,
+                    n_words
+                );
+            }
+            apply_ancestry_changes(
+                block.state,
+                interval_record,
+                n_ancestries,
+                n_words,
+                static_cast<size_t>(n_haps)
+            );
+            ancestry_state_rid = interval_record.geno_rid;
+            ancestry_state_chr = interval_record.chr;
+            ancestry_state_ready = true;
+
             int64_t output_start = interval_start;
             int64_t output_end = interval_end;
             bool emit_interval = true;
@@ -2090,10 +3613,6 @@ int main(int argc, char** argv) {
                 if (interval_record.geno_rid != region.geno_rid) {
                     emit_interval = false;
                 } else if (interval_end < region.start) {
-                    pre_region_state = interval_record.state;
-                    pre_region_rid = interval_record.geno_rid;
-                    pre_region_chr = interval_record.chr;
-                    has_pre_region_state = true;
                     emit_interval = false;
                 } else if (interval_start > region.end) {
                     emit_interval = false;
@@ -2124,7 +3643,7 @@ int main(int argc, char** argv) {
                     interval_record.chr.c_str(),
                     output_start,
                     output_end,
-                    interval_record.state
+                    state_changed
                 );
             }
 
@@ -2133,8 +3652,7 @@ int main(int argc, char** argv) {
         }
 
         if (region.active && !block.active && !has_lai_record &&
-            has_pre_region_state && pre_region_rid == grec->rid) {
-            AncestryState state = pre_region_state;
+            ancestry_state_ready && ancestry_state_rid == g_rid) {
             update_open_block_from_flare(
                 anc_fp,
                 anc_bin.c_str(),
@@ -2145,86 +3663,120 @@ int main(int argc, char** argv) {
                 n_blocks_written,
                 n_ancestries,
                 n_words,
-                pre_region_rid,
-                pre_region_chr.c_str(),
+                ancestry_state_rid,
+                ancestry_state_chr.c_str(),
                 region.start,
                 region.end,
-                state
+                false
             );
         }
 
-        if (block.active && block.geno_rid == grec->rid && g_pos > block.end_pos &&
-            (!has_lai_record || lai_record.geno_rid > grec->rid)) {
+        if (block.active && block.geno_rid == g_rid && g_pos > block.end_pos &&
+            (!has_lai_record || lai_record.geno_rid > g_rid)) {
             block.end_pos = g_pos;
         }
 
-        if (!block.active || block.geno_rid != grec->rid || g_pos > block.end_pos) {
-            progress.maybe_report(global_variant_index, common_index, rare_index);
-            continue;
-        }
-
-        if (grec->n_allele < 2) {
-            progress.maybe_report(global_variant_index, common_index, rare_index);
-            continue;
-        }
-
-        const char* raw_id = grec->d.id;
-        const char* ref = grec->d.allele[0];
-        if (!extract_record_position_matches(extract_sites, g_chr, g_pos, ref)) {
-            progress.maybe_report(global_variant_index, common_index, rare_index);
-            continue;
-        }
-
-        process_genotypes(
-            ghdr,
-            grec,
-            block,
-            genotype_raw_n_samples,
-            sample_selection.genotype_raw_indices,
-            &gt_arr,
-            &ngt_arr,
-            carriers_by_alt
-        );
-
-        if (carriers_by_alt.empty()) {
-            progress.maybe_report(global_variant_index, common_index, rare_index);
-            continue;
-        }
-
-        for (int alt_idx = 1; alt_idx < grec->n_allele; ++alt_idx) {
-            const char* alt = grec->d.allele[alt_idx];
-            if (!extract_allele_matches(extract_sites, g_chr, g_pos, ref, alt)) {
+        const char* ref = g_ref;
+        const ExtractPosition* extract_position = nullptr;
+        if (extract_sites.active) {
+            extract_position = match_next_extract_position(
+                ordered_extract_positions,
+                extract_cursor,
+                g_rid,
+                g_chr,
+                g_pos,
+                ref
+            );
+            if (!extract_position) {
+                progress.maybe_report(global_variant_index, common_index, rare_index);
                 continue;
             }
+        }
+
+        if (!block.active || block.geno_rid != g_rid || g_pos > block.end_pos) {
+            progress.maybe_report(global_variant_index, common_index, rare_index);
+            continue;
+        }
+
+        if (g_n_allele < 2) {
+            progress.maybe_report(global_variant_index, common_index, rare_index);
+            continue;
+        }
+
+        const char* raw_id = g_raw_id;
+        if (extract_sites.active) {
+            bool selected_any = fast_genotype_text
+                ? fill_selected_alt_mask_fast(fast_grec, extract_position, selected_alts)
+                : fill_selected_alt_mask(grec, extract_position, selected_alts);
+            if (!selected_any) {
+                progress.maybe_report(global_variant_index, common_index, rare_index);
+                continue;
+            }
+        } else {
+            selected_alts.assign(static_cast<size_t>(g_n_allele), 1);
+            selected_alts[0] = 0;
+        }
+
+        if (fast_genotype_text) {
+            process_fast_text_genotypes(
+                fast_grec,
+                block,
+                genotype_text_n_samples,
+                sample_selection.genotype_text_indices,
+                selected_alts,
+                rare_threshold,
+                n_words,
+                builders_by_alt
+            );
+        } else {
+            process_genotypes(
+                ghdr,
+                grec,
+                block,
+                genotype_raw_n_samples,
+                sample_selection.genotype_raw_indices,
+                selected_alts,
+                rare_threshold,
+                n_words,
+                builders_by_alt
+            );
+        }
+
+        if (builders_by_alt.empty()) {
+            progress.maybe_report(global_variant_index, common_index, rare_index);
+            continue;
+        }
+
+        for (int alt_idx = 1; alt_idx < g_n_allele; ++alt_idx) {
+            if (!selected_alts[static_cast<size_t>(alt_idx)]) continue;
+            const char* alt = g_allele(alt_idx);
 
             if (global_variant_index == std::numeric_limits<uint32_t>::max()) {
                 die("global split variant index exceeds uint32_t limit");
             }
 
-            const auto& carriers = carriers_by_alt[alt_idx];
-            uint32_t mac = static_cast<uint32_t>(carriers.size());
+            const AltCarrierBuilder& builder = builders_by_alt[static_cast<size_t>(alt_idx)];
+            uint32_t mac = builder.mac;
             std::string split_id = make_split_id(raw_id, g_chr, g_pos, ref, alt);
 
             if (mac <= static_cast<uint32_t>(rare_threshold)) {
                 uint64_t carrier_offset = tell_or_die(rare_fp, rare_bin.c_str());
 
-                for (const CarrierHap& carrier : carriers) {
-                    RareCarrierPacked packed{
+                rare_carrier_batch.clear();
+                rare_carrier_batch.reserve(builder.sparse_haps.size());
+                for (uint32_t hap_id : builder.sparse_haps) {
+                    int8_t ancestry = block.state.hap_ancestry[hap_id];
+                    rare_carrier_batch.push_back(RareCarrierPacked{
                         global_variant_index,
-                        pack_anc_hap(carrier.ancestry, carrier.hap_id)
-                    };
-
-                    size_t wrote = std::fwrite(
-                        &packed,
-                        sizeof(RareCarrierPacked),
-                        1,
-                        rare_fp
-                    );
-
-                    if (wrote != 1) {
-                        die("failed writing rare carrier for split variant %u", global_variant_index);
-                    }
+                        pack_anc_hap(static_cast<uint32_t>(ancestry), hap_id)
+                    });
                 }
+                write_exact(
+                    rare_fp,
+                    rare_carrier_batch.data(),
+                    rare_carrier_batch.size() * sizeof(RareCarrierPacked),
+                    "rare carriers"
+                );
 
                 uint64_t rare_mks_offset = tell_or_die(rare_mks_fp, rare_mks.c_str());
                 write_rare_mks_record(
@@ -2252,15 +3804,9 @@ int main(int argc, char** argv) {
 
                 ++rare_index;
             } else {
-                std::vector<uint64_t> bits(static_cast<size_t>(n_words), 0);
-
-                for (const CarrierHap& carrier : carriers) {
-                    set_bit(bits, carrier.hap_id);
-                }
-
                 uint64_t geno_offset = tell_or_die(common_fp, common_bin.c_str());
                 size_t wrote = std::fwrite(
-                    bits.data(),
+                    builder.dense_bits.data(),
                     sizeof(uint64_t),
                     static_cast<size_t>(n_words),
                     common_fp
@@ -2314,12 +3860,10 @@ int main(int argc, char** argv) {
         n_words
     );
 
-    if (gt_arr) std::free(gt_arr);
-    if (an1_arr) std::free(an1_arr);
-    if (an2_arr) std::free(an2_arr);
-
-    bcf_destroy(grec);
-    bcf_destroy(arec);
+    bcf_destroy(grec_storage);
+    bcf_destroy(arec_storage);
+    if (fast_genotype_text) destroy_fast_text_reader(fast_genotype_reader);
+    if (fast_flare_text) destroy_fast_text_reader(fast_flare_reader);
     if (genotype_region_reader) bcf_sr_destroy(genotype_region_reader);
     if (flare_region_reader) bcf_sr_destroy(flare_region_reader);
     bcf_hdr_destroy(ghdr);

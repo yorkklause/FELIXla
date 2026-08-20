@@ -249,6 +249,159 @@ def export_prefix(bin_dir: pathlib.Path, prefix: pathlib.Path) -> pathlib.Path:
     return out_vcf
 
 
+def shell_quote(value: str) -> str:
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def check_tbi_chunks(
+    bin_dir: pathlib.Path,
+    work: pathlib.Path,
+    indexed_vcf: pathlib.Path,
+    expected_variants: list[dict],
+) -> None:
+    chunker = bin_dir / "vcf_tbi_chunks"
+    quoted_vcf = work / "quoted'phase.vcf.gz"
+    shutil.copyfile(indexed_vcf, quoted_vcf)
+    shutil.copyfile(pathlib.Path(str(indexed_vcf) + ".tbi"), pathlib.Path(str(quoted_vcf) + ".tbi"))
+
+    manifest = work / "tbi.chunks.tsv"
+    commands = work / "tbi.commands.txt"
+    run(
+        [
+            str(chunker),
+            "--phase-vcf",
+            str(quoted_vcf),
+            "--chunk-bp",
+            "200",
+            "--out",
+            str(manifest),
+            "--command-template",
+            "worker --vcf {phase_vcf_q} --region {region_q} --global {global_chunk0} --local {chrom_chunk0}",
+            "--commands-out",
+            str(commands),
+        ]
+    )
+
+    header, *raw_rows = [line.split("\t") for line in manifest.read_text().splitlines()]
+    expected_header = [
+        "global_chunk",
+        "chrom_chunk",
+        "chrom",
+        "start",
+        "end",
+        "region",
+        "contig_first_pos",
+        "contig_last_pos",
+        "contig_records",
+    ]
+    if header != expected_header:
+        fail(f"unexpected vcf_tbi_chunks header: {header}")
+
+    by_chrom: dict[str, list[dict]] = {}
+    for variant in expected_variants:
+        by_chrom.setdefault(variant["chrom"], []).append(variant)
+
+    expected_rows: list[list[str]] = []
+    global_chunk = 0
+    for chrom, variants in by_chrom.items():
+        positions = [variant["pos"] for variant in variants]
+        first = min(positions)
+        last = max(positions)
+        start = ((first - 1) // 200) * 200 + 1
+        chrom_chunk = 0
+        while start <= last:
+            end = start + 199
+            global_chunk += 1
+            chrom_chunk += 1
+            expected_rows.append(
+                [
+                    str(global_chunk),
+                    str(chrom_chunk),
+                    chrom,
+                    str(start),
+                    str(end),
+                    f"{chrom}:{start}-{end}",
+                    str(first),
+                    str(last),
+                    str(len(variants)),
+                ]
+            )
+            start = end + 1
+
+    if raw_rows != expected_rows:
+        fail(f"vcf_tbi_chunks rows differ\nactual={raw_rows}\nexpected={expected_rows}")
+
+    # Every split record belongs to exactly one closed chunk, including boundaries.
+    for chrom, variants in by_chrom.items():
+        chrom_rows = [row for row in raw_rows if row[2] == chrom]
+        for variant in variants:
+            owners = [row for row in chrom_rows if int(row[3]) <= variant["pos"] <= int(row[4])]
+            if len(owners) != 1:
+                fail(f"{chrom}:{variant['pos']} has {len(owners)} chunk owners: {owners}")
+
+    expected_commands = []
+    for row in expected_rows:
+        expected_commands.append(
+            f"worker --vcf {shell_quote(str(quoted_vcf))} --region {shell_quote(row[5])} "
+            f"--global {int(row[0]):04d} --local {int(row[1]):04d}"
+        )
+    actual_commands = commands.read_text().splitlines()
+    if actual_commands != expected_commands:
+        fail(f"vcf_tbi_chunks commands differ\nactual={actual_commands}\nexpected={expected_commands}")
+
+    chr2_manifest = work / "tbi.chr2.mb.tsv"
+    run(
+        [
+            str(chunker),
+            "--phase-vcf",
+            str(quoted_vcf),
+            "--tbi",
+            str(quoted_vcf) + ".tbi",
+            "--chrom",
+            "chr2",
+            "--chunk-mb",
+            "1",
+            "--out",
+            str(chr2_manifest),
+        ]
+    )
+    chr2_rows = [line.split("\t") for line in chr2_manifest.read_text().splitlines()]
+    chr2_variants = by_chrom["chr2"]
+    if chr2_rows[1:] != [[
+        "1",
+        "1",
+        "chr2",
+        "1",
+        "1000000",
+        "chr2:1-1000000",
+        str(min(v["pos"] for v in chr2_variants)),
+        str(max(v["pos"] for v in chr2_variants)),
+        str(len(chr2_variants)),
+    ]]:
+        fail(f"unexpected --chrom/--chunk-mb output: {chr2_rows}")
+
+    run(
+        [str(chunker), "--phase-vcf", str(quoted_vcf), "--chunk-bp", "0", "--out", str(work / "bad0.tsv")],
+        expect_fail=True,
+        contains="must be greater than zero",
+    )
+    run(
+        [str(chunker), "--phase-vcf", str(quoted_vcf), "--chunk-bp", "100", "--chrom", "chr404", "--out", str(work / "badchrom.tsv")],
+        expect_fail=True,
+        contains="absent from the tabix index",
+    )
+    run(
+        [str(chunker), "--phase-vcf", str(quoted_vcf), "--tbi", str(work / "missing.tbi"), "--chunk-bp", "100", "--out", str(work / "badindex.tsv")],
+        expect_fail=True,
+        contains="cannot load phased VCF index",
+    )
+    run(
+        [str(chunker), "--phase-vcf", str(quoted_vcf), "--chunk-bp", "100", "--out", str(work / "badtemplate.tsv"), "--command-template", "echo {region}"],
+        expect_fail=True,
+        contains="must be supplied together",
+    )
+
+
 def make_selected_alleles(records: list[dict]) -> set[tuple[str, int, str, str]]:
     selected: set[tuple[str, int, str, str]] = set()
     multi_records = [record for record in records if len(record["alts"]) > 1]
@@ -302,6 +455,36 @@ def write_extract_files(
     return pvar, vcfgz
 
 
+def write_scrambled_extract_pvar(
+    work: pathlib.Path,
+    selected: set[tuple[str, int, str, str]],
+) -> pathlib.Path:
+    by_site: dict[tuple[str, int, str], list[str]] = {}
+    for chrom, pos, ref, alt in sorted(selected):
+        by_site.setdefault((chrom, pos, ref), []).append(alt)
+
+    rows: list[tuple[str, int, str, str]] = []
+    split_multiallelic = False
+    for (chrom, pos, ref), alts in reversed(sorted(by_site.items())):
+        reversed_alts = list(reversed(alts))
+        if len(reversed_alts) > 1 and not split_multiallelic:
+            for alt in reversed_alts:
+                rows.append((chrom, pos, ref, alt))
+            split_multiallelic = True
+        else:
+            rows.append((chrom, pos, ref, ",".join(reversed_alts)))
+
+    if not split_multiallelic:
+        fail("scrambled extract fixture lacks a multiallelic target site")
+
+    pvar = work / "extract.sites.scrambled.pvar"
+    with pvar.open("w") as out:
+        out.write("#CHROM\tPOS\tID\tREF\tALT\n")
+        for row_i, (chrom, pos, ref, alts) in enumerate(rows):
+            out.write(f"{chrom}\t{pos}\tignored_scrambled_{row_i}\t{ref}\t{alts}\n")
+    return pvar
+
+
 def write_keep_file(work: pathlib.Path, samples: list[str], keep_indices: list[int]) -> pathlib.Path:
     keep = work / "keep.samples"
     scrambled = [keep_indices[i] for i in [5, 0, 16, 2, 9, 20, 1, 12, 26, 3, 7, 10, 30, 4, 6, 8, 11, 13, 14, 15, 17, 18, 19, 21, 22, 23, 24, 25, 27, 28, 29, 31, 32]]
@@ -331,6 +514,61 @@ def write_reordered_subset_flare(
                 reordered_values = [sample_values[i] for i in sample_order_indices]
                 out.write("\t".join(fields[:9] + reordered_values) + "\n")
     return out_path
+
+
+def write_extra_format_inputs(
+    work: pathlib.Path,
+    genotype_path: pathlib.Path,
+    flare_path: pathlib.Path,
+) -> tuple[pathlib.Path, pathlib.Path]:
+    genotype_out = work / "synthetic.phased.extra_format.vcf"
+    with genotype_path.open() as src, genotype_out.open("w") as out:
+        for line in src:
+            if line.startswith("#CHROM"):
+                out.write('##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Depth">\n')
+                out.write(line)
+            elif line.startswith("#"):
+                out.write(line)
+            else:
+                fields = line.rstrip("\n").split("\t")
+                fields[8] = "GT:DP"
+                fields[9:] = [f"{value}:30" for value in fields[9:]]
+                out.write("\t".join(fields) + "\n")
+
+    flare_out = work / "synthetic.flare.extra_format.vcf"
+    with flare_path.open() as src, flare_out.open("w") as out:
+        for line in src:
+            if line.startswith("#CHROM"):
+                out.write('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n')
+                out.write('##FORMAT=<ID=ANP1,Number=1,Type=Float,Description="First ancestry probability">\n')
+                out.write('##FORMAT=<ID=ANP2,Number=1,Type=Float,Description="Second ancestry probability">\n')
+                out.write(line)
+            elif line.startswith("#"):
+                out.write(line)
+            else:
+                fields = line.rstrip("\n").split("\t")
+                fields[8] = "GT:AN1:AN2:ANP1:ANP2"
+                fields[9:] = [f"0|0:{value}:0.99:0.98" for value in fields[9:]]
+                out.write("\t".join(fields) + "\n")
+    return genotype_out, flare_out
+
+
+def append_extra_sample_to_first_record(
+    source: pathlib.Path,
+    destination: pathlib.Path,
+    value: str,
+) -> pathlib.Path:
+    added = False
+    with source.open() as src, destination.open("w") as out:
+        for line in src:
+            if not added and not line.startswith("#"):
+                out.write(line.rstrip("\n") + "\t" + value + "\n")
+                added = True
+            else:
+                out.write(line)
+    if not added:
+        fail(f"cannot add malformed sample column to empty VCF: {source}")
+    return destination
 
 
 def query_rows(
@@ -439,6 +677,92 @@ def build_with_cli(
     return export_prefix(bin_dir, prefix)
 
 
+def check_int16_gt_encoding(bin_dir: pathlib.Path, work: pathlib.Path) -> None:
+    samples = ["wide1", "wide2", "wide3"]
+    alts = ["C", "G", "T"] + ["A" + "C" * length for length in range(1, 68)]
+    target_index = 64
+    target_alt = alts[target_index - 1]
+
+    genotype = work / "int16_gt.phased.vcf"
+    with genotype.open("w") as out:
+        out.write("##fileformat=VCFv4.2\n##contig=<ID=chr1>\n")
+        out.write('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n')
+        out.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t")
+        out.write("\t".join(samples) + "\n")
+        out.write(
+            f"chr1\t100\twide\tA\t{','.join(alts)}\t.\tPASS\t.\tGT\t"
+            f"0|{target_index}\t{target_index}|0\t{target_index}|{target_index}\n"
+        )
+
+    flare = work / "int16_gt.flare.vcf"
+    with flare.open("w") as out:
+        out.write("##fileformat=VCFv4.2\n##contig=<ID=chr1>\n")
+        out.write('##FORMAT=<ID=AN1,Number=1,Type=Integer,Description="First ancestry">\n')
+        out.write('##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="Second ancestry">\n')
+        out.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t")
+        out.write("\t".join(samples) + "\n")
+        out.write("chr1\t100\t.\tA\tC\t.\tPASS\t.\tAN1:AN2\t0:1\t1:2\t2:0\n")
+
+    extract = work / "int16_gt.extract.pvar"
+    extract.write_text(f"#CHROM\tPOS\tID\tREF\tALT\nchr1\t100\tignored\tA\t{target_alt}\n")
+    prefix = work / "int16_gt"
+    roundtrip = build_with_cli(
+        bin_dir,
+        genotype,
+        flare,
+        prefix,
+        "--extract",
+        str(extract),
+    )
+    expected = [{
+        "chrom": "chr1",
+        "pos": 100,
+        "id": f"wide_A_{target_alt}",
+        "ref": "A",
+        "alt": target_alt,
+        "gts": ["0|1", "1|0", "1|1"],
+    }]
+    assert_vcf_matches(roundtrip, samples, expected)
+
+
+def check_duplicate_flare_coordinate(bin_dir: pathlib.Path, work: pathlib.Path) -> None:
+    samples = ["dup1", "dup2"]
+    genotype = work / "duplicate_flare.phased.vcf"
+    with genotype.open("w") as out:
+        out.write("##fileformat=VCFv4.2\n##contig=<ID=chr1>\n")
+        out.write('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n')
+        out.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t")
+        out.write("\t".join(samples) + "\n")
+        out.write("chr1\t100\td1\tA\tC\t.\tPASS\t.\tGT\t0|1\t1|0\n")
+        out.write("chr1\t200\td2\tG\tT\t.\tPASS\t.\tGT\t1|1\t0|0\n")
+
+    flare = work / "duplicate_flare.flare.vcf"
+    with flare.open("w") as out:
+        out.write("##fileformat=VCFv4.2\n##contig=<ID=chr1>\n")
+        out.write('##FORMAT=<ID=AN1,Number=1,Type=Integer,Description="First ancestry">\n')
+        out.write('##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="Second ancestry">\n')
+        out.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t")
+        out.write("\t".join(samples) + "\n")
+        out.write("chr1\t100\t.\tA\tC\t.\tPASS\t.\tAN1:AN2\t0:1\t1:2\n")
+        out.write("chr1\t200\t.\tA\tC\t.\tPASS\t.\tAN1:AN2\t2:1\t1:0\n")
+        out.write("chr1\t200\t.\tA\tC\t.\tPASS\t.\tAN1:AN2\t0:1\t1:2\n")
+
+    prefix = work / "duplicate_flare"
+    roundtrip = build_with_cli(bin_dir, genotype, flare, prefix)
+    expected = [
+        {"chrom": "chr1", "pos": 100, "id": "d1_A_C", "ref": "A", "alt": "C", "gts": ["0|1", "1|0"]},
+        {"chrom": "chr1", "pos": 200, "id": "d2_G_T", "ref": "G", "alt": "T", "gts": ["1|1", "0|0"]},
+    ]
+    assert_vcf_matches(roundtrip, samples, expected)
+    expected_ancestry_bytes = N_ANCESTRIES * math.ceil(2 * len(samples) / 64) * 8
+    ancestry_bytes = pathlib.Path(str(prefix) + ".ancblock.bin").stat().st_size
+    if ancestry_bytes != expected_ancestry_bytes:
+        fail(
+            "duplicate FLARE coordinate created an unnecessary ancestry block: "
+            f"{ancestry_bytes} bytes != {expected_ancestry_bytes}"
+        )
+
+
 def bounded_extract_expected_from_split_records(
     split_records_all: list[dict],
     selected: set[tuple[str, int, str, str]],
@@ -501,20 +825,25 @@ def main() -> int:
         bin_dir = args.bin_dir.resolve()
         if not (bin_dir / "felixla").exists():
             fail(f"missing tool: {bin_dir / 'felixla'}")
+        if not (bin_dir / "vcf_tbi_chunks").exists():
+            fail(f"missing tool: {bin_dir / 'vcf_tbi_chunks'}")
         unexpected = sorted(
             path.name for path in bin_dir.iterdir()
-            if path.name != "felixla"
+            if path.name not in {"felixla", "vcf_tbi_chunks"}
         )
         if unexpected:
-            fail(f"unexpected files in {bin_dir}; only felixla should be present: {unexpected}")
+            fail(f"unexpected files in {bin_dir}: {unexpected}")
 
         samples, records, ancestry, genotype_path, flare_path = build_inputs(work)
+        check_int16_gt_encoding(bin_dir, work)
+        check_duplicate_flare_coordinate(bin_dir, work)
         all_indices = list(range(len(samples)))
         keep_indices = [i for i in all_indices if i not in {5, 10, 26, 36}]
         keep_samples = [samples[i] for i in keep_indices]
         keep_path = write_keep_file(work, samples, keep_indices)
         selected = make_selected_alleles(records)
         pvar_path, vcfgz_path = write_extract_files(work, selected)
+        scrambled_pvar_path = write_scrambled_extract_pvar(work, selected)
 
         legacy_prefix = work / "full.legacy"
         run(
@@ -531,6 +860,7 @@ def main() -> int:
         legacy_vcf = export_prefix(bin_dir, legacy_prefix)
         full_expected = split_records(records, all_indices)
         assert_vcf_matches(legacy_vcf, samples, full_expected)
+        check_tbi_chunks(bin_dir, work, legacy_vcf, full_expected)
         check_queries(bin_dir, legacy_prefix, full_expected, samples, all_indices, ancestry)
         legacy_meta = read_meta(legacy_prefix)
         assert legacy_meta["n_samples"] == str(len(samples)), legacy_meta
@@ -543,6 +873,16 @@ def main() -> int:
         assert_vcf_matches(cli_vcf, samples, full_expected)
         if read_roundtrip_vcf(cli_vcf) != read_roundtrip_vcf(legacy_vcf):
             fail("full CLI output differs from legacy positional output")
+
+        extra_genotype, extra_flare = write_extra_format_inputs(
+            work, genotype_path, flare_path
+        )
+        extra_format_prefix = work / "full.extra_format"
+        extra_format_vcf = build_with_cli(
+            bin_dir, extra_genotype, extra_flare, extra_format_prefix
+        )
+        if read_roundtrip_vcf(extra_format_vcf) != read_roundtrip_vcf(legacy_vcf):
+            fail("extra genotype/FLARE FORMAT fields changed output")
 
         subset_expected = split_records(records, keep_indices, selected=selected)
         subset_prefix = work / "subset.vcfgz"
@@ -580,6 +920,21 @@ def main() -> int:
         assert_vcf_matches(pvar_vcf, keep_samples, subset_expected)
         if read_roundtrip_vcf(pvar_vcf) != read_roundtrip_vcf(subset_vcf):
             fail("PVAR extract output differs from gzipped VCF extract output")
+
+        scrambled_prefix = work / "subset.scrambled_pvar"
+        scrambled_vcf = build_with_cli(
+            bin_dir,
+            genotype_path,
+            flare_path,
+            scrambled_prefix,
+            "--keep",
+            str(keep_path),
+            "--extract",
+            str(scrambled_pvar_path),
+        )
+        assert_vcf_matches(scrambled_vcf, keep_samples, subset_expected)
+        if read_roundtrip_vcf(scrambled_vcf) != read_roundtrip_vcf(pvar_vcf):
+            fail("scrambled multiallelic PVAR changed extracted variant order or values")
 
         missing_from_flare = {keep_indices[1], keep_indices[8], keep_indices[-2]}
         flare_subset_indices = [i for i in all_indices if i not in missing_from_flare]
@@ -654,6 +1009,24 @@ def main() -> int:
         indexed_vcf = export_prefix(bin_dir, indexed_prefix)
         assert_vcf_matches(indexed_vcf, samples, indexed_expected)
 
+        indexed_keep_expected = bounded_extract_expected_from_split_records(
+            split_records(records, keep_indices),
+            indexed_selected,
+        )
+        indexed_keep_prefix = work / "subset.indexed_extract_keep"
+        indexed_keep_vcf = build_with_cli(
+            bin_dir,
+            legacy_vcf,
+            flare_path,
+            indexed_keep_prefix,
+            "--keep",
+            str(keep_path),
+            "--extract",
+            str(indexed_extract_pvar),
+        )
+        assert_vcf_matches(indexed_keep_vcf, keep_samples, indexed_keep_expected)
+        assert read_samples(indexed_keep_prefix) == keep_samples
+
         region = ("chr1", 200, 650)
         region_expected = split_records(records, keep_indices, selected=selected, region=region)
         region_prefix = work / "subset.region"
@@ -694,6 +1067,50 @@ def main() -> int:
         bad_keep_missing = work / "bad.keep.missing"
         bad_keep_missing.write_text("not_a_sample\n")
         run([*build_bad_base, str(work / "bad.keep.missing.out"), "--keep", str(bad_keep_missing)], expect_fail=True, contains="absent from genotype VCF")
+
+        extra_genotype_sample = append_extra_sample_to_first_record(
+            genotype_path,
+            work / "bad.extra_genotype_sample.vcf",
+            "0|0",
+        )
+        run(
+            [
+                str(bin_dir / "felixla"),
+                "--phase-vcf",
+                str(extra_genotype_sample),
+                "--flare-vcf",
+                str(flare_path),
+                "--n-ancestries",
+                str(N_ANCESTRIES),
+                "--make-felixla",
+                "--out",
+                str(work / "bad.extra_genotype_sample.out"),
+            ],
+            expect_fail=True,
+            contains="GT sample count mismatch",
+        )
+
+        extra_flare_sample = append_extra_sample_to_first_record(
+            flare_path,
+            work / "bad.extra_flare_sample.vcf",
+            "0:0",
+        )
+        run(
+            [
+                str(bin_dir / "felixla"),
+                "--phase-vcf",
+                str(genotype_path),
+                "--flare-vcf",
+                str(extra_flare_sample),
+                "--n-ancestries",
+                str(N_ANCESTRIES),
+                "--make-felixla",
+                "--out",
+                str(work / "bad.extra_flare_sample.out"),
+            ],
+            expect_fail=True,
+            contains="FLARE sample count mismatch",
+        )
 
         bad_ref_unknown = work / "bad.ref.unknown.pvar"
         first_key = next(iter(selected))

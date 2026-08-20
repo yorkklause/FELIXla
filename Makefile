@@ -11,6 +11,8 @@ STATIC_OBJ_DIR := $(BUILD_DIR)/felixla-static-objects
 
 FELIX_TARGET := $(BIN_DIR)/felixla
 STATIC_FELIX_TARGET := $(STATIC_BIN_DIR)/felixla
+VCF_TBI_CHUNKS_TARGET := $(BIN_DIR)/vcf_tbi_chunks
+STATIC_VCF_TBI_CHUNKS_TARGET := $(STATIC_BIN_DIR)/vcf_tbi_chunks
 
 FELIX_SRC := src/felixla.cpp
 PACK_SRC := src/flare_subset_to_tractor_hybrid.cpp
@@ -21,6 +23,7 @@ RFMIX_MSP_SRC := src/rfmix_msp_to_tractor_hybrid.cpp
 EXTRACT_SRC := src/tractor_hybrid_extract_region.cpp
 ADMIX_SRC := src/calc_tractor_admixture.cpp
 FELIX_QUERY_SRC := src/felixla_query.cpp
+VCF_TBI_CHUNKS_SRC := src/vcf_tbi_chunks.cpp
 
 TOOL_OBJS := \
 	$(OBJ_DIR)/flare_subset_to_tractor_hybrid.o \
@@ -115,22 +118,22 @@ endif
 CPPFLAGS += $(HTSLIB_CFLAGS)
 LDLIBS += $(HTSLIB_LIBS)
 
-.PHONY: all static clean clean-legacy-bin clean-legacy-static check-deps check-static-deps test test-static test-intense
+.PHONY: all static clean clean-legacy-bin clean-legacy-static check-deps check-static-deps test test-static test-intense benchmark-pack
 
-all: clean-legacy-bin check-deps $(FELIX_TARGET)
+all: clean-legacy-bin check-deps $(FELIX_TARGET) $(VCF_TBI_CHUNKS_TARGET)
 
-static: clean-legacy-static check-static-deps $(STATIC_FELIX_TARGET)
+static: clean-legacy-static check-static-deps $(STATIC_FELIX_TARGET) $(STATIC_VCF_TBI_CHUNKS_TARGET)
 
 clean-legacy-bin:
 	rm -f $(addprefix $(BIN_DIR)/,$(LEGACY_TOOL_NAMES))
 	@if [ -d "$(BIN_DIR)" ]; then \
-		find "$(BIN_DIR)" -mindepth 1 -maxdepth 1 ! -name felixla -exec rm -R -f {} +; \
+		find "$(BIN_DIR)" -mindepth 1 -maxdepth 1 ! -name felixla ! -name vcf_tbi_chunks -exec rm -R -f {} +; \
 	fi
 
 clean-legacy-static:
 	rm -f $(addprefix $(STATIC_BIN_DIR)/,$(LEGACY_TOOL_NAMES))
 	@if [ -d "$(STATIC_BIN_DIR)" ]; then \
-		find "$(STATIC_BIN_DIR)" -mindepth 1 -maxdepth 1 ! -name felixla -exec rm -R -f {} +; \
+		find "$(STATIC_BIN_DIR)" -mindepth 1 -maxdepth 1 ! -name felixla ! -name vcf_tbi_chunks -exec rm -R -f {} +; \
 	fi
 
 check-deps:
@@ -151,6 +154,14 @@ $(FELIX_TARGET): $(FELIX_SRC) $(TOOL_OBJS)
 $(STATIC_FELIX_TARGET): $(FELIX_SRC) $(STATIC_TOOL_OBJS)
 	mkdir -p $(STATIC_BIN_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(FELIX_SRC) $(STATIC_TOOL_OBJS) -o $@ $(STATIC_LDFLAGS) $(HTSLIB_STATIC_LIBS)
+
+$(VCF_TBI_CHUNKS_TARGET): $(VCF_TBI_CHUNKS_SRC)
+	mkdir -p $(BIN_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(LDFLAGS) $(LDLIBS)
+
+$(STATIC_VCF_TBI_CHUNKS_TARGET): $(VCF_TBI_CHUNKS_SRC)
+	mkdir -p $(STATIC_BIN_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(STATIC_LDFLAGS) $(HTSLIB_STATIC_LIBS)
 
 $(OBJ_DIR)/flare_subset_to_tractor_hybrid.o: $(PACK_SRC)
 	mkdir -p $(OBJ_DIR)
@@ -221,6 +232,9 @@ test: all
 
 test-intense: all
 	python3 tests/run_keep_extract_intense.py --bin-dir "$(abspath $(BIN_DIR))"
+
+benchmark-pack: all
+	python3 tests/run_pack_benchmark.py --felixla "$(abspath $(FELIX_TARGET))"
 
 test-static: static
 	BIN_DIR="$(abspath $(STATIC_BIN_DIR))" bash tests/run_tiny.sh

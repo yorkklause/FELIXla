@@ -49,8 +49,8 @@ GitHub repository and record the commit hash used in the analysis.
 
     `make`
 
-- Once the compiling is done, the single executable `felixla` will be found in
-  the `bin` folder. Type
+- Once compilation is done, the complete `felixla` executable and the separate
+  `vcf_tbi_chunks` planning utility will be found in the `bin` folder. Type
 
     `bin/felixla --help` or `bin/felixla -h`
 
@@ -69,10 +69,14 @@ GitHub repository and record the commit hash used in the analysis.
 
     will print the FELIXla command-line help.
 
-- A Linux x86_64 static binary is attached to GitHub Releases as
-  `felixla-linux-x86_64-static`. The release binary is built as a single
-  statically linked executable against a local-file htslib build without
-  libcurl remote-URL support.
+    The separate planner is also installed in the image:
+
+    `docker run --rm --entrypoint vcf_tbi_chunks ghcr.io/yorkklause/felixla:latest --help`
+
+- Linux x86_64 static binaries are attached to GitHub Releases as
+  `felixla-linux-x86_64-static` and `vcf_tbi_chunks-linux-x86_64-static`.
+  They are linked against a local-file htslib build without libcurl remote-URL
+  support.
 
 ## Using FELIXla
 
@@ -122,11 +126,67 @@ felixla \
   The `ID` column is ignored: retained alleles are matched and de-duplicated
   only by `CHROM`, `POS`, `REF`, and `ALT`. Multi-allelic `ALT` values may be
   comma-separated. REF must be known, and a REF mismatch against the genotype
-  VCF is a fatal error. When the genotype VCF/BCF has a tabix/CSI index,
+  VCF is a fatal error. The site list may be unsorted: FELIXla sorts and groups
+  it before conversion. Output follows genotype VCF record order and, within a
+  multiallelic record, the genotype VCF ALT order. When the genotype VCF/BCF has a tabix/CSI index,
   `--extract` first finds the first and last requested position on each
   chromosome, seeks to those bounded intervals, and then linearly scans inside
   them before exact allele-level filtering. Without an index, FELIXla falls
   back to a streaming scan and prints a warning.
+
+## Planning Parallel Chunks
+
+`vcf_tbi_chunks` is a separate binary. It reads the phased VCF tabix index
+directly through htslib, seeks to a small number of BGZF blocks to recover each
+contig's exact first and last VCF `POS`, and writes fixed-size regions without
+scanning every variant. It does not invoke `tabix`, FELIXla, a shell, or a job
+scheduler.
+
+Generate 10 Mb chunks:
+
+```bash
+vcf_tbi_chunks \
+  --phase-vcf genotype.phased.vcf.gz \
+  --chunk-mb 10 \
+  --out genotype.chunks.tsv
+```
+
+Chunk regions use the same 1-based inclusive coordinates as `felixla
+--region`. Boundaries are aligned to the requested chunk length and adjacent
+chunks begin at the previous end plus one:
+
+```text
+chr1:1-10000000
+chr1:10000001-20000000
+```
+
+Thus there are no duplicated boundary variants. The first and last windows are
+expanded to their aligned boundaries; for example, observed positions
+`1,234,567..23,456,789` produce `1..30,000,000` when `--chunk-mb 10` is used.
+Use `--chunk-bp` when the desired length is not an integer number of decimal
+megabases.
+
+The manifest contains one row per task with global and per-contig chunk IDs,
+`CHROM`, inclusive start/end, region text, observed contig bounds, and the
+indexed record count. `--chrom` may be repeated to select contigs.
+
+An optional command template writes a separate one-command-per-line file that
+can be consumed by a scheduler or another parallel runner:
+
+```bash
+vcf_tbi_chunks \
+  --phase-vcf genotype.phased.vcf.gz \
+  --chunk-mb 10 \
+  --out genotype.chunks.tsv \
+  --command-template \
+    'felixla --phase-vcf {phase_vcf_q} --flare-vcf flare.vcf.gz --n-ancestries 3 --region {region_q} --make-felixla --out out/{chrom}.chunk{chrom_chunk0}' \
+  --commands-out genotype.commands.txt
+```
+
+Available template fields include `{phase_vcf}`, `{chrom}`, `{start}`, `{end}`,
+`{region}`, `{global_chunk}`, `{global_chunk0}`, `{chrom_chunk}`, and
+`{chrom_chunk0}`. `{phase_vcf_q}`, `{chrom_q}`, and `{region_q}` are
+POSIX-shell-quoted forms.
 
 The same binary also dispatches to compatibility subcommands:
 
@@ -301,6 +361,16 @@ make static
 make test-static
 ```
 
+The large-sample packing microbenchmark is available separately from the
+correctness suite:
+
+```
+make benchmark-pack
+python3 tests/run_pack_benchmark.py --felixla bin/felixla --samples 400000 --records 100
+python3 tests/run_pack_benchmark.py --felixla bin/felixla --samples 200000 --records 1000 --multiallelic-every 5 --drop-flare-every 100
+python3 tests/run_pack_benchmark.py --felixla bin/felixla --samples 50000 --records 1000 --flare-every-record --flare-change-every 100
+```
+
 `make static` writes `bin-static/felixla` and links `libhts.a` directly when a
 static htslib archive is available. On Linux, a fully static executable can be
 requested with:
@@ -329,7 +399,9 @@ docker build -t felixla:local -f docker/felixla/Dockerfile .
 
 - Genotype and local ancestry sample IDs are matched by ID. If the two inputs
   differ, FELIXla keeps only their intersection and writes retained samples in
-  genotype VCF order. `--keep` applies as an additional sample filter.
+  genotype VCF order. `--keep` applies as an additional sample filter. Header
+  intersections use sorted sample arrays, and retained sample columns are
+  passed to htslib before record decoding.
 
 - FLARE local ancestry uses non-missing integer `AN1` and `AN2` hard calls.
 
