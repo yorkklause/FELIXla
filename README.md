@@ -193,6 +193,32 @@ Available template fields include `{phase_vcf}`, `{chrom}`, `{start}`, `{end}`,
 `{chrom_chunk0}`. `{phase_vcf_q}`, `{chrom_q}`, and `{region_q}` are
 POSIX-shell-quoted forms.
 
+### Remote object-store mounts
+
+For region-parallel conversion, both the phased genotype VCF and the FLARE VCF
+should be BGZF-compressed and have a readable `.tbi` or `.csi` index. FELIXla
+seeks the genotype input to the requested/extracted interval. Its FLARE query
+starts at `--region` START and reads forward only far enough to establish the
+ancestry state; if no later FLARE record exists, it searches backward in
+exponentially increasing windows for the preceding state. A warning containing
+`scanning ... from the beginning` means indexed access was unavailable and the
+job is taking the expensive compatibility path.
+
+With `--extract` and `--region`, a plain PVAR/VCF site list is streamed but only
+overlapping entries are retained in memory; unsorted lists remain supported.
+Because a plain site list has no coordinate index, every worker still streams
+that file once, so keep it on local storage when launching many regions.
+
+Do not begin with dozens of region workers reading the same objects through a
+Cloud Storage FUSE mount. Start with about 8 workers and increase concurrency
+only while aggregate throughput improves. When possible, stage each
+chromosome's two VCFs and their indexes once onto local SSD. If the mount is
+under your control, Cloud Storage FUSE's
+[file cache](https://docs.cloud.google.com/storage/docs/cloud-storage-fuse/file-caching)
+and `--file-cache-cache-file-for-range-read=true` are intended for repeated
+partial/random reads; size the cache to avoid
+[cache thrashing](https://docs.cloud.google.com/storage/docs/cloud-storage-fuse/caching).
+
 The same binary also dispatches to compatibility subcommands:
 
 ```

@@ -16,6 +16,8 @@
 #include <string>
 #include <vector>
 
+namespace {
+
 struct Options {
     const char* lhs_path = nullptr;
     const char* rhs_path = nullptr;
@@ -226,6 +228,8 @@ static void report_diff(uint64_t& diffs, uint64_t max_diffs, const std::string& 
         std::cerr << "DIFF " << diffs << ": " << message << "\n";
     }
 }
+
+} // namespace
 
 int main(int argc, char** argv) {
     Options opt = parse_options(argc, argv);

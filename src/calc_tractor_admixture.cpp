@@ -30,6 +30,8 @@
 #include <utility>
 #include <vector>
 
+namespace {
+
 struct Args {
     std::vector<std::string> vcfs;
     std::string pattern;
@@ -870,6 +872,8 @@ static bool should_read_as_flare(
     if (hts_close(fp) != 0) die(path + ": error while closing input");
     return is_flare;
 }
+
+} // namespace
 
 int main(int argc, char** argv) {
     try {

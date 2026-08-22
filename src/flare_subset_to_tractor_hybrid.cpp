@@ -26,6 +26,8 @@
 
 #include <unistd.h>
 
+namespace {
+
 struct RareCarrierPacked {
     uint32_t pos_index; // split biallelic variant ordinal
     uint32_t anc_hap;   // high 5 bits ancestry, low 27 bits hap_id
@@ -140,6 +142,7 @@ struct ExtractSites {
     std::string path;
     std::unordered_set<std::string> contigs;
     std::vector<ExtractPosition> positions;
+    uint64_t source_position_count = 0;
     uint64_t allele_count = 0;
 };
 
@@ -213,6 +216,7 @@ public:
         : path_(path) {
         fp_ = hts_open(path.c_str(), "r");
         if (!fp_) die("cannot open %s: %s", label, path.c_str());
+        hts_set_opt(fp_, HTS_OPT_BLOCK_SIZE, kInputBlockSize);
     }
 
     TextLineReader(const TextLineReader&) = delete;
@@ -227,6 +231,18 @@ public:
         int ret = hts_getline(fp_, '\n', &line_);
         if (ret >= 0) {
             out.assign(line_.s, static_cast<size_t>(line_.l));
+            return true;
+        }
+        if (ret == -1) return false;
+        die("error reading text file: %s", path_.c_str());
+    }
+
+    bool next_raw(const char*& data, size_t& length) {
+        int ret = hts_getline(fp_, '\n', &line_);
+        if (ret >= 0) {
+            length = static_cast<size_t>(line_.l);
+            if (length > 0 && line_.s[length - 1] == '\r') --length;
+            data = line_.s;
             return true;
         }
         if (ret == -1) return false;
@@ -552,7 +568,59 @@ static void apply_decode_sample_subsets(
     }
 }
 
-static ExtractSites load_extract_sites(const std::string& path) {
+struct TextFieldView {
+    const char* data = nullptr;
+    size_t length = 0;
+};
+
+static bool next_text_field(
+    const char*& cursor,
+    const char* end,
+    TextFieldView& field
+) {
+    while (cursor < end && (*cursor == ' ' || *cursor == '\t')) ++cursor;
+    if (cursor == end) return false;
+    field.data = cursor;
+    while (cursor < end && *cursor != ' ' && *cursor != '\t') ++cursor;
+    field.length = static_cast<size_t>(cursor - field.data);
+    return true;
+}
+
+static bool text_field_equals(const TextFieldView& field, const std::string& value) {
+    return field.length == value.size() &&
+           std::memcmp(field.data, value.data(), field.length) == 0;
+}
+
+static bool text_field_equals(const TextFieldView& field, const char* value) {
+    size_t value_length = std::strlen(value);
+    return field.length == value_length &&
+           std::memcmp(field.data, value, field.length) == 0;
+}
+
+static int64_t parse_extract_position_field(const TextFieldView& field) {
+    if (field.length == 0) die("--extract POS is empty");
+    uint64_t value = 0;
+    for (size_t i = 0; i < field.length; ++i) {
+        unsigned char c = static_cast<unsigned char>(field.data[i]);
+        if (c < '0' || c > '9') {
+            std::string text(field.data, field.length);
+            die("invalid integer for --extract POS: %s", text.c_str());
+        }
+        uint64_t digit = static_cast<uint64_t>(c - '0');
+        if (value > (static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) - digit) / 10) {
+            std::string text(field.data, field.length);
+            die("--extract POS is out of range: %s", text.c_str());
+        }
+        value = value * 10 + digit;
+    }
+    if (value == 0) die("--extract POS must be positive");
+    return static_cast<int64_t>(value);
+}
+
+static ExtractSites load_extract_sites(
+    const std::string& path,
+    const Region& region
+) {
     ExtractSites sites;
     if (path.empty()) return sites;
 
@@ -561,41 +629,54 @@ static ExtractSites load_extract_sites(const std::string& path) {
 
     TextLineReader reader(path, "--extract site list");
 
-    std::string line;
+    const char* line = nullptr;
+    size_t line_length = 0;
     uint64_t line_no = 0;
-    while (reader.next(line)) {
+    while (reader.next_raw(line, line_length)) {
         ++line_no;
-        line = strip_trailing_cr(line);
-        if (line.empty() || line[0] == '#') continue;
+        if (line_length == 0 || line[0] == '#') continue;
 
-        std::istringstream iss(line);
-        std::string chr;
-        std::string pos_text;
-        std::string ignored_id;
-        std::string ref;
-        std::string alts;
-        // Consume the ID column only to preserve PVAR/VCF column alignment.
-        // Site filtering is keyed exclusively by CHROM, POS, REF, and ALT.
-        if (!(iss >> chr >> pos_text >> ignored_id >> ref >> alts)) {
+        const char* cursor = line;
+        const char* end = line + line_length;
+        TextFieldView fields[5];
+        bool complete = true;
+        for (TextFieldView& field : fields) {
+            if (!next_text_field(cursor, end, field)) {
+                complete = false;
+                break;
+            }
+        }
+        if (!complete) {
             die("--extract expects PVAR/VCF columns CHROM POS ID REF ALT at %s:%llu",
                 path.c_str(), static_cast<unsigned long long>(line_no));
         }
-        if (chr == "CHROM" || chr == "#CHROM") continue;
+        if (text_field_equals(fields[0], "CHROM") ||
+            text_field_equals(fields[0], "#CHROM")) {
+            continue;
+        }
 
-        int64_t pos = parse_i64_string(pos_text, "--extract POS");
-        if (ref.empty() || ref == ".") {
+        int64_t pos = parse_extract_position_field(fields[1]);
+        if (fields[3].length == 0 || text_field_equals(fields[3], ".")) {
             die("--extract requires known REF at %s:%llu", path.c_str(),
                 static_cast<unsigned long long>(line_no));
         }
-        if (alts.empty() || alts == ".") {
+        if (fields[4].length == 0 || text_field_equals(fields[4], ".")) {
             die("--extract requires known ALT at %s:%llu", path.c_str(),
                 static_cast<unsigned long long>(line_no));
         }
+        ++sites.source_position_count;
+
+        if (region.active &&
+            (!text_field_equals(fields[0], region.chr) ||
+             pos < region.start || pos > region.end)) {
+            continue;
+        }
 
         ExtractPosition position;
-        position.chr = chr;
+        position.chr.assign(fields[0].data, fields[0].length);
         position.pos = pos;
-        position.ref = ref;
+        position.ref.assign(fields[3].data, fields[3].length);
+        std::string alts(fields[4].data, fields[4].length);
         position.alts = split_commas(alts);
         position.line_no = line_no;
         std::sort(position.alts.begin(), position.alts.end());
@@ -605,9 +686,9 @@ static ExtractSites load_extract_sites(const std::string& path) {
                     "duplicate allele in --extract list at %s:%llu: %s:%lld %s>%s",
                     path.c_str(),
                     static_cast<unsigned long long>(line_no),
-                    chr.c_str(),
+                    position.chr.c_str(),
                     static_cast<long long>(pos),
-                    ref.c_str(),
+                    position.ref.c_str(),
                     position.alts[i].c_str()
                 );
             }
@@ -617,7 +698,7 @@ static ExtractSites load_extract_sites(const std::string& path) {
         sites.positions.push_back(std::move(position));
     }
 
-    if (sites.positions.empty()) {
+    if (sites.source_position_count == 0) {
         die("--extract site list is empty: %s", path.c_str());
     }
 
@@ -2777,6 +2858,17 @@ static std::string build_extract_flare_region_query(
     return query;
 }
 
+static std::string build_flare_region_query(const Region& region) {
+    std::string query;
+    append_region_query(
+        query,
+        region.chr,
+        region.start,
+        kMaxVcfCoordinate
+    );
+    return query;
+}
+
 static int infer_contigs_from_records(
     const char* vcf_path,
     bcf_hdr_t* dst,
@@ -3044,6 +3136,8 @@ static int default_rare_threshold_from_samples(int n_samples) {
     return (n_samples + 31) / 32;
 }
 
+} // namespace
+
 int main(int argc, char** argv) {
     if (argc < 6) {
         print_usage(argv[0]);
@@ -3113,13 +3207,23 @@ int main(int argc, char** argv) {
         die("retained zero samples");
     }
 
-    ExtractSites extract_sites = load_extract_sites(extract_path);
+    ExtractSites extract_sites = load_extract_sites(extract_path, region);
     if (extract_sites.active) {
-        std::fprintf(
-            stderr,
-            "Loaded --extract site list: retaining up to %llu split allele(s).\n",
-            static_cast<unsigned long long>(extract_sites.allele_count)
-        );
+        if (region.active) {
+            std::fprintf(
+                stderr,
+                "Loaded --extract site list for %s: retaining up to %llu split allele(s) from %llu source position(s).\n",
+                region.label.c_str(),
+                static_cast<unsigned long long>(extract_sites.allele_count),
+                static_cast<unsigned long long>(extract_sites.source_position_count)
+            );
+        } else {
+            std::fprintf(
+                stderr,
+                "Loaded --extract site list: retaining up to %llu split allele(s).\n",
+                static_cast<unsigned long long>(extract_sites.allele_count)
+            );
+        }
     }
 
     if (ghdr->n[BCF_DT_CTG] == 0) {
@@ -3202,8 +3306,7 @@ int main(int argc, char** argv) {
     }
 
     if (!extract_sites.active && region.active) {
-        std::string flare_query =
-            region.chr + ":1-" + std::to_string(kMaxVcfCoordinate);
+        std::string flare_query = build_flare_region_query(region);
         bool have_genotype_region_reader = init_synced_region_reader(
             &genotype_region_reader,
             geno_vcf,
@@ -3242,15 +3345,19 @@ int main(int argc, char** argv) {
             flare_indexed_query.clear();
             std::fprintf(
                 stderr,
-                "WARNING: indexed region reader unavailable; scanning inputs and filtering %s.\n",
+                "WARNING: indexed region reader unavailable; scanning inputs from the beginning and filtering %s. Avoid parallel region jobs on remote files without usable indexes.\n",
                 region.label.c_str()
             );
         } else {
             flare_indexed_query = flare_query;
+            std::fprintf(
+                stderr,
+                "Using indexed FLARE reader from region start: %s.\n",
+                flare_query.c_str()
+            );
         }
     } else if (region.active) {
-        std::string flare_query =
-            region.chr + ":1-" + std::to_string(kMaxVcfCoordinate);
+        std::string flare_query = build_flare_region_query(region);
         bool have_flare_region_reader = init_synced_region_reader(
             &flare_region_reader,
             flare_vcf,
@@ -3264,10 +3371,15 @@ int main(int argc, char** argv) {
         if (!have_flare_region_reader) {
             std::fprintf(
                 stderr,
-                "WARNING: indexed FLARE reader unavailable; scanning FLARE records while using --extract filter.\n"
+                "WARNING: indexed FLARE reader unavailable; scanning FLARE records from the beginning while using --extract. Avoid parallel region jobs on remote files without a usable FLARE index.\n"
             );
         } else {
             flare_indexed_query = flare_query;
+            std::fprintf(
+                stderr,
+                "Using indexed FLARE reader from region start: %s.\n",
+                flare_query.c_str()
+            );
         }
     } else if (extract_sites.active && !skip_genotype_loop) {
         uint64_t n_extract_contigs = 0;
@@ -3478,6 +3590,35 @@ int main(int argc, char** argv) {
             lai_record
         );
     };
+    auto reset_indexed_flare_query = [&](const std::string& query) -> bool {
+        flare_decoder = FlareDeltaDecoder{};
+        lai_record = LaiRecord{};
+        if (fast_flare_text) {
+            destroy_fast_text_reader(fast_flare_reader);
+            init_fast_text_reader(
+                fast_flare_reader,
+                afp,
+                flare_vcf,
+                query
+            );
+            return fast_flare_reader.tbx != nullptr;
+        }
+
+        if (flare_region_reader) {
+            bcf_sr_destroy(flare_region_reader);
+            flare_region_reader = nullptr;
+        }
+        return init_synced_region_reader(
+            &flare_region_reader,
+            flare_vcf,
+            query,
+            "FLARE VCF",
+            nullptr,
+            sample_selection.flare_subset_active
+                ? &sample_selection.flare_decode_samples
+                : nullptr
+        );
+    };
     auto next_genotype_record = [&]() -> int {
         if (fast_genotype_text) {
             return read_next_fast_genotype_record(
@@ -3499,6 +3640,43 @@ int main(int argc, char** argv) {
     bool has_lai_record = false;
     if (!skip_genotype_loop) {
         has_lai_record = next_lai_record();
+    }
+    if (!has_lai_record && !skip_genotype_loop && region.active &&
+        !flare_indexed_query.empty() && region.start > 1) {
+        int64_t search_end = region.start - 1;
+        int64_t search_span = std::max<int64_t>(1, region.end - region.start + 1);
+        std::fprintf(
+            stderr,
+            "No indexed FLARE record exists at or after region start; searching backward for the preceding ancestry state.\n"
+        );
+
+        while (true) {
+            int64_t search_start = search_span >= region.start
+                ? 1
+                : region.start - search_span;
+            std::string backward_query;
+            append_region_query(
+                backward_query,
+                region.chr,
+                search_start,
+                search_end
+            );
+            bool still_indexed = reset_indexed_flare_query(backward_query);
+            has_lai_record = next_lai_record();
+            if (has_lai_record) {
+                std::fprintf(
+                    stderr,
+                    "Using preceding indexed FLARE window: %s.\n",
+                    backward_query.c_str()
+                );
+                break;
+            }
+            if (!still_indexed || search_start == 1) break;
+            search_span = std::min<int64_t>(
+                region.start,
+                search_span * 2
+            );
+        }
     }
     int last_flare_geno_rid = -1;
     int64_t last_flare_pos = 0;

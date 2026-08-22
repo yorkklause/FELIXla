@@ -16,6 +16,8 @@
 #include <unordered_map>
 #include <vector>
 
+namespace {
+
 struct Meta {
     uint64_t n_samples = 0;
     uint64_t n_haps = 0;
@@ -378,8 +380,11 @@ static void write_meta(
     if (!out) die("failed writing %s", out_path.c_str());
 }
 
-static VariantRecord read_common_record(FILE* fp, const std::string& path) {
-    VariantRecord record;
+static void read_common_record(
+    FILE* fp,
+    const std::string& path,
+    VariantRecord& record
+) {
     record.common = true;
     record.local_index = read_u64_le(fp, path.c_str());
     record.global_variant_index = read_u32_le(fp, path.c_str());
@@ -392,11 +397,13 @@ static VariantRecord read_common_record(FILE* fp, const std::string& path) {
     record.block_id = read_u32_le(fp, path.c_str());
     record.payload_offset = read_u64_le(fp, path.c_str());
     record.mac = read_u32_le(fp, path.c_str());
-    return record;
 }
 
-static VariantRecord read_rare_record(FILE* fp, const std::string& path) {
-    VariantRecord record;
+static void read_rare_record(
+    FILE* fp,
+    const std::string& path,
+    VariantRecord& record
+) {
     record.common = false;
     record.local_index = read_u64_le(fp, path.c_str());
     record.global_variant_index = read_u32_le(fp, path.c_str());
@@ -409,7 +416,6 @@ static VariantRecord read_rare_record(FILE* fp, const std::string& path) {
     record.payload_offset = read_u64_le(fp, path.c_str());
     record.n_carriers = read_u32_le(fp, path.c_str());
     record.mac = read_u32_le(fp, path.c_str());
-    return record;
 }
 
 static AncBlockRecord read_anc_record(FILE* fp, const std::string& path) {
@@ -566,7 +572,7 @@ static void write_selected_anc_blocks(
     std::fclose(out_idx);
 }
 
-static bool next_variant(
+static const VariantRecord* next_variant(
     FILE* common_mks_fp,
     const std::string& common_mks_path,
     FILE* rare_mks_fp,
@@ -574,20 +580,19 @@ static bool next_variant(
     bool& have_common,
     bool& have_rare,
     VariantRecord& common_record,
-    VariantRecord& rare_record,
-    VariantRecord& out
+    VariantRecord& rare_record
 ) {
     if (!have_common && try_record_start(common_mks_fp, common_mks_path)) {
-        common_record = read_common_record(common_mks_fp, common_mks_path);
+        read_common_record(common_mks_fp, common_mks_path, common_record);
         have_common = true;
     }
 
     if (!have_rare && try_record_start(rare_mks_fp, rare_mks_path)) {
-        rare_record = read_rare_record(rare_mks_fp, rare_mks_path);
+        read_rare_record(rare_mks_fp, rare_mks_path, rare_record);
         have_rare = true;
     }
 
-    if (!have_common && !have_rare) return false;
+    if (!have_common && !have_rare) return nullptr;
 
     bool take_common = have_common && !have_rare;
     if (have_common && have_rare) {
@@ -598,13 +603,11 @@ static bool next_variant(
     }
 
     if (take_common) {
-        out = common_record;
         have_common = false;
-    } else {
-        out = rare_record;
-        have_rare = false;
+        return &common_record;
     }
-    return true;
+    have_rare = false;
+    return &rare_record;
 }
 
 static void write_selected_variants(
@@ -656,22 +659,23 @@ static void write_selected_variants(
     bool have_rare = false;
     VariantRecord common_record;
     VariantRecord rare_record;
-    VariantRecord record;
 
     uint64_t common_bytes = meta.n_words * sizeof(uint64_t);
     std::vector<uint8_t> common_payload(static_cast<size_t>(common_bytes));
 
-    while (next_variant(
-        in_common_mks,
-        in_common_mks_path,
-        in_rare_mks,
-        in_rare_mks_path,
-        have_common,
-        have_rare,
-        common_record,
-        rare_record,
-        record
-    )) {
+    while (true) {
+        const VariantRecord* next = next_variant(
+            in_common_mks,
+            in_common_mks_path,
+            in_rare_mks,
+            in_rare_mks_path,
+            have_common,
+            have_rare,
+            common_record,
+            rare_record
+        );
+        if (!next) break;
+        const VariantRecord& record = *next;
         if (!in_region(record.chr, record.pos, region)) continue;
 
         if (total_written > std::numeric_limits<uint32_t>::max()) {
@@ -782,6 +786,8 @@ static void print_usage(const char* prog) {
         prog
     );
 }
+
+} // namespace
 
 int main(int argc, char** argv) {
     if (argc != 4 && argc != 6) {

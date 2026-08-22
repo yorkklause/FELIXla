@@ -15,6 +15,8 @@
 #include <unordered_map>
 #include <vector>
 
+namespace {
+
 struct Meta {
     uint32_t format_version = 0;
     uint64_t n_samples = 0;
@@ -531,6 +533,8 @@ static void query_rare(
         print_row(record, samples[static_cast<size_t>(sample_i)], total, row);
     }
 }
+
+} // namespace
 
 int main(int argc, char** argv) {
     QueryArgs args = parse_args(argc, argv);

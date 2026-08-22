@@ -22,6 +22,8 @@
 
 #include <unistd.h>
 
+namespace {
+
 struct RareCarrierPacked {
     uint32_t pos_index;
     uint32_t anc_hap;
@@ -1151,6 +1153,8 @@ static int parse_rare_threshold_arg(const char* text) {
 static int default_rare_threshold_from_samples(int n_samples) {
     return (n_samples + 31) / 32;
 }
+
+} // namespace
 
 int main(int argc, char** argv) {
     if (argc < 6) {

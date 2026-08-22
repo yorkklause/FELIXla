@@ -19,6 +19,8 @@
 #include <unordered_map>
 #include <vector>
 
+namespace {
+
 struct RareCarrierPacked {
     uint32_t pos_index;
     uint32_t anc_hap;
@@ -416,6 +418,8 @@ static void print_usage(const char* prog) {
         prog
     );
 }
+
+} // namespace
 
 int main(int argc, char** argv) {
     if (argc < 3) {

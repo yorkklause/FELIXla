@@ -7,6 +7,21 @@ BIN_DIR="${BIN_DIR:-$ROOT_DIR/bin}"
 OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tractor-hybrid-tiny.XXXXXX")"
 trap 'rm -rf "$OUT_DIR"' EXIT
 
+find_htslib_tool() {
+  local tool="$1"
+  local prefix=""
+  if command -v "$tool" >/dev/null 2>&1; then
+    command -v "$tool"
+    return 0
+  fi
+  prefix="$(pkg-config --variable=prefix htslib 2>/dev/null || true)"
+  if [[ -n "$prefix" && -x "$prefix/bin/$tool" ]]; then
+    printf '%s\n' "$prefix/bin/$tool"
+    return 0
+  fi
+  return 1
+}
+
 python3 - "$BIN_DIR" <<'PY'
 import pathlib
 import sys
@@ -237,6 +252,84 @@ assert [(r[0], r[1], r[2], r[3], r[4], r[9]) for r in rows] == [
     ("chr1", "160", "common_A_T", "A", "T", "0|0"),
 ], rows
 PY
+
+BGZIP_BIN="$(find_htslib_tool bgzip || true)"
+TABIX_BIN="$(find_htslib_tool tabix || true)"
+if [[ -n "$BGZIP_BIN" && -n "$TABIX_BIN" ]]; then
+  "$BGZIP_BIN" -c "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
+    >"$OUT_DIR/tiny.region_seek.genotypes.vcf.gz"
+  "$BGZIP_BIN" -c "$ROOT_DIR/testdata/tiny.flare.region_seek.vcf" \
+    >"$OUT_DIR/tiny.region_seek.flare.vcf.gz"
+  "$TABIX_BIN" -f -p vcf "$OUT_DIR/tiny.region_seek.genotypes.vcf.gz"
+  "$TABIX_BIN" -f -p vcf "$OUT_DIR/tiny.region_seek.flare.vcf.gz"
+
+  "$BIN_DIR/felixla" \
+    --phase-vcf "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
+    --flare-vcf "$ROOT_DIR/testdata/tiny.flare.region_seek.vcf" \
+    --n-ancestries 2 \
+    --region chr1:150-160 \
+    --extract "$OUT_DIR/extract.sites.vcf" \
+    --make-felixla \
+    --out "$OUT_DIR/tiny.region_seek.sequential" \
+    >/dev/null 2>"$OUT_DIR/tiny.region_seek.sequential.err"
+
+  "$BIN_DIR/felixla" \
+    --phase-vcf "$OUT_DIR/tiny.region_seek.genotypes.vcf.gz" \
+    --flare-vcf "$OUT_DIR/tiny.region_seek.flare.vcf.gz" \
+    --n-ancestries 2 \
+    --region chr1:150-160 \
+    --extract "$OUT_DIR/extract.sites.vcf" \
+    --make-felixla \
+    --out "$OUT_DIR/tiny.region_seek.indexed" \
+    >/dev/null 2>"$OUT_DIR/tiny.region_seek.indexed.err"
+
+  grep -q 'Using indexed FLARE reader from region start: chr1:150-2147483647.' \
+    "$OUT_DIR/tiny.region_seek.indexed.err"
+  for suffix in \
+    .common.geno.bin .common.variant.mks .common.variant.idx \
+    .rare.carrier.bin .rare.variant.mks .rare.variant.idx \
+    .ancblock.bin .ancblock.mks .ancblock.idx .samples; do
+    cmp "$OUT_DIR/tiny.region_seek.sequential${suffix}" \
+      "$OUT_DIR/tiny.region_seek.indexed${suffix}"
+  done
+
+  cat >"$OUT_DIR/region_tail.extract.pvar" <<'EOF'
+#CHROM	POS	ID	REF	ALT
+chr1	250	ignored	A	T
+EOF
+
+  "$BIN_DIR/felixla" \
+    --phase-vcf "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
+    --flare-vcf "$ROOT_DIR/testdata/tiny.flare.region_seek.vcf" \
+    --n-ancestries 2 \
+    --region chr1:250-250 \
+    --extract "$OUT_DIR/region_tail.extract.pvar" \
+    --make-felixla \
+    --out "$OUT_DIR/tiny.region_tail.sequential" \
+    >/dev/null 2>"$OUT_DIR/tiny.region_tail.sequential.err"
+
+  "$BIN_DIR/felixla" \
+    --phase-vcf "$OUT_DIR/tiny.region_seek.genotypes.vcf.gz" \
+    --flare-vcf "$OUT_DIR/tiny.region_seek.flare.vcf.gz" \
+    --n-ancestries 2 \
+    --region chr1:250-250 \
+    --extract "$OUT_DIR/region_tail.extract.pvar" \
+    --make-felixla \
+    --out "$OUT_DIR/tiny.region_tail.indexed" \
+    >/dev/null 2>"$OUT_DIR/tiny.region_tail.indexed.err"
+
+  grep -q 'Using preceding indexed FLARE window: chr1:186-249.' \
+    "$OUT_DIR/tiny.region_tail.indexed.err"
+  for suffix in \
+    .common.geno.bin .common.variant.mks .common.variant.idx \
+    .rare.carrier.bin .rare.variant.mks .rare.variant.idx \
+    .ancblock.bin .ancblock.mks .ancblock.idx .samples; do
+    cmp "$OUT_DIR/tiny.region_tail.sequential${suffix}" \
+      "$OUT_DIR/tiny.region_tail.indexed${suffix}"
+  done
+else
+  echo "WARNING: bgzip/tabix unavailable; skipping indexed FLARE region-start test." >&2
+fi
 
 cat >"$OUT_DIR/extract.bad_ref.vcf" <<'EOF'
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
