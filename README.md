@@ -137,10 +137,12 @@ felixla \
 ## Planning Parallel Chunks
 
 `vcf_tbi_chunks` is a separate binary. It reads the phased VCF tabix index
-directly through htslib, seeks to a small number of BGZF blocks to recover each
-contig's exact first and last VCF `POS`, and writes fixed-size regions without
-scanning every variant. It does not invoke `tabix`, FELIXla, a shell, or a job
-scheduler.
+directly through htslib and probes only the in-memory `.tbi`/`.csi` bins at
+fixed-size boundaries. It does not open or decompress the phased VCF body and
+does not scan variants. The VCF path is used to discover the sidecar index and
+to render command templates; with an explicit `--tbi`, the VCF body does not
+need to be locally readable. The utility does not invoke `tabix`, FELIXla, a
+shell, or a job scheduler.
 
 Generate 10 Mb chunks:
 
@@ -161,14 +163,17 @@ chr1:10000001-20000000
 ```
 
 Thus there are no duplicated boundary variants. The first and last windows are
-expanded to their aligned boundaries; for example, observed positions
-`1,234,567..23,456,789` produce `1..30,000,000` when `--chunk-mb 10` is used.
-Use `--chunk-bp` when the desired length is not an integer number of decimal
-megabases.
+conservative index-derived bounds aligned to the requested chunk length. Tabix
+bins are coarser than individual positions, so an edge window can be empty;
+interior empty windows are also retained. This avoids any VCF data reads while
+still guaranteeing that indexed records are covered. Use `--chunk-bp` when the
+desired length is not an integer number of decimal megabases.
 
 The manifest contains one row per task with global and per-contig chunk IDs,
-`CHROM`, inclusive start/end, region text, observed contig bounds, and the
-indexed record count. `--chrom` may be repeated to select contigs.
+`CHROM`, inclusive start/end, region text, conservative index-derived contig
+bounds, and the indexed record count. `--chrom` may be repeated to select
+contigs. The compatibility columns `contig_first_pos` and `contig_last_pos`
+therefore contain aligned index bounds, not exact VCF record positions.
 
 An optional command template writes a separate one-command-per-line file that
 can be consumed by a scheduler or another parallel runner:

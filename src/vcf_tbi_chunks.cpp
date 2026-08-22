@@ -1,7 +1,7 @@
 #include <htslib/hts.h>
-#include <htslib/kstring.h>
 #include <htslib/tbx.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
@@ -33,8 +33,8 @@ struct Options {
 
 struct ContigExtent {
     std::string chrom;
-    uint64_t first_pos = 0;
-    uint64_t last_pos = 0;
+    uint64_t first_chunk_start = 0;
+    uint64_t last_chunk_end = 0;
     std::optional<uint64_t> record_count;
 };
 
@@ -60,12 +60,13 @@ R"(Usage:
   vcf_tbi_chunks --phase-vcf FILE.vcf.gz --chunk-mb INT --out MANIFEST.tsv [options]
   vcf_tbi_chunks --phase-vcf FILE.vcf.gz --chunk-bp INT --out MANIFEST.tsv [options]
 
-Read a phased VCF tabix index, find each contig's first and last VCF position,
-and generate non-overlapping 1-based inclusive chunks aligned to the requested
-chunk length.
+Read a phased VCF tabix index, find the first and last fixed-size chunk that may
+contain indexed records, and generate non-overlapping 1-based inclusive regions.
+The VCF body is not opened or decompressed. Bounds are conservative at tabix/CSI
+bin granularity, so an edge chunk can be empty.
 
 Required:
-  --phase-vcf PATH          BGZF-compressed phased VCF.
+  --phase-vcf PATH          Phased VCF path used to discover its sidecar index.
   --chunk-mb INT            Chunk length in decimal megabases (1 MB = 1,000,000 bp).
   --chunk-bp INT            Chunk length in bp; mutually exclusive with --chunk-mb.
   --out PATH                Output TSV manifest. Use - for stdout.
@@ -189,52 +190,11 @@ Options parse_args(int argc, char** argv) {
     return options;
 }
 
-uint64_t parse_vcf_position(const kstring_t& line) {
-    const char* begin = line.s;
-    const char* end = line.s + line.l;
-    const char* first_tab = nullptr;
-    const char* second_tab = nullptr;
-    for (const char* p = begin; p < end; ++p) {
-        if (*p != '\t') continue;
-        if (!first_tab) {
-            first_tab = p;
-        } else {
-            second_tab = p;
-            break;
-        }
-    }
-    if (!first_tab || !second_tab || first_tab + 1 == second_tab) {
-        die("indexed VCF record does not contain CHROM and POS columns");
-    }
-
-    uint64_t pos = 0;
-    for (const char* p = first_tab + 1; p < second_tab; ++p) {
-        if (*p < '0' || *p > '9') die("indexed VCF record has a non-integer POS");
-        uint64_t digit = static_cast<uint64_t>(*p - '0');
-        if (pos > (kMaxVcfPosition - digit) / 10) {
-            die("indexed VCF POS exceeds the standard VCF coordinate range");
-        }
-        pos = pos * 10 + digit;
-    }
-    if (pos == 0) die("indexed VCF POS must be positive");
-    return pos;
-}
-
-class TabixVcfReader {
+class TabixIndexReader {
 public:
-    TabixVcfReader(const std::string& vcf_path, const std::string& index_path) {
-        fp_ = hts_open(vcf_path.c_str(), "r");
-        if (!fp_) die("cannot open phased VCF: " + vcf_path);
-        if (!hts_get_bgzfp(fp_)) {
-            hts_close(fp_);
-            fp_ = nullptr;
-            die("--phase-vcf must be a BGZF-compressed VCF: " + vcf_path);
-        }
-
+    TabixIndexReader(const std::string& vcf_path, const std::string& index_path) {
         tbx_ = tbx_index_load2(vcf_path.c_str(), index_path.empty() ? nullptr : index_path.c_str());
         if (!tbx_) {
-            hts_close(fp_);
-            fp_ = nullptr;
             if (index_path.empty()) {
                 die("cannot load .tbi/.csi index beside phased VCF: " + vcf_path);
             }
@@ -243,19 +203,15 @@ public:
         if ((tbx_->conf.preset & 0xffff) != TBX_VCF) {
             tbx_destroy(tbx_);
             tbx_ = nullptr;
-            hts_close(fp_);
-            fp_ = nullptr;
             die("tabix index is not configured for VCF records");
         }
     }
 
-    TabixVcfReader(const TabixVcfReader&) = delete;
-    TabixVcfReader& operator=(const TabixVcfReader&) = delete;
+    TabixIndexReader(const TabixIndexReader&) = delete;
+    TabixIndexReader& operator=(const TabixIndexReader&) = delete;
 
-    ~TabixVcfReader() {
-        std::free(line_.s);
+    ~TabixIndexReader() {
         if (tbx_) tbx_destroy(tbx_);
-        if (fp_) hts_close(fp_);
     }
 
     std::vector<std::string> sequence_names() const {
@@ -276,68 +232,58 @@ public:
         return mapped;
     }
 
-    std::optional<uint64_t> first_position(int tid) {
+    bool has_index_chunks(int tid, uint64_t begin, uint64_t end) const {
+        if (begin >= end || end > kMaxVcfPosition) return false;
         hts_itr_t* itr = tbx_itr_queryi(
-            tbx_, tid, 0, static_cast<hts_pos_t>(kMaxVcfPosition)
+            tbx_, tid, static_cast<hts_pos_t>(begin), static_cast<hts_pos_t>(end)
         );
-        if (!itr) return std::nullopt;
-        int rc = tbx_itr_next(fp_, tbx_, itr, &line_);
-        tbx_itr_destroy(itr);
-        if (rc < 0) return std::nullopt;
-        return parse_vcf_position(line_);
-    }
-
-    bool has_position_at_or_after(int tid, uint64_t target) {
-        if (target == 0 || target > kMaxVcfPosition) return false;
-        hts_pos_t begin = static_cast<hts_pos_t>(target - 1);
-        hts_itr_t* itr = tbx_itr_queryi(
-            tbx_, tid, begin, static_cast<hts_pos_t>(kMaxVcfPosition)
-        );
-        if (!itr) return false;
-
-        bool found = false;
-        while (tbx_itr_next(fp_, tbx_, itr, &line_) >= 0) {
-            if (parse_vcf_position(line_) >= target) {
-                found = true;
-                break;
-            }
-        }
+        if (!itr) die("cannot query phased VCF index");
+        // Do not call tbx_itr_next: candidate offsets are already in the loaded index.
+        bool found = !itr->finished && itr->n_off > 0;
         tbx_itr_destroy(itr);
         return found;
     }
 
-    uint64_t last_position(int tid, uint64_t first_pos) {
-        if (first_pos == kMaxVcfPosition) return first_pos;
+    std::optional<std::pair<uint64_t, uint64_t>> chunk_bounds(
+        int tid,
+        uint64_t chunk_bp
+    ) const {
+        if (!has_index_chunks(tid, 0, kMaxVcfPosition)) return std::nullopt;
 
-        uint64_t low = first_pos;
-        uint64_t high = first_pos > kMaxVcfPosition / 2
-            ? kMaxVcfPosition
-            : first_pos * 2;
-        if (high == low) ++high;
-
-        while (has_position_at_or_after(tid, high)) {
-            low = high;
-            if (high == kMaxVcfPosition) return high;
-            high = high > kMaxVcfPosition / 2
-                ? kMaxVcfPosition
-                : high * 2;
-        }
-
-        while (low + 1 < high) {
+        const uint64_t chunk_count = (kMaxVcfPosition - 1) / chunk_bp + 1;
+        uint64_t low = 0;
+        uint64_t high = chunk_count - 1;
+        while (low < high) {
             uint64_t middle = low + (high - low) / 2;
-            if (has_position_at_or_after(tid, middle)) {
-                low = middle;
-            } else {
+            uint64_t prefix_end = std::min((middle + 1) * chunk_bp, kMaxVcfPosition);
+            if (has_index_chunks(tid, 0, prefix_end)) {
                 high = middle;
+            } else {
+                low = middle + 1;
             }
         }
-        return low;
+        const uint64_t first_chunk = low;
+
+        low = first_chunk;
+        high = chunk_count - 1;
+        while (low < high) {
+            uint64_t middle = low + (high - low + 1) / 2;
+            uint64_t suffix_begin = middle * chunk_bp;
+            if (has_index_chunks(tid, suffix_begin, kMaxVcfPosition)) {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+        const uint64_t last_chunk = low;
+
+        const uint64_t first = first_chunk * chunk_bp + 1;
+        const uint64_t last = std::min((last_chunk + 1) * chunk_bp, kMaxVcfPosition);
+        return std::make_pair(first, last);
     }
 
 private:
-    htsFile* fp_ = nullptr;
     tbx_t* tbx_ = nullptr;
-    kstring_t line_{0, 0, nullptr};
 };
 
 std::string zero_pad(uint64_t value, int width) {
@@ -400,8 +346,9 @@ std::string render_command(
 }
 
 std::vector<ContigExtent> read_extents(
-    TabixVcfReader& reader,
-    const std::vector<std::string>& selected_chroms
+    TabixIndexReader& reader,
+    const std::vector<std::string>& selected_chroms,
+    uint64_t chunk_bp
 ) {
     std::unordered_set<std::string> selected(selected_chroms.begin(), selected_chroms.end());
     std::unordered_set<std::string> seen;
@@ -413,15 +360,16 @@ std::vector<ContigExtent> read_extents(
         if (!selected.empty() && selected.count(chrom) == 0) continue;
         seen.insert(chrom);
 
-        std::optional<uint64_t> first = reader.first_position(static_cast<int>(tid));
-        if (!first) {
+        std::optional<std::pair<uint64_t, uint64_t>> bounds =
+            reader.chunk_bounds(static_cast<int>(tid), chunk_bp);
+        if (!bounds) {
             std::cerr << "WARNING: index contig has no VCF records; skipping " << chrom << '\n';
             continue;
         }
         ContigExtent extent;
         extent.chrom = chrom;
-        extent.first_pos = *first;
-        extent.last_pos = reader.last_position(static_cast<int>(tid), *first);
+        extent.first_chunk_start = bounds->first;
+        extent.last_chunk_end = bounds->second;
         extent.record_count = reader.record_count(static_cast<int>(tid));
         extents.push_back(std::move(extent));
     }
@@ -441,9 +389,10 @@ std::vector<Chunk> make_chunks(
     uint64_t global_chunk = 0;
 
     for (const ContigExtent& extent : extents) {
-        uint64_t aligned_start = ((extent.first_pos - 1) / chunk_bp) * chunk_bp + 1;
+        uint64_t aligned_start =
+            ((extent.first_chunk_start - 1) / chunk_bp) * chunk_bp + 1;
         uint64_t chrom_chunk = 0;
-        for (uint64_t start = aligned_start; start <= extent.last_pos;) {
+        for (uint64_t start = aligned_start; start <= extent.last_chunk_end;) {
             if (start > std::numeric_limits<uint64_t>::max() - (chunk_bp - 1)) {
                 die("chunk coordinate overflow on " + extent.chrom);
             }
@@ -456,20 +405,17 @@ std::vector<Chunk> make_chunks(
                 extent.chrom,
                 start,
                 end,
-                extent.first_pos,
-                extent.last_pos,
+                extent.first_chunk_start,
+                extent.last_chunk_end,
                 extent.record_count,
             });
             if (end == std::numeric_limits<uint64_t>::max()) break;
             start = end + 1;
         }
 
-        const Chunk& first_chunk = chunks[chunks.size() - static_cast<size_t>(chrom_chunk)];
-        const Chunk& last_chunk = chunks.back();
         std::cerr << extent.chrom
-                  << ": first=" << extent.first_pos
-                  << ", last=" << extent.last_pos
-                  << ", aligned=" << first_chunk.start << '-' << last_chunk.end
+                  << ": index_chunk_bounds=" << extent.first_chunk_start
+                  << '-' << extent.last_chunk_end
                   << ", chunks=" << chrom_chunk;
         if (extent.record_count) std::cerr << ", records=" << *extent.record_count;
         std::cerr << '\n';
@@ -532,8 +478,8 @@ void write_outputs(
 
 int main(int argc, char** argv) {
     Options options = parse_args(argc, argv);
-    TabixVcfReader reader(options.phase_vcf, options.tbi_path);
-    std::vector<ContigExtent> extents = read_extents(reader, options.chroms);
+    TabixIndexReader reader(options.phase_vcf, options.tbi_path);
+    std::vector<ContigExtent> extents = read_extents(reader, options.chroms, options.chunk_bp);
     std::vector<Chunk> chunks = make_chunks(extents, options.chunk_bp);
     write_outputs(options, chunks);
     std::cerr << "Wrote " << chunks.size() << " chunk(s) to " << options.out_path;

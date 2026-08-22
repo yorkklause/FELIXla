@@ -253,6 +253,40 @@ def shell_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
+def build_spaced_indexed_vcf(bin_dir: pathlib.Path, work: pathlib.Path) -> pathlib.Path:
+    genotype = work / "spaced.genotypes.vcf"
+    flare = work / "spaced.flare.vcf"
+    genotype.write_text(
+        "##fileformat=VCFv4.2\n"
+        "##contig=<ID=chr7>\n"
+        '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n'
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1\n"
+        "chr7\t16000000\tleft\tA\tT\t.\tPASS\t.\tGT\t0|1\n"
+        "chr7\t34000000\tright\tG\tC\t.\tPASS\t.\tGT\t1|0\n"
+    )
+    flare.write_text(
+        "##fileformat=VCFv4.2\n"
+        "##contig=<ID=chr7>\n"
+        '##FORMAT=<ID=AN1,Number=1,Type=Integer,Description="First ancestry">\n'
+        '##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="Second ancestry">\n'
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1\n"
+        "chr7\t16000000\t.\tA\tT\t.\tPASS\t.\tAN1:AN2\t0:1\n"
+    )
+    prefix = work / "spaced"
+    run(
+        [
+            str(bin_dir / "felixla"),
+            "from-flare",
+            str(genotype),
+            str(flare),
+            "2",
+            "1",
+            str(prefix),
+        ]
+    )
+    return export_prefix(bin_dir, prefix)
+
+
 def check_tbi_chunks(
     bin_dir: pathlib.Path,
     work: pathlib.Path,
@@ -266,13 +300,14 @@ def check_tbi_chunks(
 
     manifest = work / "tbi.chunks.tsv"
     commands = work / "tbi.commands.txt"
+    chunk_bp = 20_000
     run(
         [
             str(chunker),
             "--phase-vcf",
             str(quoted_vcf),
             "--chunk-bp",
-            "200",
+            str(chunk_bp),
             "--out",
             str(manifest),
             "--command-template",
@@ -307,10 +342,15 @@ def check_tbi_chunks(
         positions = [variant["pos"] for variant in variants]
         first = min(positions)
         last = max(positions)
-        start = ((first - 1) // 200) * 200 + 1
+        index_bin_bp = 16_384
+        index_first = ((first - 1) // index_bin_bp) * index_bin_bp + 1
+        index_last = ((last - 1) // index_bin_bp + 1) * index_bin_bp
+        contig_start = ((index_first - 1) // chunk_bp) * chunk_bp + 1
+        contig_end = ((index_last - 1) // chunk_bp + 1) * chunk_bp
+        start = contig_start
         chrom_chunk = 0
-        while start <= last:
-            end = start + 199
+        while start <= contig_end:
+            end = start + chunk_bp - 1
             global_chunk += 1
             chrom_chunk += 1
             expected_rows.append(
@@ -321,8 +361,8 @@ def check_tbi_chunks(
                     str(start),
                     str(end),
                     f"{chrom}:{start}-{end}",
-                    str(first),
-                    str(last),
+                    str(contig_start),
+                    str(contig_end),
                     str(len(variants)),
                 ]
             )
@@ -374,11 +414,75 @@ def check_tbi_chunks(
         "1",
         "1000000",
         "chr2:1-1000000",
-        str(min(v["pos"] for v in chr2_variants)),
-        str(max(v["pos"] for v in chr2_variants)),
+        "1",
+        "1000000",
         str(len(chr2_variants)),
     ]]:
         fail(f"unexpected --chrom/--chunk-mb output: {chr2_rows}")
+
+    # Planning is index-only: an explicit index works even when the VCF body is absent.
+    detached_index = work / "detached.tbi"
+    shutil.copyfile(pathlib.Path(str(quoted_vcf) + ".tbi"), detached_index)
+    absent_vcf = work / "absent.vcf.gz"
+    detached_manifest = work / "detached.chunks.tsv"
+    run(
+        [
+            str(chunker),
+            "--phase-vcf",
+            str(absent_vcf),
+            "--tbi",
+            str(detached_index),
+            "--chunk-mb",
+            "1",
+            "--out",
+            str(detached_manifest),
+        ]
+    )
+    detached_rows = [line.split("\t") for line in detached_manifest.read_text().splitlines()]
+    if detached_rows[0] != expected_header or len(detached_rows) != 3:
+        fail(f"unexpected detached-index output: {detached_rows}")
+    if [row[2:9] for row in detached_rows[1:]] != [
+        ["chr1", "1", "1000000", "chr1:1-1000000", "1", "1000000", str(len(by_chrom["chr1"]))],
+        ["chr2", "1", "1000000", "chr2:1-1000000", "1", "1000000", str(len(by_chrom["chr2"]))],
+    ]:
+        fail(f"detached index did not preserve chunk coverage: {detached_rows}")
+
+    spaced_vcf = build_spaced_indexed_vcf(bin_dir, work)
+    spaced_index = work / "spaced.detached.tbi"
+    shutil.copyfile(pathlib.Path(str(spaced_vcf) + ".tbi"), spaced_index)
+    spaced_manifest = work / "spaced.chunks.tsv"
+    run(
+        [
+            str(chunker),
+            "--phase-vcf",
+            str(work / "spaced.absent.vcf.gz"),
+            "--tbi",
+            str(spaced_index),
+            "--chunk-mb",
+            "5",
+            "--out",
+            str(spaced_manifest),
+        ]
+    )
+    spaced_rows = [line.split("\t") for line in spaced_manifest.read_text().splitlines()]
+    expected_spaced = [expected_header]
+    for chunk_index, start in enumerate(range(15_000_001, 35_000_001, 5_000_000), 1):
+        end = start + 5_000_000 - 1
+        expected_spaced.append(
+            [
+                str(chunk_index),
+                str(chunk_index),
+                "chr7",
+                str(start),
+                str(end),
+                f"chr7:{start}-{end}",
+                "15000001",
+                "35000000",
+                "2",
+            ]
+        )
+    if spaced_rows != expected_spaced:
+        fail(f"spaced index-only chunks differ\nactual={spaced_rows}\nexpected={expected_spaced}")
 
     run(
         [str(chunker), "--phase-vcf", str(quoted_vcf), "--chunk-bp", "0", "--out", str(work / "bad0.tsv")],

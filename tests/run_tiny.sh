@@ -36,7 +36,7 @@ PY
 
 "$BIN_DIR/vcf_tbi_chunks" \
   --phase-vcf "$OUT_DIR/tiny.roundtrip.vcf.gz" \
-  --chunk-bp 100 \
+  --chunk-bp 20000 \
   --out "$OUT_DIR/tiny.chunks.tsv" \
   --command-template 'felixla --phase-vcf {phase_vcf_q} --region {region_q} --out chunks/{chrom}.chunk{chrom_chunk0}' \
   --commands-out "$OUT_DIR/tiny.commands.txt" \
@@ -50,10 +50,18 @@ PY
   --out "$OUT_DIR/tiny.chr2.mb.tsv" \
   >/dev/null
 
+"$BIN_DIR/vcf_tbi_chunks" \
+  --phase-vcf "$OUT_DIR/absent.vcf.gz" \
+  --tbi "$OUT_DIR/tiny.roundtrip.vcf.gz.tbi" \
+  --chunk-mb 1 \
+  --out "$OUT_DIR/tiny.detached-index.tsv" \
+  >/dev/null
+
 python3 - \
   "$OUT_DIR/tiny.chunks.tsv" \
   "$OUT_DIR/tiny.commands.txt" \
   "$OUT_DIR/tiny.chr2.mb.tsv" \
+  "$OUT_DIR/tiny.detached-index.tsv" \
   "$OUT_DIR/tiny.roundtrip.vcf.gz" <<'PY'
 import pathlib
 import sys
@@ -61,7 +69,8 @@ import sys
 manifest_path = pathlib.Path(sys.argv[1])
 commands_path = pathlib.Path(sys.argv[2])
 chr2_path = pathlib.Path(sys.argv[3])
-phase_vcf = sys.argv[4]
+detached_path = pathlib.Path(sys.argv[4])
+phase_vcf = sys.argv[5]
 
 header = [
     "global_chunk",
@@ -77,27 +86,28 @@ header = [
 rows = [line.split("\t") for line in manifest_path.read_text().splitlines()]
 assert rows[0] == header, rows[0]
 assert rows[1:] == [
-    ["1", "1", "chr1", "1", "100", "chr1:1-100", "50", "250", "6"],
-    ["2", "2", "chr1", "101", "200", "chr1:101-200", "50", "250", "6"],
-    ["3", "3", "chr1", "201", "300", "chr1:201-300", "50", "250", "6"],
-    ["4", "1", "chr2", "1", "100", "chr2:1-100", "50", "150", "3"],
-    ["5", "2", "chr2", "101", "200", "chr2:101-200", "50", "150", "3"],
+    ["1", "1", "chr1", "1", "20000", "chr1:1-20000", "1", "20000", "6"],
+    ["2", "1", "chr2", "1", "20000", "chr2:1-20000", "1", "20000", "3"],
 ], rows
 
 quoted_vcf = "'" + phase_vcf + "'"
 assert commands_path.read_text().splitlines() == [
-    f"felixla --phase-vcf {quoted_vcf} --region 'chr1:1-100' --out chunks/chr1.chunk0001",
-    f"felixla --phase-vcf {quoted_vcf} --region 'chr1:101-200' --out chunks/chr1.chunk0002",
-    f"felixla --phase-vcf {quoted_vcf} --region 'chr1:201-300' --out chunks/chr1.chunk0003",
-    f"felixla --phase-vcf {quoted_vcf} --region 'chr2:1-100' --out chunks/chr2.chunk0001",
-    f"felixla --phase-vcf {quoted_vcf} --region 'chr2:101-200' --out chunks/chr2.chunk0002",
+    f"felixla --phase-vcf {quoted_vcf} --region 'chr1:1-20000' --out chunks/chr1.chunk0001",
+    f"felixla --phase-vcf {quoted_vcf} --region 'chr2:1-20000' --out chunks/chr2.chunk0001",
 ]
 
 chr2_rows = [line.split("\t") for line in chr2_path.read_text().splitlines()]
 assert chr2_rows[0] == header, chr2_rows[0]
 assert chr2_rows[1:] == [
-    ["1", "1", "chr2", "1", "1000000", "chr2:1-1000000", "50", "150", "3"],
+    ["1", "1", "chr2", "1", "1000000", "chr2:1-1000000", "1", "1000000", "3"],
 ], chr2_rows
+
+detached_rows = [line.split("\t") for line in detached_path.read_text().splitlines()]
+assert detached_rows == [
+    header,
+    ["1", "1", "chr1", "1", "1000000", "chr1:1-1000000", "1", "1000000", "6"],
+    ["2", "1", "chr2", "1", "1000000", "chr2:1-1000000", "1", "1000000", "3"],
+], detached_rows
 PY
 
 "$BIN_DIR/felixla" \
