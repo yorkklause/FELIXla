@@ -193,6 +193,60 @@ Available template fields include `{phase_vcf}`, `{chrom}`, `{start}`, `{end}`,
 `{chrom_chunk0}`. `{phase_vcf_q}`, `{chrom_q}`, and `{region_q}` are
 POSIX-shell-quoted forms.
 
+## Concatenating FELIXla Chunks
+
+After region jobs finish, concatenate complete FELIXla prefixes in genomic
+order with the PLINK-style `--pmerge-list` interface:
+
+```bash
+felixla \
+  --pmerge-list chr1.prefixes.txt \
+  --make-felixla \
+  --out chr1.merged
+```
+
+The list contains one prefix per line, without a component-file suffix:
+
+```text
+out/chr1.chunk0001
+out/chr1.chunk0002
+out/chr1.chunk0003
+```
+
+Blank lines and lines beginning with `#` are ignored. A trailing `.meta` is
+also accepted. Paths are interpreted relative to the working directory. The
+equivalent compatibility command is
+`felixla concat chr1.prefixes.txt chr1.merged`.
+
+Concatenation is a format-aware rewrite, not a bytewise `cat`. FELIXla remaps
+global variant ordinals, common/rare local indexes, ancestry block IDs, marker
+offsets, payload offsets, and sparse-carrier `pos_index` values. Prefixes must
+have identical format version, sample order, sample/haplotype/word counts,
+ancestry count, and rare threshold. Regions and actual records on the same
+chromosome must be non-overlapping and listed in increasing coordinate order.
+
+Concatenation runs in two strict phases. The first phase validates every listed
+prefix without opening any output file. It does not stop after one bad prefix:
+all problematic list entries and their detected errors are printed together,
+and the merge is not started if any prefix fails. The checks
+cover all 11 prefix files: required metadata, exact sample IDs and order, six
+magic headers, fixed-width index records, marker/index agreement, contiguous
+payload offsets, exact EOF, MAC versus dense popcount or sparse carrier count,
+packed ancestry/haplotype ranges, ancestry-mask partitioning, and variant/block
+ordering.
+
+Only after the complete preflight passes does the second phase reread the
+inputs, remap indexes, and write the merged data under a temporary prefix. The
+large payloads are therefore read twice intentionally: once to establish that
+the whole list is valid, then once to produce output. The temporary prefix is
+published with `.meta` last, after the merge completes.
+
+Newly written FELIXla metadata includes `global_variants`, `common_variants`,
+`rare_variants`, and `ancestry_blocks`. Concat cross-checks these declarations
+when present. Older format-version-1 prefixes without the four count fields
+remain supported; their counts are derived from and validated against the
+binary marker/index streams.
+
 ### Remote object-store mounts
 
 For region-parallel conversion, both the phased genotype VCF and the FLARE VCF
@@ -229,6 +283,7 @@ felixla --felixla PREFIX --query CHR:POS --ref REF --alt ALT [ --nonzero-only ]
 felixla --felixla PREFIX --region CHR:START-END --make-felixla --out OUT_PREFIX
 felixla --vcf TRACTOR_VCF --admixture --out ADMIXTURE_TSV
 felixla --compare-vcfs EXPECTED_VCF OBSERVED_VCF [ --split-multiallelic ]
+felixla --pmerge-list PREFIX_LIST --make-felixla --out OUT_PREFIX
 felixla --recommend-mac-threshold --n-samples N_SAMPLES
 ```
 
@@ -269,7 +324,8 @@ A FELIXla packed prefix writes the following files:
 - `<prefix>.samples`: retained sample IDs, one sample per line.
 
 - `<prefix>.meta`: format metadata, input provenance, sample count, ancestry
-  count, word count, rare threshold, and optional region/filter provenance.
+  count, word count, rare threshold, final common/rare/block counts, and
+  optional region/filter/concatenation provenance.
 
 The split variant marker streams record `chr`, `pos`, split-biallelic `id`,
 `ref`, `alt`, ALT allele index, global variant index, and MAC. Marker streams
@@ -365,7 +421,7 @@ Run the standard smoke test:
 make test
 ```
 
-Run the extended keep/extract regression test:
+Run the extended keep/extract and concatenation regression tests:
 
 ```
 make test-intense
@@ -374,8 +430,9 @@ make test-intense
 `test-intense` synthesizes multi-chromosome, multi-allelic phased genotype and
 FLARE inputs, compares the PLINK-style command against the compatibility
 subcommand path, verifies `--keep`, `--extract`, indexed bounded extract
-scanning, `--region`, and `felixla --query` against a known truth table, and
-checks that malformed keep/extract files fail with specific errors.
+scanning, `--region`, concatenation, and `felixla --query` against known truth,
+and checks every concat component plus malformed keep/extract inputs for
+fail-closed behavior.
 
 ## Build Notes
 

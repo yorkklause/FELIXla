@@ -25,7 +25,8 @@ COPY testdata ./testdata
 COPY resources ./resources
 
 RUN make all CXXFLAGS="${FELIXLA_CXXFLAGS}" && \
-    make test CXXFLAGS="${FELIXLA_CXXFLAGS}"
+    make test CXXFLAGS="${FELIXLA_CXXFLAGS}" && \
+    make test-intense CXXFLAGS="${FELIXLA_CXXFLAGS}"
 
 FROM debian:bookworm-slim
 ARG DEBIAN_FRONTEND=noninteractive

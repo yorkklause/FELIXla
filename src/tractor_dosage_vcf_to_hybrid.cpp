@@ -1115,6 +1115,15 @@ int main(int argc, char** argv) {
     std::fclose(anc_mks_fp);
     std::fclose(anc_idx_fp);
 
+    FILE* final_meta_fp = open_output_or_die(meta_path, "a");
+    std::fprintf(final_meta_fp, "global_variants\t%u\n", global_variant_index);
+    std::fprintf(final_meta_fp, "common_variants\t%llu\n",
+        static_cast<unsigned long long>(common_index));
+    std::fprintf(final_meta_fp, "rare_variants\t%llu\n",
+        static_cast<unsigned long long>(rare_index));
+    std::fprintf(final_meta_fp, "ancestry_blocks\t%u\n", n_blocks_written);
+    std::fclose(final_meta_fp);
+
     progress.finish(global_variant_index, common_index, rare_index);
 
     std::fprintf(stderr, "Finished.\n");

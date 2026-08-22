@@ -20,6 +20,7 @@ int felixla_extract_main(int argc, char** argv);
 int felixla_query_main(int argc, char** argv);
 int felixla_admixture_main(int argc, char** argv);
 int felixla_compare_main(int argc, char** argv);
+int felixla_concat_main(int argc, char** argv);
 
 namespace {
 
@@ -50,12 +51,15 @@ PLINK-style examples:
 
   felixla --felixla hybrid/chr22 --export vcf --out hybrid/chr22.roundtrip
 
+  felixla --pmerge-list chunks.txt --make-felixla --out hybrid/chr1
+
 Primary input flags:
   --phase-vcf PATH              Phased diploid genotype VCF/BCF.
   --flare-vcf PATH              FLARE local ancestry VCF/BCF with AN1/AN2; samples matched by ID.
   --rfmix-msp PATH              RFMix MSP file.
   --tractor-dosage-vcf PATH     TRACTOR dosage VCF/BCF with ANC#/DS# fields.
   --felixla PREFIX              Existing FELIXla/tractor_hybrid prefix.
+  --pmerge-list FILE            FELIXla prefixes to concatenate, one per line.
   --vcf PATH                    VCF input for --admixture; may be repeated.
 
 Action flags:
@@ -91,6 +95,7 @@ Compatibility mode:
   felixla query ...
   felixla admixture ...
   felixla compare-vcfs ...
+  felixla concat prefix_list.txt out_prefix
   felixla shapeit-args ...
 )";
 }
@@ -425,6 +430,7 @@ struct PlinkArgs {
     std::string rfmix_msp;
     std::string tractor_dosage_vcf;
     std::string felixla_prefix;
+    std::string pmerge_list;
     std::string out_path;
     std::string n_ancestries;
     std::string mac_threshold;
@@ -488,6 +494,9 @@ PlinkArgs parse_plink_args(int argc, char** argv) {
             args.tractor_dosage_vcf = require_value(i, argc, argv, arg);
         } else if (arg == "--felixla" || arg == "--tractor-hybrid") {
             args.felixla_prefix = require_value(i, argc, argv, arg);
+        } else if (arg == "--pmerge-list" || arg == "--concat-list" ||
+                   arg == "--concat" || arg == "--concate" || arg == "--concatenate") {
+            args.pmerge_list = require_value(i, argc, argv, arg);
         } else if (arg == "--vcf") {
             args.vcfs.push_back(require_value(i, argc, argv, arg));
         } else if (arg == "--make-felixla" || arg == "--make-tractor-hybrid") {
@@ -696,6 +705,19 @@ int run_plink_style(int argc, char** argv) {
 
     if (args.make_felixla) {
         if (args.out_path.empty()) die("--make-felixla requires --out");
+        if (!args.pmerge_list.empty()) {
+            if (!args.phase_vcf.empty() || !args.flare_vcf.empty() || !args.rfmix_msp.empty() ||
+                !args.tractor_dosage_vcf.empty() || !args.felixla_prefix.empty() ||
+                !args.keep_path.empty() || !args.extract_path.empty() || !args.region.empty() ||
+                !args.chr.empty() || !args.from_bp.empty() || !args.to_bp.empty() ||
+                !args.n_ancestries.empty() || !args.mac_threshold.empty() ||
+                !args.n_samples.empty() || !args.vcfs.empty()) {
+                die("--pmerge-list cannot be combined with another input or filter");
+            }
+            return run_tool(felixla_concat_main, {
+                "felixla_concat", args.pmerge_list, args.out_path
+            });
+        }
         if (!args.phase_vcf.empty() && !args.flare_vcf.empty()) {
             if (args.n_ancestries.empty()) die("from-FLARE writing requires --n-ancestries");
             if (args.mac_threshold.empty()) args.mac_threshold = "auto";
@@ -860,6 +882,9 @@ int run_compat_command(int argc, char** argv) {
     }
     if (cmd == "compare" || cmd == "compare-vcfs" || cmd == "compare_vcfs") {
         return run_tool(felixla_compare_main, command_args("compare_vcfs", argc, argv));
+    }
+    if (cmd == "concat" || cmd == "concate" || cmd == "concatenate" || cmd == "pmerge") {
+        return run_tool(felixla_concat_main, command_args("felixla_concat", argc, argv));
     }
     if (cmd == "shapeit-args" || cmd == "shapeit_chunks_to_tractor_args" ||
         cmd == "shapeit_chunks_to_tractor_args.sh") {

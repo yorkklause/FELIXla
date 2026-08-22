@@ -23,6 +23,7 @@ RFMIX_MSP_SRC := src/rfmix_msp_to_tractor_hybrid.cpp
 EXTRACT_SRC := src/tractor_hybrid_extract_region.cpp
 ADMIX_SRC := src/calc_tractor_admixture.cpp
 FELIX_QUERY_SRC := src/felixla_query.cpp
+CONCAT_SRC := src/felixla_concat.cpp
 VCF_TBI_CHUNKS_SRC := src/vcf_tbi_chunks.cpp
 
 TOOL_OBJS := \
@@ -33,7 +34,8 @@ TOOL_OBJS := \
 	$(OBJ_DIR)/rfmix_msp_to_tractor_hybrid.o \
 	$(OBJ_DIR)/tractor_hybrid_extract_region.o \
 	$(OBJ_DIR)/calc_tractor_admixture.o \
-	$(OBJ_DIR)/felixla_query.o
+	$(OBJ_DIR)/felixla_query.o \
+	$(OBJ_DIR)/felixla_concat.o
 
 STATIC_TOOL_OBJS := \
 	$(STATIC_OBJ_DIR)/flare_subset_to_tractor_hybrid.o \
@@ -43,7 +45,8 @@ STATIC_TOOL_OBJS := \
 	$(STATIC_OBJ_DIR)/rfmix_msp_to_tractor_hybrid.o \
 	$(STATIC_OBJ_DIR)/tractor_hybrid_extract_region.o \
 	$(STATIC_OBJ_DIR)/calc_tractor_admixture.o \
-	$(STATIC_OBJ_DIR)/felixla_query.o
+	$(STATIC_OBJ_DIR)/felixla_query.o \
+	$(STATIC_OBJ_DIR)/felixla_concat.o
 
 LEGACY_TOOL_NAMES := \
 	flare_subset_to_tractor_hybrid \
@@ -195,6 +198,10 @@ $(OBJ_DIR)/felixla_query.o: $(FELIX_QUERY_SRC)
 	mkdir -p $(OBJ_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Dmain=felixla_query_main -c $< -o $@
 
+$(OBJ_DIR)/felixla_concat.o: $(CONCAT_SRC)
+	mkdir -p $(OBJ_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Dmain=felixla_concat_main -c $< -o $@
+
 $(STATIC_OBJ_DIR)/flare_subset_to_tractor_hybrid.o: $(PACK_SRC)
 	mkdir -p $(STATIC_OBJ_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Dmain=felixla_pack_main -c $< -o $@
@@ -227,11 +234,16 @@ $(STATIC_OBJ_DIR)/felixla_query.o: $(FELIX_QUERY_SRC)
 	mkdir -p $(STATIC_OBJ_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Dmain=felixla_query_main -c $< -o $@
 
+$(STATIC_OBJ_DIR)/felixla_concat.o: $(CONCAT_SRC)
+	mkdir -p $(STATIC_OBJ_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Dmain=felixla_concat_main -c $< -o $@
+
 test: all
 	BIN_DIR="$(abspath $(BIN_DIR))" bash tests/run_tiny.sh
 
 test-intense: all
 	python3 tests/run_keep_extract_intense.py --bin-dir "$(abspath $(BIN_DIR))"
+	python3 tests/run_concat_intense.py --bin-dir "$(abspath $(BIN_DIR))"
 
 benchmark-pack: all
 	python3 tests/run_pack_benchmark.py --felixla "$(abspath $(FELIX_TARGET))"

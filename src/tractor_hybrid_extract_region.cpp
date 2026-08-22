@@ -367,16 +367,30 @@ static void write_meta(
     const Meta& meta,
     const std::string& out_path,
     const std::string& in_prefix,
-    const Region& region
+    const Region& region,
+    uint64_t global_variants,
+    uint64_t common_variants,
+    uint64_t rare_variants,
+    uint64_t ancestry_blocks
 ) {
     std::ofstream out(out_path);
     if (!out) die("cannot open %s", out_path.c_str());
 
     for (const std::string& line : meta.lines) {
+        size_t tab = line.find('\t');
+        std::string key = line.substr(0, tab);
+        if (key == "global_variants" || key == "common_variants" ||
+            key == "rare_variants" || key == "ancestry_blocks") {
+            continue;
+        }
         out << line << '\n';
     }
     out << "source_hybrid_prefix\t" << in_prefix << '\n';
     out << "extracted_region\t" << region.label << '\n';
+    out << "global_variants\t" << global_variants << '\n';
+    out << "common_variants\t" << common_variants << '\n';
+    out << "rare_variants\t" << rare_variants << '\n';
+    out << "ancestry_blocks\t" << ancestry_blocks << '\n';
     if (!out) die("failed writing %s", out_path.c_str());
 }
 
@@ -802,7 +816,6 @@ int main(int argc, char** argv) {
 
     Meta meta = read_meta(in_prefix + ".meta");
     copy_text_file(in_prefix + ".samples", out_prefix + ".samples");
-    write_meta(meta, out_prefix + ".meta", in_prefix, region);
 
     std::vector<AncBlockRecord> selected_blocks;
     std::unordered_map<uint32_t, uint32_t> block_id_map;
@@ -822,6 +835,16 @@ int main(int argc, char** argv) {
         common_written,
         rare_written,
         total_written
+    );
+    write_meta(
+        meta,
+        out_prefix + ".meta",
+        in_prefix,
+        region,
+        total_written,
+        common_written,
+        rare_written,
+        selected_blocks.size()
     );
 
     std::fprintf(stderr, "Finished.\n");
