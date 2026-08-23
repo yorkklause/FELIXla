@@ -123,12 +123,17 @@ felixla \
 - SITE_LIST (optional): A PLINK2 `.pvar`-like file or VCF-like file used like
   PLINK `--extract`. FELIXla reads the first variant columns `CHROM POS ID REF
   ALT`; VCF `QUAL`, `FILTER`, `INFO`, `FORMAT`, and sample columns are ignored.
-  The `ID` column is ignored: retained alleles are matched and de-duplicated
-  only by `CHROM`, `POS`, `REF`, and `ALT`. Multi-allelic `ALT` values may be
-  comma-separated. REF must be known, and a REF mismatch against the genotype
-  VCF is a fatal error. The site list may be unsorted: FELIXla sorts and groups
-  it before conversion. Output follows genotype VCF record order and, within a
-  multiallelic record, the genotype VCF ALT order. When the genotype VCF/BCF has a tabix/CSI index,
+  The `ID` column is ignored. Matching uses the source `CHROM` and `POS`, then
+  compares each split `REF`/`ALT` after removing shared trailing and leading
+  padding while retaining at least one base per allele. This permits equivalent
+  padded multiallelic representations such as extract `ATT>AT` and genotype
+  `AT>A`; output still uses the genotype VCF representation. Multi-allelic `ALT`
+  values may be comma-separated. REF must be known. A raw REF difference is
+  accepted only when at least one normalized split allele matches across all VCF
+  records at that coordinate; otherwise it is a fatal REF mismatch. The site
+  list may be unsorted: FELIXla sorts and groups it before conversion. Output
+  follows genotype VCF record order and, within a multiallelic record, the
+  genotype VCF ALT order. When the genotype VCF/BCF has a tabix/CSI index,
   `--extract` first finds the first and last requested position on each
   chromosome, seeks to those bounded intervals, and then linearly scans inside
   them before exact allele-level filtering. Without an index, FELIXla falls

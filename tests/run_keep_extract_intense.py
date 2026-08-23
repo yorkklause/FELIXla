@@ -867,6 +867,71 @@ def check_duplicate_flare_coordinate(bin_dir: pathlib.Path, work: pathlib.Path) 
         )
 
 
+def check_padded_multiallelic_extract(bin_dir: pathlib.Path, work: pathlib.Path) -> None:
+    samples = ["pad1", "pad2", "pad3", "pad4"]
+    genotype_alts = ["A", "AATT", "ATT", "ATTT", "ATTTT", "GT", "TT"]
+    extract_alts = ["ATTT", "ATTTT", "AT", "ATTTTT", "AATTT", "TTT", "GTT", "A"]
+    source_gts = [(1, 2), (3, 4), (5, 6), (7, 0)]
+
+    genotype = work / "padded_multiallelic.phased.vcf"
+    with genotype.open("w") as out:
+        out.write("##fileformat=VCFv4.2\n##contig=<ID=chr19>\n")
+        out.write('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n')
+        out.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t")
+        out.write("\t".join(samples) + "\n")
+        # A different REF at the same coordinate must not cause an early mismatch.
+        out.write(
+            "chr19\t40176167\tunrelated\tC\tG\t.\tPASS\t.\tGT\t"
+            "0|1\t0|0\t0|0\t0|0\n"
+        )
+        out.write(
+            "chr19\t40176167\tpadded\tAT\t"
+            + ",".join(genotype_alts)
+            + "\t.\tPASS\t.\tGT\t"
+            + "\t".join(f"{a0}|{a1}" for a0, a1 in source_gts)
+            + "\n"
+        )
+
+    flare = work / "padded_multiallelic.flare.vcf"
+    with flare.open("w") as out:
+        out.write("##fileformat=VCFv4.2\n##contig=<ID=chr19>\n")
+        out.write('##FORMAT=<ID=AN1,Number=1,Type=Integer,Description="First ancestry">\n')
+        out.write('##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="Second ancestry">\n')
+        out.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t")
+        out.write("\t".join(samples) + "\n")
+        out.write("chr19\t40176167\t.\tA\tC\t.\tPASS\t.\tAN1:AN2\t0:1\t1:2\t2:0\t0:2\n")
+
+    extract = work / "padded_multiallelic.extract.pvar"
+    extract.write_text(
+        "#CHROM\tPOS\tID\tREF\tALT\n"
+        f"chr19\t40176167\t.\tATT\t{','.join(extract_alts)}\n"
+    )
+
+    prefix = work / "padded_multiallelic"
+    roundtrip = build_with_cli(
+        bin_dir,
+        genotype,
+        flare,
+        prefix,
+        "--extract",
+        str(extract),
+    )
+    expected = []
+    for alt_index, alt in enumerate(genotype_alts, start=1):
+        expected.append({
+            "chrom": "chr19",
+            "pos": 40176167,
+            "id": f"padded_AT_{alt}",
+            "ref": "AT",
+            "alt": alt,
+            "gts": [
+                f"{1 if a0 == alt_index else 0}|{1 if a1 == alt_index else 0}"
+                for a0, a1 in source_gts
+            ],
+        })
+    assert_vcf_matches(roundtrip, samples, expected)
+
+
 def bounded_extract_expected_from_split_records(
     split_records_all: list[dict],
     selected: set[tuple[str, int, str, str]],
@@ -941,6 +1006,7 @@ def main() -> int:
         samples, records, ancestry, genotype_path, flare_path = build_inputs(work)
         check_int16_gt_encoding(bin_dir, work)
         check_duplicate_flare_coordinate(bin_dir, work)
+        check_padded_multiallelic_extract(bin_dir, work)
         all_indices = list(range(len(samples)))
         keep_indices = [i for i in all_indices if i not in {5, 10, 26, 36}]
         keep_samples = [samples[i] for i in keep_indices]

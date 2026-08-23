@@ -77,7 +77,7 @@ Common output and parameter flags:
   --mac-threshold INT           Sparse/dense MAC threshold. Default: auto.
   --n-samples INT               Sample count for threshold helpers and template-only jobs.
   --keep FILE                   Sample IDs to retain, one ID per line.
-  --extract FILE                PVAR/VCF allele list to retain by CHROM/POS/REF/ALT.
+  --extract FILE                PVAR/VCF alleles; ID ignored, shared padding normalized.
   --region CHR:START-END        Region for conversion/extraction.
   --chr CHR --from-bp N --to-bp N
                                PLINK-like region form for extraction.

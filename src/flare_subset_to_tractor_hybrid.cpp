@@ -20,6 +20,7 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -137,6 +138,13 @@ struct ExtractPosition {
     uint64_t line_no = 0;
 };
 
+struct ExtractCoordinateMatch {
+    const ExtractPosition* position = nullptr;
+    bool raw_ref_matched = false;
+    bool normalized_allele_matched = false;
+    std::string first_genotype_ref;
+};
+
 struct ExtractSites {
     bool active = false;
     std::string path;
@@ -151,8 +159,13 @@ static constexpr uint64_t kProgressRecordInterval = 10000;
 static constexpr int kProgressSecondsInterval = 2;
 static constexpr int64_t kMaxVcfCoordinate = 2147483647LL;
 static constexpr int kInputBlockSize = 8 * 1024 * 1024;
+static bool g_progress_line_open = false;
 
 [[noreturn]] static void die(const char* fmt, ...) {
+    if (g_progress_line_open) {
+        std::fputc('\n', stderr);
+        g_progress_line_open = false;
+    }
     va_list args;
     va_start(args, fmt);
     std::fputs("ERROR: ", stderr);
@@ -335,7 +348,7 @@ struct HeaderSample {
 static std::vector<HeaderSample> sorted_header_samples(
     bcf_hdr_t* hdr,
     const char* label
-) {
+    ) {
     int n_samples = bcf_hdr_nsamples(hdr);
     std::vector<HeaderSample> samples;
     samples.reserve(static_cast<size_t>(n_samples));
@@ -804,6 +817,7 @@ public:
         maybe_report(converted, common, rare, true);
         if (stderr_is_tty_ && printed_) {
             std::fputc('\n', stderr);
+            g_progress_line_open = false;
         }
     }
 
@@ -856,6 +870,7 @@ private:
         }
 
         std::fflush(stderr);
+        g_progress_line_open = stderr_is_tty_;
     }
 
     const char* input_label_;
@@ -2547,6 +2562,39 @@ static int extract_position_sort_rid(bcf_hdr_t* hdr, const std::string& chr) {
     return std::numeric_limits<int>::max();
 }
 
+struct NormalizedAlleleView {
+    int64_t pos = 0;
+    std::string_view ref;
+    std::string_view alt;
+};
+
+static bool is_symbolic_allele(std::string_view allele) {
+    return allele.empty() || allele == "*" || allele.front() == '<' ||
+           allele.find('[') != std::string_view::npos ||
+           allele.find(']') != std::string_view::npos;
+}
+
+static NormalizedAlleleView normalize_allele(
+    int64_t pos,
+    std::string_view ref,
+    std::string_view alt
+) {
+    if (is_symbolic_allele(ref) || is_symbolic_allele(alt)) {
+        return NormalizedAlleleView{pos, ref, alt};
+    }
+
+    while (ref.size() > 1 && alt.size() > 1 && ref.back() == alt.back()) {
+        ref.remove_suffix(1);
+        alt.remove_suffix(1);
+    }
+    while (ref.size() > 1 && alt.size() > 1 && ref.front() == alt.front()) {
+        ref.remove_prefix(1);
+        alt.remove_prefix(1);
+        ++pos;
+    }
+    return NormalizedAlleleView{pos, ref, alt};
+}
+
 static bool extract_position_less(const ExtractPosition& a, const ExtractPosition& b) {
     if (a.geno_rid != b.geno_rid) return a.geno_rid < b.geno_rid;
     if (a.chr != b.chr) return a.chr < b.chr;
@@ -2678,9 +2726,7 @@ static const ExtractPosition* match_next_extract_position(
     const std::vector<ExtractPosition>& positions,
     size_t& cursor,
     int record_rid,
-    const char* record_chr,
-    int64_t record_pos,
-    const char* record_ref
+    int64_t record_pos
 ) {
     while (cursor < positions.size() &&
            compare_extract_position_to_record(positions[cursor], record_rid, record_pos) < 0) {
@@ -2693,9 +2739,43 @@ static const ExtractPosition* match_next_extract_position(
     }
 
     // Keep the cursor on an equal position until the VCF advances. This allows
-    // multiple VCF records with the same CHROM/POS/REF to contribute different
-    // ALT alleles from one multiallelic extract site.
-    const ExtractPosition& position = positions[cursor];
+    // multiple VCF records at the same CHROM/POS to contribute ALT alleles.
+    return &positions[cursor];
+}
+
+static void finish_extract_coordinate_match(ExtractCoordinateMatch& match) {
+    if (!match.position) return;
+    if (!match.raw_ref_matched && !match.normalized_allele_matched) {
+        die(
+            "REF mismatch for --extract site %s:%lld: list has %s, genotype VCF has %s",
+            match.position->chr.c_str(),
+            static_cast<long long>(match.position->pos),
+            match.position->ref.c_str(),
+            match.first_genotype_ref.c_str()
+        );
+    }
+    match = ExtractCoordinateMatch{};
+}
+
+static void finish_extract_coordinate_before_record(
+    ExtractCoordinateMatch& match,
+    int record_rid,
+    int64_t record_pos
+) {
+    if (!match.position) return;
+    if (match.position->geno_rid != record_rid || match.position->pos != record_pos) {
+        finish_extract_coordinate_match(match);
+    }
+}
+
+static void note_extract_coordinate_record(
+    ExtractCoordinateMatch& match,
+    const ExtractPosition& position,
+    const char* record_chr,
+    int64_t record_pos,
+    const char* record_ref,
+    bool normalized_allele_matched
+) {
     if (!record_ref || !*record_ref || std::strcmp(record_ref, ".") == 0) {
         die(
             "genotype VCF has unknown REF at --extract position %s:%lld",
@@ -2703,16 +2783,54 @@ static const ExtractPosition* match_next_extract_position(
             static_cast<long long>(record_pos)
         );
     }
-    if (position.ref != record_ref) {
-        die(
-            "REF mismatch for --extract site %s:%lld: list has %s, genotype VCF has %s",
-            record_chr,
-            static_cast<long long>(record_pos),
-            position.ref.c_str(),
-            record_ref
-        );
+    if (!match.position) {
+        match.position = &position;
     }
-    return &position;
+    bool raw_ref_matched = position.ref == record_ref;
+    if (!raw_ref_matched && match.first_genotype_ref.empty()) {
+        match.first_genotype_ref = record_ref;
+    }
+    match.raw_ref_matched = match.raw_ref_matched || raw_ref_matched;
+    match.normalized_allele_matched =
+        match.normalized_allele_matched || normalized_allele_matched;
+}
+
+static bool normalized_extract_allele_matches(
+    const ExtractPosition& position,
+    int64_t record_pos,
+    const char* record_ref,
+    const char* record_alt
+) {
+    if (position.ref == record_ref) {
+        auto exact = std::lower_bound(
+            position.alts.begin(),
+            position.alts.end(),
+            record_alt,
+            [](const std::string& stored, const char* value) {
+                return stored.compare(value) < 0;
+            }
+        );
+        return exact != position.alts.end() && *exact == record_alt;
+    }
+
+    NormalizedAlleleView query = normalize_allele(
+        record_pos,
+        record_ref,
+        record_alt
+    );
+    for (const std::string& extract_alt : position.alts) {
+        NormalizedAlleleView candidate = normalize_allele(
+            position.pos,
+            position.ref,
+            extract_alt
+        );
+        if (candidate.pos == query.pos &&
+            candidate.ref == query.ref &&
+            candidate.alt == query.alt) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static bool fill_selected_alt_mask(
@@ -2726,15 +2844,12 @@ static bool fill_selected_alt_mask(
     bool any_selected = false;
     for (int alt_idx = 1; alt_idx < rec->n_allele; ++alt_idx) {
         const char* alt = rec->d.allele[alt_idx];
-        auto it = std::lower_bound(
-            extract_position->alts.begin(),
-            extract_position->alts.end(),
-            alt,
-            [](const std::string& value, const char* query) {
-                return value.compare(query) < 0;
-            }
+        bool matched = normalized_extract_allele_matches(
+            *extract_position,
+            static_cast<int64_t>(rec->pos) + 1,
+            rec->d.allele[0],
+            alt
         );
-        bool matched = it != extract_position->alts.end() && *it == alt;
         selected[static_cast<size_t>(alt_idx)] = static_cast<uint8_t>(matched);
         any_selected = any_selected || matched;
     }
@@ -2751,15 +2866,12 @@ static bool fill_selected_alt_mask_fast(
     bool any_selected = false;
     for (size_t alt_idx = 1; alt_idx < rec.alleles.size(); ++alt_idx) {
         const char* alt = rec.alleles[alt_idx];
-        auto it = std::lower_bound(
-            extract_position->alts.begin(),
-            extract_position->alts.end(),
-            alt,
-            [](const std::string& value, const char* query) {
-                return value.compare(query) < 0;
-            }
+        bool matched = normalized_extract_allele_matches(
+            *extract_position,
+            rec.pos,
+            rec.ref,
+            alt
         );
-        bool matched = it != extract_position->alts.end() && *it == alt;
         selected[alt_idx] = static_cast<uint8_t>(matched);
         any_selected = any_selected || matched;
     }
@@ -3299,7 +3411,7 @@ int main(int argc, char** argv) {
             } else {
                 std::fprintf(
                     stderr,
-                    "WARNING: --extract could not use genotype VCF bounded random access; scanning records and filtering by CHROM/POS/REF/ALT.\n"
+                    "WARNING: --extract could not use genotype VCF bounded random access; scanning records and filtering by normalized CHROM/POS/REF/ALT.\n"
                 );
             }
         }
@@ -3554,6 +3666,7 @@ int main(int argc, char** argv) {
     std::unordered_set<std::string> warned_missing_flare_contigs;
     const std::vector<ExtractPosition>& ordered_extract_positions = extract_sites.positions;
     size_t extract_cursor = 0;
+    ExtractCoordinateMatch extract_coordinate_match;
 
     uint32_t n_blocks_written = 0;
     uint64_t common_index = 0;
@@ -3708,6 +3821,14 @@ int main(int argc, char** argv) {
                 : grec->d.allele[allele_index];
         };
 
+        if (extract_sites.active) {
+            finish_extract_coordinate_before_record(
+                extract_coordinate_match,
+                g_rid,
+                g_pos
+            );
+        }
+
         while (has_lai_record) {
             bool current_block_covers =
                 block.active &&
@@ -3861,11 +3982,32 @@ int main(int argc, char** argv) {
                 ordered_extract_positions,
                 extract_cursor,
                 g_rid,
-                g_chr,
-                g_pos,
-                ref
+                g_pos
             );
             if (!extract_position) {
+                progress.maybe_report(global_variant_index, common_index, rare_index);
+                continue;
+            }
+            if (!ref || !*ref || std::strcmp(ref, ".") == 0) {
+                die(
+                    "genotype VCF has unknown REF at --extract position %s:%lld",
+                    g_chr,
+                    static_cast<long long>(g_pos)
+                );
+            }
+
+            bool selected_any = fast_genotype_text
+                ? fill_selected_alt_mask_fast(fast_grec, extract_position, selected_alts)
+                : fill_selected_alt_mask(grec, extract_position, selected_alts);
+            note_extract_coordinate_record(
+                extract_coordinate_match,
+                *extract_position,
+                g_chr,
+                g_pos,
+                ref,
+                selected_any
+            );
+            if (!selected_any) {
                 progress.maybe_report(global_variant_index, common_index, rare_index);
                 continue;
             }
@@ -3882,15 +4024,7 @@ int main(int argc, char** argv) {
         }
 
         const char* raw_id = g_raw_id;
-        if (extract_sites.active) {
-            bool selected_any = fast_genotype_text
-                ? fill_selected_alt_mask_fast(fast_grec, extract_position, selected_alts)
-                : fill_selected_alt_mask(grec, extract_position, selected_alts);
-            if (!selected_any) {
-                progress.maybe_report(global_variant_index, common_index, rare_index);
-                continue;
-            }
-        } else {
+        if (!extract_sites.active) {
             selected_alts.assign(static_cast<size_t>(g_n_allele), 1);
             selected_alts[0] = 0;
         }
@@ -4024,6 +4158,10 @@ int main(int argc, char** argv) {
         }
 
         progress.maybe_report(global_variant_index, common_index, rare_index);
+    }
+
+    if (extract_sites.active) {
+        finish_extract_coordinate_match(extract_coordinate_match);
     }
 
     close_open_block(
