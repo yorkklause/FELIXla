@@ -61,6 +61,7 @@ jobs:
           export PKG_CONFIG_PATH=/opt/htslib-static/lib/pkgconfig
           make static STATIC_FULLY=1 CXXFLAGS="${FELIXLA_CXXFLAGS}"
           make test-static STATIC_FULLY=1 CXXFLAGS="${FELIXLA_CXXFLAGS}"
+          python3 tests/run_keep_extract_intense.py --bin-dir "${PWD}/bin-static"
           python3 tests/run_concat_intense.py --bin-dir "${PWD}/bin-static"
           file bin-static/felixla
           file bin-static/vcf_tbi_chunks

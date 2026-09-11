@@ -92,7 +92,8 @@ felixla \
   [ --mac-threshold MAC_THRESHOLD ] \
   [ --region CHR:START-END ] \
   [ --keep SAMPLE_LIST ] \
-  [ --extract SITE_LIST ]
+  [ --extract SITE_LIST ] \
+  [ --extract-bed BED_INTERVALS ]
 ```
 
 - PHASED_VCF (required): Full path and filename of a phased diploid genotype
@@ -138,6 +139,24 @@ felixla \
   chromosome, seeks to those bounded intervals, and then linearly scans inside
   them before exact allele-level filtering. Without an index, FELIXla falls
   back to a streaming scan and prints a warning.
+
+- BED_INTERVALS (optional): A BED or gzip-compressed BED file. FELIXla reads
+  the first three columns and ignores later columns, `track`/`browser` rows,
+  blank lines, and comments. Coordinates follow the BED standard: 0-based,
+  half-open `[START, END)`. Variant selection uses the VCF record position, so
+  `chr1 99 100` selects a record at VCF position 100. Input intervals may be
+  unsorted, duplicated, overlapping, or adjacent; FELIXla sorts and merges
+  them. Every ALT of a selected multiallelic genotype record is retained unless
+  `--extract` narrows the allele set. `--extract-bed`, `--extract`, and
+  `--region` are intersected when combined. Ancestry blocks are clipped and
+  split at BED gaps.
+
+  With an indexed genotype VCF/BCF, FELIXla creates one bounded read span from
+  the first through last retained BED interval on each chromosome, then applies
+  the exact merged intervals with a linear cursor. It therefore does not issue
+  one tabix request per BED row. This is intentional for large interval lists
+  and remote object-store mounts. Without a usable index, it streams the input
+  once and applies the same exact interval filter.
 
 ## Planning Parallel Chunks
 
@@ -268,6 +287,12 @@ overlapping entries are retained in memory; unsorted lists remain supported.
 Because a plain site list has no coordinate index, every worker still streams
 that file once, so keep it on local storage when launching many regions.
 
+With `--extract-bed`, overlapping and adjacent intervals are merged first. The
+genotype reader makes at most one indexed span query per retained chromosome
+and performs exact BED membership checks while scanning that span. Sparse BED
+files therefore avoid thousands of independent range requests; records in gaps
+are read when they lie inside a chromosome span but are never written.
+
 Do not begin with dozens of region workers reading the same objects through a
 Cloud Storage FUSE mount. Start with about 8 workers and increase concurrency
 only while aggregate throughput improves. When possible, stage each
@@ -389,6 +414,18 @@ bin/felixla \
   --out hybrid/chr22.subset
 ```
 
+Select many BED intervals at conversion time:
+
+```bash
+bin/felixla \
+  --phase-vcf genotype.phased.vcf.gz \
+  --flare-vcf flare.anc.vcf.gz \
+  --n-ancestries 5 \
+  --extract-bed targets.bed \
+  --make-felixla \
+  --out hybrid/targets
+```
+
 The same command can be run through Docker by binding the working directory:
 
 ```
@@ -426,7 +463,7 @@ Run the standard smoke test:
 make test
 ```
 
-Run the extended keep/extract and concatenation regression tests:
+Run the extended keep/extract/BED and concatenation regression tests:
 
 ```
 make test-intense
@@ -434,10 +471,12 @@ make test-intense
 
 `test-intense` synthesizes multi-chromosome, multi-allelic phased genotype and
 FLARE inputs, compares the PLINK-style command against the compatibility
-subcommand path, verifies `--keep`, `--extract`, indexed bounded extract
-scanning, `--region`, concatenation, and `felixla --query` against known truth,
-and checks every concat component plus malformed keep/extract inputs for
-fail-closed behavior.
+subcommand path, verifies `--keep`, `--extract`, `--extract-bed`, indexed
+chromosome-span scanning, BED boundary and ancestry-gap behavior, all-filter
+intersections, `--region`, concatenation, and `felixla --query` against known
+truth, and checks every concat component plus malformed filter inputs for
+fail-closed behavior. The BED suite also verifies 20,001 disjoint intervals and
+byte-identical non-metadata output when BED covers the complete input.
 
 ## Build Notes
 

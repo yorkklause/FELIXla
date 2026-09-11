@@ -78,6 +78,7 @@ Common output and parameter flags:
   --n-samples INT               Sample count for threshold helpers and template-only jobs.
   --keep FILE                   Sample IDs to retain, one ID per line.
   --extract FILE                PVAR/VCF alleles; ID ignored, shared padding normalized.
+  --extract-bed FILE            BED intervals; standard 0-based half-open coordinates.
   --region CHR:START-END        Region for conversion/extraction.
   --chr CHR --from-bp N --to-bp N
                                PLINK-like region form for extraction.
@@ -447,6 +448,7 @@ struct PlinkArgs {
     std::string n_samples;
     std::string keep_path;
     std::string extract_path;
+    std::string extract_bed_path;
     std::string max_diffs;
     std::string pattern;
     std::string chroms;
@@ -530,6 +532,8 @@ PlinkArgs parse_plink_args(int argc, char** argv) {
             args.keep_path = require_value(i, argc, argv, arg);
         } else if (arg == "--extract") {
             args.extract_path = require_value(i, argc, argv, arg);
+        } else if (arg == "--extract-bed") {
+            args.extract_bed_path = require_value(i, argc, argv, arg);
         } else if (arg == "--region") {
             args.region = require_value(i, argc, argv, arg);
         } else if (arg == "--chr") {
@@ -591,7 +595,8 @@ PlinkArgs parse_plink_args(int argc, char** argv) {
 int run_plink_style(int argc, char** argv) {
     PlinkArgs args = parse_plink_args(argc, argv);
 
-    if (!args.keep_path.empty() || !args.extract_path.empty()) {
+    if (!args.keep_path.empty() || !args.extract_path.empty() ||
+        !args.extract_bed_path.empty()) {
         if (!args.make_felixla ||
             args.query_action ||
             args.admixture_action ||
@@ -601,7 +606,7 @@ int run_plink_style(int argc, char** argv) {
             !args.export_format.empty() ||
             args.phase_vcf.empty() ||
             args.flare_vcf.empty()) {
-            die("--keep/--extract are currently supported only for --phase-vcf + --flare-vcf --make-felixla");
+            die("--keep/--extract/--extract-bed are currently supported only for --phase-vcf + --flare-vcf --make-felixla");
         }
     }
 
@@ -708,7 +713,8 @@ int run_plink_style(int argc, char** argv) {
         if (!args.pmerge_list.empty()) {
             if (!args.phase_vcf.empty() || !args.flare_vcf.empty() || !args.rfmix_msp.empty() ||
                 !args.tractor_dosage_vcf.empty() || !args.felixla_prefix.empty() ||
-                !args.keep_path.empty() || !args.extract_path.empty() || !args.region.empty() ||
+                !args.keep_path.empty() || !args.extract_path.empty() ||
+                !args.extract_bed_path.empty() || !args.region.empty() ||
                 !args.chr.empty() || !args.from_bp.empty() || !args.to_bp.empty() ||
                 !args.n_ancestries.empty() || !args.mac_threshold.empty() ||
                 !args.n_samples.empty() || !args.vcfs.empty()) {
@@ -738,12 +744,17 @@ int run_plink_style(int argc, char** argv) {
                 pack_args.push_back("--extract");
                 pack_args.push_back(args.extract_path);
             }
+            if (!args.extract_bed_path.empty()) {
+                pack_args.push_back("--extract-bed");
+                pack_args.push_back(args.extract_bed_path);
+            }
             return run_tool(felixla_pack_main, pack_args);
         }
         if (!args.phase_vcf.empty() && !args.rfmix_msp.empty()) {
             if (!args.region.empty()) die("--region is not supported for --rfmix-msp conversion");
-            if (!args.keep_path.empty() || !args.extract_path.empty()) {
-                die("--keep/--extract are currently supported for --phase-vcf + --flare-vcf writing");
+            if (!args.keep_path.empty() || !args.extract_path.empty() ||
+                !args.extract_bed_path.empty()) {
+                die("--keep/--extract/--extract-bed are currently supported for --phase-vcf + --flare-vcf writing");
             }
             if (args.n_ancestries.empty()) die("from-RFMix writing requires --n-ancestries");
             if (args.mac_threshold.empty()) args.mac_threshold = "auto";
@@ -757,8 +768,9 @@ int run_plink_style(int argc, char** argv) {
             });
         }
         if (!args.tractor_dosage_vcf.empty()) {
-            if (!args.keep_path.empty() || !args.extract_path.empty()) {
-                die("--keep/--extract are currently supported for --phase-vcf + --flare-vcf writing");
+            if (!args.keep_path.empty() || !args.extract_path.empty() ||
+                !args.extract_bed_path.empty()) {
+                die("--keep/--extract/--extract-bed are currently supported for --phase-vcf + --flare-vcf writing");
             }
             if (args.n_ancestries.empty()) die("from-TRACTOR-dosage writing requires --n-ancestries");
             if (args.mac_threshold.empty()) args.mac_threshold = "auto";
@@ -771,8 +783,9 @@ int run_plink_style(int argc, char** argv) {
             });
         }
         if (!args.felixla_prefix.empty()) {
-            if (!args.keep_path.empty() || !args.extract_path.empty()) {
-                die("--keep/--extract are currently supported for --phase-vcf + --flare-vcf writing");
+            if (!args.keep_path.empty() || !args.extract_path.empty() ||
+                !args.extract_bed_path.empty()) {
+                die("--keep/--extract/--extract-bed are currently supported for --phase-vcf + --flare-vcf writing");
             }
             if (!args.region.empty()) {
                 return run_tool(felixla_extract_main, {

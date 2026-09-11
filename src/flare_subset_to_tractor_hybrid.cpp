@@ -154,6 +154,22 @@ struct ExtractSites {
     uint64_t allele_count = 0;
 };
 
+struct BedInterval {
+    std::string chr;
+    int64_t start = 0;
+    int64_t end = 0;
+    int geno_rid = -1;
+};
+
+struct BedIntervals {
+    bool active = false;
+    std::string path;
+    std::vector<BedInterval> intervals;
+    uint64_t source_interval_count = 0;
+    uint64_t merged_interval_count = 0;
+    uint64_t selected_interval_count = 0;
+};
+
 static constexpr uint32_t kMaxPackedHapId = (1u << 27) - 1u;
 static constexpr uint64_t kProgressRecordInterval = 10000;
 static constexpr int kProgressSecondsInterval = 2;
@@ -628,6 +644,142 @@ static int64_t parse_extract_position_field(const TextFieldView& field) {
     }
     if (value == 0) die("--extract POS must be positive");
     return static_cast<int64_t>(value);
+}
+
+static int64_t parse_bed_coordinate_field(
+    const TextFieldView& field,
+    const char* label,
+    const std::string& path,
+    uint64_t line_no
+) {
+    if (field.length == 0) {
+        die("--extract-bed %s is empty at %s:%llu", label, path.c_str(),
+            static_cast<unsigned long long>(line_no));
+    }
+
+    uint64_t value = 0;
+    for (size_t i = 0; i < field.length; ++i) {
+        unsigned char c = static_cast<unsigned char>(field.data[i]);
+        if (c < '0' || c > '9') {
+            std::string text(field.data, field.length);
+            die("invalid --extract-bed %s at %s:%llu: %s", label, path.c_str(),
+                static_cast<unsigned long long>(line_no), text.c_str());
+        }
+        uint64_t digit = static_cast<uint64_t>(c - '0');
+        if (value >
+            (static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) - digit) / 10) {
+            std::string text(field.data, field.length);
+            die("--extract-bed %s is out of range at %s:%llu: %s", label,
+                path.c_str(), static_cast<unsigned long long>(line_no), text.c_str());
+        }
+        value = value * 10 + digit;
+    }
+    return static_cast<int64_t>(value);
+}
+
+static bool bed_interval_text_less(const BedInterval& a, const BedInterval& b) {
+    if (a.chr != b.chr) return a.chr < b.chr;
+    if (a.start != b.start) return a.start < b.start;
+    return a.end < b.end;
+}
+
+static BedIntervals load_bed_intervals(
+    const std::string& path,
+    const Region& region
+) {
+    BedIntervals bed;
+    if (path.empty()) return bed;
+
+    bed.active = true;
+    bed.path = path;
+    TextLineReader reader(path, "--extract-bed interval list");
+
+    const char* line = nullptr;
+    size_t line_length = 0;
+    uint64_t line_no = 0;
+    while (reader.next_raw(line, line_length)) {
+        ++line_no;
+        if (line_length == 0) continue;
+
+        const char* cursor = line;
+        const char* end = line + line_length;
+        if (end > line && end[-1] == '\r') --end;
+        if (cursor == end) continue;
+        TextFieldView fields[3];
+        if (!next_text_field(cursor, end, fields[0])) continue;
+        if (fields[0].length > 0 && fields[0].data[0] == '#') continue;
+        if (text_field_equals(fields[0], "track") ||
+            text_field_equals(fields[0], "browser")) {
+            continue;
+        }
+        if (!next_text_field(cursor, end, fields[1]) ||
+            !next_text_field(cursor, end, fields[2])) {
+            die("--extract-bed expects at least CHROM START END at %s:%llu",
+                path.c_str(), static_cast<unsigned long long>(line_no));
+        }
+
+        int64_t start0 = parse_bed_coordinate_field(
+            fields[1], "START", path, line_no);
+        int64_t end0 = parse_bed_coordinate_field(
+            fields[2], "END", path, line_no);
+        if (start0 >= end0) {
+            die(
+                "--extract-bed interval must have positive length at %s:%llu: %lld-%lld",
+                path.c_str(),
+                static_cast<unsigned long long>(line_no),
+                static_cast<long long>(start0),
+                static_cast<long long>(end0)
+            );
+        }
+        ++bed.source_interval_count;
+
+        BedInterval interval;
+        interval.chr.assign(fields[0].data, fields[0].length);
+        interval.start = start0 + 1;
+        interval.end = end0;
+
+        if (region.active) {
+            if (interval.chr != region.chr ||
+                interval.end < region.start || interval.start > region.end) {
+                continue;
+            }
+            interval.start = std::max(interval.start, region.start);
+            interval.end = std::min(interval.end, region.end);
+        }
+        bed.intervals.push_back(std::move(interval));
+    }
+
+    if (bed.source_interval_count == 0) {
+        die("--extract-bed interval list is empty: %s", path.c_str());
+    }
+
+    if (!std::is_sorted(
+            bed.intervals.begin(), bed.intervals.end(), bed_interval_text_less)) {
+        std::sort(bed.intervals.begin(), bed.intervals.end(), bed_interval_text_less);
+    }
+    size_t write_i = 0;
+    for (size_t read_i = 0; read_i < bed.intervals.size(); ++read_i) {
+        BedInterval& source = bed.intervals[read_i];
+        if (write_i == 0) {
+            if (write_i != read_i) bed.intervals[write_i] = std::move(source);
+            ++write_i;
+            continue;
+        }
+
+        BedInterval& destination = bed.intervals[write_i - 1];
+        bool adjacent = destination.end != std::numeric_limits<int64_t>::max() &&
+                        source.start == destination.end + 1;
+        if (source.chr == destination.chr &&
+            (source.start <= destination.end || adjacent)) {
+            destination.end = std::max(destination.end, source.end);
+            continue;
+        }
+        if (write_i != read_i) bed.intervals[write_i] = std::move(source);
+        ++write_i;
+    }
+    bed.intervals.resize(write_i);
+    bed.merged_interval_count = static_cast<uint64_t>(bed.intervals.size());
+    return bed;
 }
 
 static ExtractSites load_extract_sites(
@@ -1138,7 +1290,8 @@ static void write_sidecars(
     int rare_threshold,
     const char* selected_region,
     const char* keep_path,
-    const char* extract_path
+    const char* extract_path,
+    const BedIntervals& bed
 ) {
     FILE* samples_fp = open_output_or_die(samples_path, "w");
     for (const std::string& sample_id : sample_ids) {
@@ -1164,6 +1317,16 @@ static void write_sidecars(
     }
     if (extract_path) {
         std::fprintf(meta_fp, "extract_sites\t%s\n", extract_path);
+    }
+    if (bed.active) {
+        std::fprintf(meta_fp, "extract_bed\t%s\n", bed.path.c_str());
+        std::fprintf(meta_fp, "extract_bed_coordinates\t0-based-half-open\n");
+        std::fprintf(meta_fp, "extract_bed_source_intervals\t%llu\n",
+            static_cast<unsigned long long>(bed.source_interval_count));
+        std::fprintf(meta_fp, "extract_bed_merged_intervals\t%llu\n",
+            static_cast<unsigned long long>(bed.merged_interval_count));
+        std::fprintf(meta_fp, "extract_bed_selected_intervals\t%llu\n",
+            static_cast<unsigned long long>(bed.selected_interval_count));
     }
     std::fclose(meta_fp);
 }
@@ -2708,6 +2871,143 @@ static void prepare_extract_positions(ExtractSites& extract_sites, bcf_hdr_t* gh
     );
 }
 
+static bool bed_interval_less(const BedInterval& a, const BedInterval& b) {
+    if (a.geno_rid != b.geno_rid) return a.geno_rid < b.geno_rid;
+    if (a.chr != b.chr) return a.chr < b.chr;
+    if (a.start != b.start) return a.start < b.start;
+    return a.end < b.end;
+}
+
+static void prepare_bed_intervals(BedIntervals& bed, bcf_hdr_t* ghdr) {
+    if (!bed.active) return;
+
+    size_t write_i = 0;
+    uint64_t missing_contig_intervals = 0;
+    for (size_t read_i = 0; read_i < bed.intervals.size(); ++read_i) {
+        BedInterval& interval = bed.intervals[read_i];
+        interval.geno_rid = bcf_hdr_name2id(ghdr, interval.chr.c_str());
+        if (interval.geno_rid < 0) {
+            ++missing_contig_intervals;
+            continue;
+        }
+        if (write_i != read_i) bed.intervals[write_i] = std::move(interval);
+        ++write_i;
+    }
+    bed.intervals.resize(write_i);
+    if (!std::is_sorted(
+            bed.intervals.begin(), bed.intervals.end(), bed_interval_less)) {
+        std::sort(bed.intervals.begin(), bed.intervals.end(), bed_interval_less);
+    }
+    bed.selected_interval_count = static_cast<uint64_t>(bed.intervals.size());
+
+    uint64_t n_contigs = 0;
+    int last_rid = -1;
+    for (const BedInterval& interval : bed.intervals) {
+        if (interval.geno_rid != last_rid) {
+            ++n_contigs;
+            last_rid = interval.geno_rid;
+        }
+    }
+
+    std::fprintf(
+        stderr,
+        "Prepared --extract-bed: %llu source interval(s), %llu merged interval(s), "
+        "%llu retained interval(s) across %llu genotype contig(s); BED coordinates are 0-based half-open.\n",
+        static_cast<unsigned long long>(bed.source_interval_count),
+        static_cast<unsigned long long>(bed.merged_interval_count),
+        static_cast<unsigned long long>(bed.selected_interval_count),
+        static_cast<unsigned long long>(n_contigs)
+    );
+    if (missing_contig_intervals > 0) {
+        std::fprintf(
+            stderr,
+            "WARNING: ignored %llu merged --extract-bed interval(s) on contigs absent from the genotype VCF header.\n",
+            static_cast<unsigned long long>(missing_contig_intervals)
+        );
+    }
+}
+
+static bool bed_interval_precedes_extract_position(
+    const BedInterval& interval,
+    const ExtractPosition& position
+) {
+    if (interval.geno_rid != position.geno_rid) {
+        return interval.geno_rid < position.geno_rid;
+    }
+    if (interval.chr != position.chr) return interval.chr < position.chr;
+    return interval.end < position.pos;
+}
+
+static void intersect_extract_positions_with_bed(
+    ExtractSites& extract_sites,
+    const BedIntervals& bed
+) {
+    if (!extract_sites.active || !bed.active) return;
+
+    size_t bed_i = 0;
+    size_t write_i = 0;
+    uint64_t retained_alleles = 0;
+    std::unordered_set<std::string> retained_contigs;
+
+    for (size_t read_i = 0; read_i < extract_sites.positions.size(); ++read_i) {
+        ExtractPosition& position = extract_sites.positions[read_i];
+        while (bed_i < bed.intervals.size() &&
+               bed_interval_precedes_extract_position(bed.intervals[bed_i], position)) {
+            ++bed_i;
+        }
+        if (bed_i >= bed.intervals.size()) break;
+
+        const BedInterval& interval = bed.intervals[bed_i];
+        bool selected = interval.geno_rid == position.geno_rid &&
+                        interval.chr == position.chr &&
+                        position.pos >= interval.start &&
+                        position.pos <= interval.end;
+        if (!selected) continue;
+
+        retained_alleles += position.alts.size();
+        retained_contigs.insert(position.chr);
+        if (write_i != read_i) {
+            extract_sites.positions[write_i] = std::move(position);
+        }
+        ++write_i;
+    }
+
+    extract_sites.positions.resize(write_i);
+    extract_sites.allele_count = retained_alleles;
+    extract_sites.contigs = std::move(retained_contigs);
+    std::fprintf(
+        stderr,
+        "Intersected --extract with --extract-bed: retained %llu position(s) and %llu split allele(s).\n",
+        static_cast<unsigned long long>(extract_sites.positions.size()),
+        static_cast<unsigned long long>(extract_sites.allele_count)
+    );
+}
+
+static const BedInterval* find_bed_interval_for_record(
+    const BedIntervals& bed,
+    size_t& cursor,
+    int record_rid,
+    const char* record_chr,
+    int64_t record_pos
+) {
+    while (cursor < bed.intervals.size()) {
+        const BedInterval& interval = bed.intervals[cursor];
+        if (interval.geno_rid < record_rid ||
+            (interval.geno_rid == record_rid && interval.chr < record_chr) ||
+            (interval.geno_rid == record_rid && interval.chr == record_chr &&
+             interval.end < record_pos)) {
+            ++cursor;
+            continue;
+        }
+        if (interval.geno_rid == record_rid && interval.chr == record_chr &&
+            interval.start <= record_pos && record_pos <= interval.end) {
+            return &interval;
+        }
+        return nullptr;
+    }
+    return nullptr;
+}
+
 static int compare_extract_position_to_record(
     const ExtractPosition& position,
     int record_rid,
@@ -2897,6 +3197,54 @@ static void append_region_query(
     query += std::to_string(start);
     query.push_back('-');
     query += std::to_string(end);
+}
+
+static std::string build_bed_genotype_region_query(
+    const BedIntervals& bed,
+    uint64_t& n_contigs
+) {
+    n_contigs = 0;
+    std::string query;
+    if (bed.intervals.empty()) return query;
+
+    std::string interval_chr = bed.intervals.front().chr;
+    int interval_rid = bed.intervals.front().geno_rid;
+    int64_t interval_start = bed.intervals.front().start;
+    int64_t interval_end = bed.intervals.front().end;
+
+    for (size_t i = 1; i < bed.intervals.size(); ++i) {
+        const BedInterval& interval = bed.intervals[i];
+        if (interval.geno_rid == interval_rid && interval.chr == interval_chr) {
+            interval_end = std::max(interval_end, interval.end);
+            continue;
+        }
+
+        append_region_query(query, interval_chr, interval_start, interval_end);
+        ++n_contigs;
+        interval_chr = interval.chr;
+        interval_rid = interval.geno_rid;
+        interval_start = interval.start;
+        interval_end = interval.end;
+    }
+    append_region_query(query, interval_chr, interval_start, interval_end);
+    ++n_contigs;
+    return query;
+}
+
+static std::string build_bed_flare_region_query(
+    const BedIntervals& bed,
+    uint64_t& n_contigs
+) {
+    n_contigs = 0;
+    std::string query;
+    int last_rid = -1;
+    for (const BedInterval& interval : bed.intervals) {
+        if (interval.geno_rid == last_rid) continue;
+        append_region_query(query, interval.chr, 1, kMaxVcfCoordinate);
+        last_rid = interval.geno_rid;
+        ++n_contigs;
+    }
+    return query;
 }
 
 static std::string build_extract_genotype_region_query(
@@ -3218,7 +3566,7 @@ static void print_usage(const char* prog) {
     std::fprintf(
         stderr,
         "Usage:\n"
-        "  %s genotype.phased.vcf.gz flare.anc.vcf.gz n_ancestries rare_threshold|auto out_prefix [chr:start-end] [--keep samples.txt] [--extract sites.pvar|sites.vcf]\n\n"
+        "  %s genotype.phased.vcf.gz flare.anc.vcf.gz n_ancestries rare_threshold|auto out_prefix [chr:start-end] [--keep samples.txt] [--extract sites.pvar|sites.vcf] [--extract-bed intervals.bed]\n\n"
         "Example:\n"
         "  %s chr1.phased.vcf.gz chr1.flare.anc.vcf.gz 3 auto chr1\n"
         "  %s chr22.phased.vcf.gz chr22.flare.anc.vcf.gz 5 512 chr22.1 chr22:1-50000000\n",
@@ -3264,6 +3612,7 @@ int main(int argc, char** argv) {
     Region region;
     std::string keep_path;
     std::string extract_path;
+    std::string extract_bed_path;
     for (int argi = 6; argi < argc; ++argi) {
         std::string arg = argv[argi];
         if (arg == "--keep") {
@@ -3272,6 +3621,9 @@ int main(int argc, char** argv) {
         } else if (arg == "--extract") {
             if (argi + 1 >= argc) die("--extract requires a value");
             extract_path = argv[++argi];
+        } else if (arg == "--extract-bed") {
+            if (argi + 1 >= argc) die("--extract-bed requires a value");
+            extract_bed_path = argv[++argi];
         } else if (!arg.empty() && arg[0] == '-') {
             die("unknown option: %s", arg.c_str());
         } else {
@@ -3319,6 +3671,7 @@ int main(int argc, char** argv) {
         die("retained zero samples");
     }
 
+    BedIntervals bed = load_bed_intervals(extract_bed_path, region);
     ExtractSites extract_sites = load_extract_sites(extract_path, region);
     if (extract_sites.active) {
         if (region.active) {
@@ -3367,6 +3720,8 @@ int main(int argc, char** argv) {
         }
     }
     prepare_extract_positions(extract_sites, ghdr);
+    prepare_bed_intervals(bed, ghdr);
+    intersect_extract_positions_with_bed(extract_sites, bed);
 
     if (extract_sites.active) {
         uint64_t n_extract_positions = 0;
@@ -3415,9 +3770,80 @@ int main(int argc, char** argv) {
                 );
             }
         }
+    } else if (bed.active) {
+        if (bed.intervals.empty()) {
+            skip_genotype_loop = true;
+            progress_scope = "--extract-bed chromosome spans";
+            std::fprintf(
+                stderr,
+                "No --extract-bed intervals overlap a genotype VCF contig and the selected conversion scope; skipping genotype scan.\n"
+            );
+        } else {
+            uint64_t n_bed_contigs = 0;
+            std::string genotype_query = build_bed_genotype_region_query(
+                bed,
+                n_bed_contigs
+            );
+            bool have_genotype_bed_reader = init_synced_region_reader(
+                &genotype_region_reader,
+                geno_vcf,
+                genotype_query,
+                "genotype VCF",
+                "--extract-bed chromosome spans",
+                sample_selection.genotype_subset_active
+                    ? &sample_selection.genotype_decode_samples
+                    : nullptr
+            );
+            if (have_genotype_bed_reader) {
+                genotype_indexed_query = genotype_query;
+                progress_scope = "--extract-bed chromosome spans";
+                std::fprintf(
+                    stderr,
+                    "Using indexed --extract-bed chromosome-span genotype reader: %llu exact interval(s) across %llu chromosome span(s).\n",
+                    static_cast<unsigned long long>(bed.selected_interval_count),
+                    static_cast<unsigned long long>(n_bed_contigs)
+                );
+            } else {
+                std::fprintf(
+                    stderr,
+                    "WARNING: --extract-bed could not use bounded genotype VCF access; scanning records and filtering with a linear interval cursor.\n"
+                );
+            }
+        }
     }
 
-    if (!extract_sites.active && region.active) {
+    if (bed.active) {
+        if (!skip_genotype_loop) {
+            uint64_t n_bed_contigs = 0;
+            std::string flare_query = build_bed_flare_region_query(
+                bed,
+                n_bed_contigs
+            );
+            bool have_flare_bed_reader = init_synced_region_reader(
+                &flare_region_reader,
+                flare_vcf,
+                flare_query,
+                "FLARE VCF",
+                "--extract-bed contig list",
+                sample_selection.flare_subset_active
+                    ? &sample_selection.flare_decode_samples
+                    : nullptr
+            );
+            if (have_flare_bed_reader) {
+                flare_indexed_query = flare_query;
+                std::fprintf(
+                    stderr,
+                    "Using indexed FLARE reader for --extract-bed: %llu contig(s).\n",
+                    static_cast<unsigned long long>(n_bed_contigs)
+                );
+            } else {
+                std::fprintf(
+                    stderr,
+                    "WARNING: indexed FLARE reader unavailable for --extract-bed contigs; scanning FLARE records.\n"
+                );
+            }
+        }
+    } else if (!extract_sites.active && region.active) {
         std::string flare_query = build_flare_region_query(region);
         bool have_genotype_region_reader = init_synced_region_reader(
             &genotype_region_reader,
@@ -3650,7 +4076,8 @@ int main(int argc, char** argv) {
         rare_threshold,
         region.active ? region.label.c_str() : nullptr,
         keep_path.empty() ? nullptr : keep_path.c_str(),
-        extract_path.empty() ? nullptr : extract_path.c_str()
+        extract_path.empty() ? nullptr : extract_path.c_str(),
+        bed
     );
 
     bcf1_t* grec_storage = bcf_init();
@@ -3667,6 +4094,8 @@ int main(int argc, char** argv) {
     const std::vector<ExtractPosition>& ordered_extract_positions = extract_sites.positions;
     size_t extract_cursor = 0;
     ExtractCoordinateMatch extract_coordinate_match;
+    size_t bed_cursor = 0;
+    size_t active_bed_interval_index = std::numeric_limits<size_t>::max();
 
     uint32_t n_blocks_written = 0;
     uint64_t common_index = 0;
@@ -3797,6 +4226,8 @@ int main(int argc, char** argv) {
     int ancestry_state_rid = -1;
     std::string ancestry_state_chr;
     bool ancestry_state_ready = false;
+    int64_t ancestry_state_start = 0;
+    int64_t ancestry_state_end = 0;
 
     while (!skip_genotype_loop && next_genotype_record() == 0) {
         progress.record_scanned();
@@ -3820,6 +4251,67 @@ int main(int argc, char** argv) {
                 ? fast_grec.alleles[static_cast<size_t>(allele_index)]
                 : grec->d.allele[allele_index];
         };
+
+        const BedInterval* selected_bed_interval = nullptr;
+        if (bed.active) {
+            selected_bed_interval = find_bed_interval_for_record(
+                bed,
+                bed_cursor,
+                g_rid,
+                g_chr,
+                g_pos
+            );
+            if (!selected_bed_interval) {
+                progress.maybe_report(global_variant_index, common_index, rare_index);
+                continue;
+            }
+
+            size_t selected_bed_interval_index = static_cast<size_t>(
+                selected_bed_interval - bed.intervals.data()
+            );
+            if (selected_bed_interval_index != active_bed_interval_index) {
+                close_open_block(
+                    anc_fp,
+                    anc_bin.c_str(),
+                    anc_mks_fp,
+                    anc_mks.c_str(),
+                    anc_idx_fp,
+                    block,
+                    n_blocks_written,
+                    n_ancestries,
+                    n_words
+                );
+                active_bed_interval_index = selected_bed_interval_index;
+
+                if (ancestry_state_ready && ancestry_state_rid == g_rid &&
+                    g_pos >= ancestry_state_start && g_pos <= ancestry_state_end) {
+                    int64_t output_start = std::max(
+                        selected_bed_interval->start,
+                        ancestry_state_start
+                    );
+                    int64_t output_end = std::min(
+                        selected_bed_interval->end,
+                        ancestry_state_end
+                    );
+                    update_open_block_from_flare(
+                        anc_fp,
+                        anc_bin.c_str(),
+                        anc_mks_fp,
+                        anc_mks.c_str(),
+                        anc_idx_fp,
+                        block,
+                        n_blocks_written,
+                        n_ancestries,
+                        n_words,
+                        ancestry_state_rid,
+                        ancestry_state_chr.c_str(),
+                        output_start,
+                        output_end,
+                        false
+                    );
+                }
+            }
+        }
 
         if (extract_sites.active) {
             finish_extract_coordinate_before_record(
@@ -3903,12 +4395,27 @@ int main(int argc, char** argv) {
             ancestry_state_rid = interval_record.geno_rid;
             ancestry_state_chr = interval_record.chr;
             ancestry_state_ready = true;
+            ancestry_state_start = interval_start;
+            ancestry_state_end = interval_end;
 
             int64_t output_start = interval_start;
             int64_t output_end = interval_end;
             bool emit_interval = true;
 
-            if (region.active) {
+            if (bed.active) {
+                if (!selected_bed_interval ||
+                    interval_record.geno_rid != selected_bed_interval->geno_rid) {
+                    emit_interval = false;
+                } else if (interval_end < selected_bed_interval->start) {
+                    emit_interval = false;
+                } else if (interval_start > selected_bed_interval->end) {
+                    emit_interval = false;
+                } else {
+                    output_start = std::max(interval_start, selected_bed_interval->start);
+                    output_end = std::min(interval_end, selected_bed_interval->end);
+                    emit_interval = output_start <= output_end;
+                }
+            } else if (region.active) {
                 if (interval_record.geno_rid != region.geno_rid) {
                     emit_interval = false;
                 } else if (interval_end < region.start) {
@@ -3922,7 +4429,7 @@ int main(int argc, char** argv) {
                 }
             }
 
-            if (!region.active && extract_sites.active && bounded_extract_reader &&
+            if (!bed.active && !region.active && extract_sites.active && bounded_extract_reader &&
                 extract_sites.contigs.count(interval_record.chr) == 0) {
                 emit_interval = false;
             }
@@ -3950,8 +4457,26 @@ int main(int argc, char** argv) {
             last_flare_pos = interval_record.pos;
         }
 
-        if (region.active && !block.active && !has_lai_record &&
+        if (bed.active && selected_bed_interval && !block.active && !has_lai_record &&
             ancestry_state_ready && ancestry_state_rid == g_rid) {
+            update_open_block_from_flare(
+                anc_fp,
+                anc_bin.c_str(),
+                anc_mks_fp,
+                anc_mks.c_str(),
+                anc_idx_fp,
+                block,
+                n_blocks_written,
+                n_ancestries,
+                n_words,
+                ancestry_state_rid,
+                ancestry_state_chr.c_str(),
+                std::max(selected_bed_interval->start, ancestry_state_start),
+                selected_bed_interval->end,
+                false
+            );
+        } else if (region.active && !block.active && !has_lai_record &&
+                   ancestry_state_ready && ancestry_state_rid == g_rid) {
             update_open_block_from_flare(
                 anc_fp,
                 anc_bin.c_str(),

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Intense keep/extract regression tests for FELIXla FLARE conversion."""
+"""Intense keep/extract/BED regression tests for FELIXla FLARE conversion."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import math
 import pathlib
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -160,6 +161,7 @@ def split_records(
     *,
     selected: set[tuple[str, int, str, str]] | None = None,
     region: tuple[str, int, int] | None = None,
+    bed_intervals: list[tuple[str, int, int]] | None = None,
 ) -> list[dict]:
     result = []
     for record in records:
@@ -167,6 +169,11 @@ def split_records(
             r_chrom, r_start, r_end = region
             if record["chrom"] != r_chrom or not (r_start <= record["pos"] <= r_end):
                 continue
+        if bed_intervals is not None and not any(
+            record["chrom"] == chrom and start <= record["pos"] <= end
+            for chrom, start, end in bed_intervals
+        ):
+            continue
         for alt_index, alt in enumerate(record["alts"], start=1):
             key = (record["chrom"], record["pos"], record["ref"], alt)
             if selected is not None and key not in selected:
@@ -237,6 +244,35 @@ def read_meta(prefix: pathlib.Path) -> dict[str, str]:
             if len(parts) == 2:
                 meta[parts[0]] = parts[1]
     return meta
+
+
+def read_ancestry_blocks(prefix: pathlib.Path) -> list[dict]:
+    data = pathlib.Path(str(prefix) + ".ancblock.mks").read_bytes()
+    if data[:8] != b"TRANMKS1":
+        fail(f"bad ancestry marker magic for {prefix}: {data[:8]!r}")
+    records = []
+    offset = 8
+    while offset < len(data):
+        if offset + 8 > len(data):
+            fail(f"truncated ancestry marker record in {prefix}")
+        block_id, chrom_length = struct.unpack_from("<II", data, offset)
+        offset += 8
+        if offset + chrom_length + 24 > len(data):
+            fail(f"truncated ancestry marker string in {prefix}")
+        chrom = data[offset : offset + chrom_length].decode()
+        offset += chrom_length
+        start, end, anc_offset = struct.unpack_from("<qqQ", data, offset)
+        offset += 24
+        records.append(
+            {
+                "block_id": block_id,
+                "chrom": chrom,
+                "start": start,
+                "end": end,
+                "anc_offset": anc_offset,
+            }
+        )
+    return records
 
 
 def read_samples(prefix: pathlib.Path) -> list[str]:
@@ -975,6 +1011,221 @@ def last_progress_record_count(stderr: str) -> int:
     return int(matches[-1])
 
 
+def repacked_bed_expected(
+    split_records_all: list[dict],
+    bed_intervals: list[tuple[str, int, int]],
+) -> list[dict]:
+    expected = []
+    for split in split_records_all:
+        if not any(
+            split["chrom"] == chrom and start <= split["pos"] <= end
+            for chrom, start, end in bed_intervals
+        ):
+            continue
+        copied = dict(split)
+        copied["global_index"] = len(expected)
+        copied["alt_index"] = 1
+        copied["id"] = f"{split['id']}_{split['ref']}_{split['alt']}"
+        expected.append(copied)
+    return expected
+
+
+def assert_ancestry_blocks_inside_bed(
+    prefix: pathlib.Path,
+    bed_intervals: list[tuple[str, int, int]],
+) -> None:
+    blocks = read_ancestry_blocks(prefix)
+    if not blocks:
+        fail(f"BED-selected output has no ancestry blocks: {prefix}")
+    for block in blocks:
+        if not any(
+            block["chrom"] == chrom and
+            start <= block["start"] <= block["end"] <= end
+            for chrom, start, end in bed_intervals
+        ):
+            fail(f"ancestry block crosses an unselected BED gap: {block}")
+
+
+def check_extract_bed_basic(
+    bin_dir: pathlib.Path,
+    work: pathlib.Path,
+    samples: list[str],
+    records: list[dict],
+    ancestry,
+    genotype_path: pathlib.Path,
+    flare_path: pathlib.Path,
+) -> tuple[pathlib.Path, list[tuple[str, int, int]]]:
+    bed_path = work / "intervals.unsorted.bed"
+    bed_path.write_text(
+        "browser position chr1:1-1000\n"
+        "chr2\t214\t335\tsecond-contig\n"
+        "chr1\t175\t220\tadjacent\n"
+        "chr1 39 40 one-base\n"
+        "track name=felixla-test\n"
+        "chr1\t84\t175\tleft\n"
+        "# a comment between records\n"
+        "chr2\t0\t35\tzero-start\n"
+        "chr1\t500\t641\twide\n"
+        "chr1\t500\t600\tduplicate-overlap\n"
+    )
+    merged_intervals = [
+        ("chr1", 40, 40),
+        ("chr1", 85, 220),
+        ("chr1", 501, 641),
+        ("chr2", 1, 35),
+        ("chr2", 215, 335),
+    ]
+    expected = split_records(
+        records,
+        list(range(len(samples))),
+        bed_intervals=merged_intervals,
+    )
+    prefix = work / "subset.extract_bed"
+    roundtrip = build_with_cli(
+        bin_dir,
+        genotype_path,
+        flare_path,
+        prefix,
+        "--extract-bed",
+        str(bed_path),
+    )
+    assert_vcf_matches(roundtrip, samples, expected)
+    check_queries(
+        bin_dir,
+        prefix,
+        expected,
+        samples,
+        list(range(len(samples))),
+        ancestry,
+    )
+
+    meta = read_meta(prefix)
+    assert meta["extract_bed"] == str(bed_path), meta
+    assert meta["extract_bed_coordinates"] == "0-based-half-open", meta
+    assert meta["extract_bed_source_intervals"] == "7", meta
+    assert meta["extract_bed_merged_intervals"] == "5", meta
+    assert meta["extract_bed_selected_intervals"] == "5", meta
+    assert_ancestry_blocks_inside_bed(prefix, merged_intervals)
+
+    blocks = read_ancestry_blocks(prefix)
+    block_at_40 = [b for b in blocks if b["chrom"] == "chr1" and b["start"] <= 40 <= b["end"]]
+    block_at_85 = [b for b in blocks if b["chrom"] == "chr1" and b["start"] <= 85 <= b["end"]]
+    if len(block_at_40) != 1 or len(block_at_85) != 1:
+        fail(f"BED boundary ancestry blocks missing: pos40={block_at_40}, pos85={block_at_85}")
+    if block_at_40[0]["block_id"] == block_at_85[0]["block_id"]:
+        fail("one ancestry block incorrectly bridges the BED gap between chr1:40 and chr1:85")
+
+    gz_path = work / "intervals.unsorted.bed.gz"
+    with gzip.open(gz_path, "wt") as out:
+        out.write(bed_path.read_text())
+    gz_prefix = work / "subset.extract_bed_gz"
+    gz_roundtrip = build_with_cli(
+        bin_dir,
+        genotype_path,
+        flare_path,
+        gz_prefix,
+        "--extract-bed",
+        str(gz_path),
+    )
+    assert_vcf_matches(gz_roundtrip, samples, expected)
+    assert_ancestry_blocks_inside_bed(gz_prefix, merged_intervals)
+
+    compatibility_prefix = work / "subset.extract_bed_compatibility"
+    run(
+        [
+            str(bin_dir / "felixla"),
+            "from-flare",
+            str(genotype_path),
+            str(flare_path),
+            str(N_ANCESTRIES),
+            "auto",
+            str(compatibility_prefix),
+            "--extract-bed",
+            str(bed_path),
+        ]
+    )
+    compatibility_vcf = export_prefix(bin_dir, compatibility_prefix)
+    assert_vcf_matches(compatibility_vcf, samples, expected)
+    assert_ancestry_blocks_inside_bed(compatibility_prefix, merged_intervals)
+    return bed_path, merged_intervals
+
+
+def check_indexed_and_large_extract_bed(
+    bin_dir: pathlib.Path,
+    work: pathlib.Path,
+    samples: list[str],
+    full_expected: list[dict],
+    indexed_genotype: pathlib.Path,
+    flare_path: pathlib.Path,
+) -> None:
+    sparse_bed = work / "indexed.sparse.bed"
+    sparse_bed.write_text("chr1\t639\t640\nchr1\t129\t130\n")
+    sparse_intervals = [("chr1", 130, 130), ("chr1", 640, 640)]
+    sparse_expected = repacked_bed_expected(full_expected, sparse_intervals)
+    sparse_prefix = work / "subset.indexed_extract_bed"
+    sparse_result = run(
+        [
+            str(bin_dir / "felixla"),
+            "--phase-vcf",
+            str(indexed_genotype),
+            "--flare-vcf",
+            str(flare_path),
+            "--n-ancestries",
+            str(N_ANCESTRIES),
+            "--extract-bed",
+            str(sparse_bed),
+            "--make-felixla",
+            "--out",
+            str(sparse_prefix),
+        ]
+    )
+    if "Using indexed --extract-bed chromosome-span genotype reader" not in sparse_result.stderr:
+        fail(f"indexed BED reader was not used:\n{sparse_result.stderr}")
+    expected_scanned = sum(
+        1 for split in full_expected
+        if split["chrom"] == "chr1" and 130 <= split["pos"] <= 640
+    )
+    scanned = last_progress_record_count(sparse_result.stderr)
+    if scanned != expected_scanned:
+        fail(f"indexed BED span scanned {scanned} records; expected {expected_scanned}")
+    sparse_vcf = export_prefix(bin_dir, sparse_prefix)
+    assert_vcf_matches(sparse_vcf, samples, sparse_expected)
+    assert_ancestry_blocks_inside_bed(sparse_prefix, sparse_intervals)
+
+    large_bed = work / "large.unsorted.bed"
+    large_rows = ["chr1\t129\t130\ttarget"]
+    for i in reversed(range(20_000)):
+        start0 = 2_000 + 2 * i
+        large_rows.append(f"chr1\t{start0}\t{start0 + 1}\tinterval{i}")
+    large_bed.write_text("\n".join(large_rows) + "\n")
+    large_prefix = work / "subset.large_extract_bed"
+    large_result = run(
+        [
+            str(bin_dir / "felixla"),
+            "--phase-vcf",
+            str(indexed_genotype),
+            "--flare-vcf",
+            str(flare_path),
+            "--n-ancestries",
+            str(N_ANCESTRIES),
+            "--extract-bed",
+            str(large_bed),
+            "--make-felixla",
+            "--out",
+            str(large_prefix),
+        ]
+    )
+    if "20001 exact interval(s) across 1 chromosome span(s)" not in large_result.stderr:
+        fail(f"large BED was not collapsed to one indexed chromosome span:\n{large_result.stderr}")
+    large_expected = repacked_bed_expected(full_expected, [("chr1", 130, 130)])
+    large_vcf = export_prefix(bin_dir, large_prefix)
+    assert_vcf_matches(large_vcf, samples, large_expected)
+    large_meta = read_meta(large_prefix)
+    assert large_meta["extract_bed_source_intervals"] == "20001", large_meta
+    assert large_meta["extract_bed_merged_intervals"] == "20001", large_meta
+    assert large_meta["extract_bed_selected_intervals"] == "20001", large_meta
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bin-dir", type=pathlib.Path, default=pathlib.Path("bin"))
@@ -1007,6 +1258,15 @@ def main() -> int:
         check_int16_gt_encoding(bin_dir, work)
         check_duplicate_flare_coordinate(bin_dir, work)
         check_padded_multiallelic_extract(bin_dir, work)
+        bed_path, merged_bed_intervals = check_extract_bed_basic(
+            bin_dir,
+            work,
+            samples,
+            records,
+            ancestry,
+            genotype_path,
+            flare_path,
+        )
         all_indices = list(range(len(samples)))
         keep_indices = [i for i in all_indices if i not in {5, 10, 26, 36}]
         keep_samples = [samples[i] for i in keep_indices]
@@ -1037,6 +1297,45 @@ def main() -> int:
         assert legacy_meta["n_words"] == "2", legacy_meta
         assert legacy_meta["rare_threshold"] == str(math.ceil(len(samples) / 32)), legacy_meta
         assert "keep_samples" not in legacy_meta and "extract_sites" not in legacy_meta, legacy_meta
+        assert "extract_bed" not in legacy_meta, legacy_meta
+
+        full_bed = work / "full_coverage.bed"
+        full_bed.write_text("chr2\t0\t1000\nchr1\t0\t1000\n")
+        full_bed_prefix = work / "full.extract_bed"
+        full_bed_vcf = build_with_cli(
+            bin_dir,
+            genotype_path,
+            flare_path,
+            full_bed_prefix,
+            "--extract-bed",
+            str(full_bed),
+        )
+        assert_vcf_matches(full_bed_vcf, samples, full_expected)
+        for suffix in [
+            ".common.geno.bin",
+            ".common.variant.mks",
+            ".common.variant.idx",
+            ".rare.carrier.bin",
+            ".rare.variant.mks",
+            ".rare.variant.idx",
+            ".ancblock.bin",
+            ".ancblock.mks",
+            ".ancblock.idx",
+            ".samples",
+        ]:
+            legacy_bytes = pathlib.Path(str(legacy_prefix) + suffix).read_bytes()
+            bed_bytes = pathlib.Path(str(full_bed_prefix) + suffix).read_bytes()
+            if bed_bytes != legacy_bytes:
+                fail(f"full-coverage BED changed legacy output bytes for {suffix}")
+
+        check_indexed_and_large_extract_bed(
+            bin_dir,
+            work,
+            samples,
+            full_expected,
+            legacy_vcf,
+            flare_path,
+        )
 
         cli_prefix = work / "full.cli"
         cli_vcf = build_with_cli(bin_dir, genotype_path, flare_path, cli_prefix)
@@ -1215,6 +1514,53 @@ def main() -> int:
         assert_vcf_matches(region_vcf, keep_samples, region_expected)
         check_queries(bin_dir, region_prefix, region_expected, samples, keep_indices, ancestry)
 
+        bed_region = ("chr1", 100, 600)
+        bed_region_intervals = [("chr1", 100, 220), ("chr1", 501, 600)]
+        bed_intersection_expected = split_records(
+            records,
+            keep_indices,
+            selected=selected,
+            region=bed_region,
+            bed_intervals=merged_bed_intervals,
+        )
+        bed_intersection_prefix = work / "subset.bed_region_extract_keep"
+        bed_intersection_vcf = build_with_cli(
+            bin_dir,
+            genotype_path,
+            flare_path,
+            bed_intersection_prefix,
+            "--region",
+            f"{bed_region[0]}:{bed_region[1]}-{bed_region[2]}",
+            "--keep",
+            str(keep_path),
+            "--extract",
+            str(pvar_path),
+            "--extract-bed",
+            str(bed_path),
+        )
+        assert_vcf_matches(
+            bed_intersection_vcf,
+            keep_samples,
+            bed_intersection_expected,
+        )
+        check_queries(
+            bin_dir,
+            bed_intersection_prefix,
+            bed_intersection_expected,
+            samples,
+            keep_indices,
+            ancestry,
+        )
+        assert_ancestry_blocks_inside_bed(
+            bed_intersection_prefix,
+            bed_region_intervals,
+        )
+        bed_intersection_meta = read_meta(bed_intersection_prefix)
+        assert bed_intersection_meta["selected_region"] == "chr1:100-600", bed_intersection_meta
+        assert bed_intersection_meta["extract_bed_source_intervals"] == "7", bed_intersection_meta
+        assert bed_intersection_meta["extract_bed_merged_intervals"] == "2", bed_intersection_meta
+        assert bed_intersection_meta["extract_bed_selected_intervals"] == "2", bed_intersection_meta
+
         bad_keep_dup = work / "bad.keep.dup"
         bad_keep_dup.write_text(f"{samples[0]}\n{samples[0]}\n")
         build_bad_base = [
@@ -1308,6 +1654,54 @@ def main() -> int:
         )
         run([*build_bad_base, str(work / "bad.dup.allele.out"), "--extract", str(bad_dup_allele)], expect_fail=True, contains="duplicate allele")
 
+        bad_bed_empty = work / "bad.empty.bed"
+        bad_bed_empty.write_text("# no intervals\ntrack name=empty\n")
+        run(
+            [*build_bad_base, str(work / "bad.empty.bed.out"), "--extract-bed", str(bad_bed_empty)],
+            expect_fail=True,
+            contains="interval list is empty",
+        )
+
+        bad_bed_short = work / "bad.short.bed"
+        bad_bed_short.write_text("chr1\t10\n")
+        run(
+            [*build_bad_base, str(work / "bad.short.bed.out"), "--extract-bed", str(bad_bed_short)],
+            expect_fail=True,
+            contains="expects at least CHROM START END",
+        )
+
+        bad_bed_negative = work / "bad.negative.bed"
+        bad_bed_negative.write_text("chr1\t-1\t10\n")
+        run(
+            [*build_bad_base, str(work / "bad.negative.bed.out"), "--extract-bed", str(bad_bed_negative)],
+            expect_fail=True,
+            contains="invalid --extract-bed START",
+        )
+
+        bad_bed_zero = work / "bad.zero_length.bed"
+        bad_bed_zero.write_text("chr1\t10\t10\n")
+        run(
+            [*build_bad_base, str(work / "bad.zero_length.bed.out"), "--extract-bed", str(bad_bed_zero)],
+            expect_fail=True,
+            contains="must have positive length",
+        )
+
+        absent_bed = work / "absent_contig.bed"
+        absent_bed.write_text("chrAbsent\t0\t100\n")
+        absent_prefix = work / "subset.absent_bed"
+        absent_vcf = build_with_cli(
+            bin_dir,
+            genotype_path,
+            flare_path,
+            absent_prefix,
+            "--extract-bed",
+            str(absent_bed),
+        )
+        assert_vcf_matches(absent_vcf, samples, [])
+        absent_meta = read_meta(absent_prefix)
+        assert absent_meta["global_variants"] == "0", absent_meta
+        assert absent_meta["ancestry_blocks"] == "0", absent_meta
+
         run(
             [
                 str(bin_dir / "felixla"),
@@ -1324,7 +1718,23 @@ def main() -> int:
             contains="supported only for --phase-vcf + --flare-vcf --make-felixla",
         )
 
-        print(f"intense keep/extract regression passed in {work}")
+        run(
+            [
+                str(bin_dir / "felixla"),
+                "--felixla",
+                str(cli_prefix),
+                "--export",
+                "vcf",
+                "--extract-bed",
+                str(bed_path),
+                "--out",
+                str(work / "bad.unsupported_bed.vcf.gz"),
+            ],
+            expect_fail=True,
+            contains="supported only for --phase-vcf + --flare-vcf --make-felixla",
+        )
+
+        print(f"intense keep/extract/BED regression passed in {work}")
     finally:
         if owned_tmp and not args.keep_work:
             owned_tmp.cleanup()
