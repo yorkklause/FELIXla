@@ -303,6 +303,16 @@ and `--file-cache-cache-file-for-range-read=true` are intended for repeated
 partial/random reads; size the cache to avoid
 [cache thrashing](https://docs.cloud.google.com/storage/docs/cloud-storage-fuse/caching).
 
+Each region command is a separate process with its own sample map, ancestry
+state, input buffers, and index handles. A 96-vCPU Workbench therefore must not
+automatically be treated as 96 safe FELIXla workers. For Cloud Storage FUSE,
+start with `MultiRun.sh cmds.sh 8`, then try 12 or 16 only if total throughput
+increases and memory and swap remain stable. Shell messages such as `Killed`
+with exit status 137 only establish that the process received `SIGKILL`; inspect
+the cgroup events and the job runner logs to distinguish a memory limit from an
+external cancellation. Partial prefixes from those commands must not be
+concatenated.
+
 The same binary also dispatches to compatibility subcommands:
 
 ```

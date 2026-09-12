@@ -177,6 +177,21 @@ static constexpr int64_t kMaxVcfCoordinate = 2147483647LL;
 static constexpr int kInputBlockSize = 8 * 1024 * 1024;
 static bool g_progress_line_open = false;
 
+static void report_stage(const char* out_prefix, const char* stage) {
+    if (g_progress_line_open) {
+        std::fputc('\n', stderr);
+        g_progress_line_open = false;
+    }
+    std::fprintf(
+        stderr,
+        "FELIXla[%lld] %s: %s\n",
+        static_cast<long long>(getpid()),
+        out_prefix,
+        stage
+    );
+    std::fflush(stderr);
+}
+
 [[noreturn]] static void die(const char* fmt, ...) {
     if (g_progress_line_open) {
         std::fputc('\n', stderr);
@@ -357,7 +372,7 @@ static bool sample_headers_identical(bcf_hdr_t* ghdr, bcf_hdr_t* ahdr) {
 }
 
 struct HeaderSample {
-    std::string id;
+    std::string_view id;
     int raw_index = -1;
 };
 
@@ -382,7 +397,8 @@ static std::vector<HeaderSample> sorted_header_samples(
 
     for (size_t i = 1; i < samples.size(); ++i) {
         if (samples[i - 1].id == samples[i].id) {
-            die("duplicate sample ID in %s VCF header: %s", label, samples[i].id.c_str());
+            std::string duplicate(samples[i].id);
+            die("duplicate sample ID in %s VCF header: %s", label, duplicate.c_str());
         }
     }
     return samples;
@@ -402,9 +418,13 @@ static SampleSelection build_sample_selection(
     KeepSamples keep = load_keep_samples(keep_path);
     selection.keep_active = keep.active;
     selection.keep_path = keep.path;
-    std::unordered_set<std::string> keep_missing_from_genotype = keep.ids;
+    size_t keep_requested_count = keep.ids.size();
 
     bool identical = sample_headers_identical(ghdr, ahdr);
+    std::unordered_set<std::string> keep_missing_from_genotype;
+    if (keep.active && !identical) {
+        keep_missing_from_genotype = keep.ids;
+    }
 
     selection.genotype_raw_indices.reserve(static_cast<size_t>(selection.genotype_raw_sample_count));
     selection.flare_raw_indices.reserve(static_cast<size_t>(selection.genotype_raw_sample_count));
@@ -415,8 +435,9 @@ static SampleSelection build_sample_selection(
         for (int i = 0; i < selection.genotype_raw_sample_count; ++i) {
             std::string sample(ghdr->samples[i]);
             if (keep.active) {
-                if (keep.ids.count(sample) == 0) continue;
-                keep_missing_from_genotype.erase(sample);
+                auto keep_it = keep.ids.find(sample);
+                if (keep_it == keep.ids.end()) continue;
+                keep.ids.erase(keep_it);
             }
             selection.genotype_raw_indices.push_back(i);
             selection.flare_raw_indices.push_back(i);
@@ -429,7 +450,7 @@ static SampleSelection build_sample_selection(
             sorted_header_samples(ahdr, "FLARE");
         if (keep.active) {
             for (const HeaderSample& sample : genotype_samples) {
-                keep_missing_from_genotype.erase(sample.id);
+                keep_missing_from_genotype.erase(std::string(sample.id));
             }
         }
 
@@ -451,9 +472,10 @@ static SampleSelection build_sample_selection(
             } else if (flare_sample.id < genotype_sample.id) {
                 ++flare_i;
             } else {
-                if (!keep.active || keep.ids.count(genotype_sample.id) != 0) {
+                if (!keep.active ||
+                    keep.ids.count(std::string(genotype_sample.id)) != 0) {
                     matches.push_back(MatchedSample{
-                        genotype_sample.id,
+                        std::string(genotype_sample.id),
                         genotype_sample.raw_index,
                         flare_sample.raw_index
                     });
@@ -477,9 +499,11 @@ static SampleSelection build_sample_selection(
         }
     }
 
-    if (keep.active && !keep_missing_from_genotype.empty()) {
+    const std::unordered_set<std::string>& missing_keep_ids =
+        identical ? keep.ids : keep_missing_from_genotype;
+    if (keep.active && !missing_keep_ids.empty()) {
         die("sample ID in --keep list is absent from genotype VCF: %s",
-            keep_missing_from_genotype.begin()->c_str());
+            missing_keep_ids.begin()->c_str());
     }
 
     if (selection.sample_ids.empty()) {
@@ -495,7 +519,7 @@ static SampleSelection build_sample_selection(
             stderr,
             "Loaded --keep sample list: retaining %llu of %llu requested sample(s) after genotype/FLARE intersection.\n",
             static_cast<unsigned long long>(selection.sample_ids.size()),
-            static_cast<unsigned long long>(keep.ids.size())
+            static_cast<unsigned long long>(keep_requested_count)
         );
     }
 
@@ -543,27 +567,33 @@ static void set_header_samples_or_die(
 static void apply_decode_sample_subsets(
     bcf_hdr_t* ghdr,
     bcf_hdr_t* ahdr,
-    SampleSelection& selection
+    SampleSelection& selection,
+    bool genotype_text,
+    bool flare_text
 ) {
     int n_selected = static_cast<int>(selection.sample_ids.size());
 
     if (n_selected < selection.genotype_raw_sample_count) {
         selection.genotype_subset_active = true;
-        selection.genotype_decode_samples = comma_join_samples(selection.sample_ids);
-        set_header_samples_or_die(
-            ghdr,
-            selection.genotype_decode_samples,
-            "genotype VCF"
-        );
-        selection.genotype_raw_indices.resize(static_cast<size_t>(n_selected));
-        for (int i = 0; i < n_selected; ++i) {
-            selection.genotype_raw_indices[static_cast<size_t>(i)] = i;
+        if (!genotype_text) {
+            selection.genotype_decode_samples = comma_join_samples(selection.sample_ids);
+            set_header_samples_or_die(
+                ghdr,
+                selection.genotype_decode_samples,
+                "genotype VCF"
+            );
+            selection.genotype_raw_indices.resize(static_cast<size_t>(n_selected));
+            for (int i = 0; i < n_selected; ++i) {
+                selection.genotype_raw_indices[static_cast<size_t>(i)] = i;
+            }
+            selection.genotype_raw_sample_count = n_selected;
         }
-        selection.genotype_raw_sample_count = n_selected;
     }
 
     if (n_selected < selection.flare_raw_sample_count) {
         selection.flare_subset_active = true;
+
+        if (flare_text) return;
 
         std::vector<std::pair<int, int>> raw_and_output;
         raw_and_output.reserve(static_cast<size_t>(n_selected));
@@ -1294,8 +1324,30 @@ static void write_sidecars(
     const BedIntervals& bed
 ) {
     FILE* samples_fp = open_output_or_die(samples_path, "w");
+    constexpr size_t kSampleWriteBufferBytes = 1024 * 1024;
+    std::string sample_buffer;
+    sample_buffer.reserve(kSampleWriteBufferBytes);
     for (const std::string& sample_id : sample_ids) {
-        std::fprintf(samples_fp, "%s\n", sample_id.c_str());
+        if (!sample_buffer.empty() &&
+            sample_buffer.size() + sample_id.size() + 1 > kSampleWriteBufferBytes) {
+            write_exact(
+                samples_fp,
+                sample_buffer.data(),
+                sample_buffer.size(),
+                "sample IDs"
+            );
+            sample_buffer.clear();
+        }
+        sample_buffer.append(sample_id);
+        sample_buffer.push_back('\n');
+    }
+    if (!sample_buffer.empty()) {
+        write_exact(
+            samples_fp,
+            sample_buffer.data(),
+            sample_buffer.size(),
+            "sample IDs"
+        );
     }
     std::fclose(samples_fp);
 
@@ -3376,6 +3428,27 @@ static int infer_contigs_from_records(
     return added;
 }
 
+static bcf_hdr_t* make_contig_only_header(bcf_hdr_t* source) {
+    bcf_hdr_t* slim = bcf_hdr_init("r");
+    if (!slim) die("failed to initialize compact genotype contig header");
+
+    int n_contigs = source ? source->n[BCF_DT_CTG] : 0;
+    for (int rid = 0; rid < n_contigs; ++rid) {
+        const char* contig = bcf_hdr_id2name(source, rid);
+        if (!contig || !*contig) continue;
+        std::string line = "##contig=<ID=" + std::string(contig) + ">";
+        if (bcf_hdr_append(slim, line.c_str()) != 0) {
+            bcf_hdr_destroy(slim);
+            die("failed to copy genotype contig into compact header: %s", contig);
+        }
+    }
+    if (bcf_hdr_sync(slim) != 0) {
+        bcf_hdr_destroy(slim);
+        die("failed to finalize compact genotype contig header");
+    }
+    return slim;
+}
+
 static bool ends_with(const std::string& value, const char* suffix) {
     size_t n = std::strlen(suffix);
     return value.size() >= n &&
@@ -3458,6 +3531,79 @@ static bool init_synced_region_reader(
 
     *out = reader;
     return true;
+}
+
+static bool probe_fast_text_region_reader(
+    const char* path,
+    const std::string& query,
+    const char* label,
+    const char* query_label = nullptr
+) {
+    const char* shown_query = query_label ? query_label : query.c_str();
+    if (!looks_indexable_variant_path(path)) {
+        std::fprintf(
+            stderr,
+            "WARNING: %s is not bgzip-compressed VCF/BCF; falling back to scan/filter.\n",
+            label
+        );
+        return false;
+    }
+
+    tbx_t* tbx = tbx_index_load3(path, nullptr, HTS_IDX_SILENT_FAIL);
+    if (!tbx) {
+        std::fprintf(
+            stderr,
+            "WARNING: cannot use indexed %s reader for %s; falling back to scan/filter.\n",
+            label,
+            shown_query
+        );
+        return false;
+    }
+
+    std::vector<std::string> queries = split_region_queries(query);
+    for (const std::string& region_query : queries) {
+        hts_itr_t* itr = tbx_itr_querys(tbx, region_query.c_str());
+        if (!itr) {
+            std::fprintf(
+                stderr,
+                "WARNING: cannot set %s region %s; falling back to scan/filter.\n",
+                label,
+                shown_query
+            );
+            tbx_destroy(tbx);
+            return false;
+        }
+        tbx_itr_destroy(itr);
+    }
+    tbx_destroy(tbx);
+    return true;
+}
+
+static bool init_indexed_region_reader(
+    bcf_srs_t** out,
+    bool fast_text,
+    const char* path,
+    const std::string& query,
+    const char* label,
+    const char* query_label = nullptr,
+    const std::string* decode_samples = nullptr
+) {
+    if (fast_text) {
+        return probe_fast_text_region_reader(
+            path,
+            query,
+            label,
+            query_label
+        );
+    }
+    return init_synced_region_reader(
+        out,
+        path,
+        query,
+        label,
+        query_label,
+        decode_samples
+    );
 }
 
 static int read_next_synced_record(bcf_srs_t* reader, bcf_hdr_t* hdr, bcf1_t*& rec) {
@@ -3636,6 +3782,7 @@ int main(int argc, char** argv) {
         die("n_ancestries must be in [1, 32]");
     }
 
+    report_stage(out_prefix, "opening input files and reading headers");
     htsFile* gfp = bcf_open(geno_vcf, "r");
     htsFile* afp = bcf_open(flare_vcf, "r");
 
@@ -3658,12 +3805,19 @@ int main(int argc, char** argv) {
     bool fast_genotype_text = genotype_format && genotype_format->format == vcf;
     bool fast_flare_text = flare_format && flare_format->format == vcf;
 
+    report_stage(out_prefix, "matching genotype and FLARE samples");
     SampleSelection sample_selection = build_sample_selection(ghdr, ahdr, keep_path);
     int genotype_text_n_samples = sample_selection.genotype_raw_sample_count;
     int flare_text_n_samples = sample_selection.flare_raw_sample_count;
     sample_selection.genotype_text_indices = sample_selection.genotype_raw_indices;
     sample_selection.flare_text_indices = sample_selection.flare_raw_indices;
-    apply_decode_sample_subsets(ghdr, ahdr, sample_selection);
+    apply_decode_sample_subsets(
+        ghdr,
+        ahdr,
+        sample_selection,
+        fast_genotype_text,
+        fast_flare_text
+    );
     int genotype_raw_n_samples = sample_selection.genotype_raw_sample_count;
     int flare_raw_n_samples = sample_selection.flare_raw_sample_count;
     int n_samples = static_cast<int>(sample_selection.sample_ids.size());
@@ -3671,6 +3825,7 @@ int main(int argc, char** argv) {
         die("retained zero samples");
     }
 
+    report_stage(out_prefix, "loading variant filters");
     BedIntervals bed = load_bed_intervals(extract_bed_path, region);
     ExtractSites extract_sites = load_extract_sites(extract_path, region);
     if (extract_sites.active) {
@@ -3704,6 +3859,7 @@ int main(int argc, char** argv) {
     }
     add_contigs_from_extract_if_missing(ghdr, extract_sites, "genotype");
 
+    report_stage(out_prefix, "initializing indexed input readers");
     bcf_srs_t* genotype_region_reader = nullptr;
     bcf_srs_t* flare_region_reader = nullptr;
     bool skip_genotype_loop = false;
@@ -3741,8 +3897,9 @@ int main(int argc, char** argv) {
                 "No --extract positions overlap the selected conversion scope; skipping genotype scan.\n"
             );
         } else {
-            bool have_genotype_extract_reader = init_synced_region_reader(
+            bool have_genotype_extract_reader = init_indexed_region_reader(
                 &genotype_region_reader,
+                fast_genotype_text,
                 geno_vcf,
                 genotype_query,
                 "genotype VCF",
@@ -3784,8 +3941,9 @@ int main(int argc, char** argv) {
                 bed,
                 n_bed_contigs
             );
-            bool have_genotype_bed_reader = init_synced_region_reader(
+            bool have_genotype_bed_reader = init_indexed_region_reader(
                 &genotype_region_reader,
+                fast_genotype_text,
                 geno_vcf,
                 genotype_query,
                 "genotype VCF",
@@ -3819,8 +3977,9 @@ int main(int argc, char** argv) {
                 bed,
                 n_bed_contigs
             );
-            bool have_flare_bed_reader = init_synced_region_reader(
+            bool have_flare_bed_reader = init_indexed_region_reader(
                 &flare_region_reader,
+                fast_flare_text,
                 flare_vcf,
                 flare_query,
                 "FLARE VCF",
@@ -3845,8 +4004,9 @@ int main(int argc, char** argv) {
         }
     } else if (!extract_sites.active && region.active) {
         std::string flare_query = build_flare_region_query(region);
-        bool have_genotype_region_reader = init_synced_region_reader(
+        bool have_genotype_region_reader = init_indexed_region_reader(
             &genotype_region_reader,
+            fast_genotype_text,
             geno_vcf,
             region.label,
             "genotype VCF",
@@ -3859,8 +4019,9 @@ int main(int argc, char** argv) {
             progress_scope = region.label;
             genotype_indexed_query = region.label;
         }
-        bool have_flare_region_reader = init_synced_region_reader(
+        bool have_flare_region_reader = init_indexed_region_reader(
             &flare_region_reader,
+            fast_flare_text,
             flare_vcf,
             flare_query,
             "FLARE VCF",
@@ -3896,8 +4057,9 @@ int main(int argc, char** argv) {
         }
     } else if (region.active) {
         std::string flare_query = build_flare_region_query(region);
-        bool have_flare_region_reader = init_synced_region_reader(
+        bool have_flare_region_reader = init_indexed_region_reader(
             &flare_region_reader,
+            fast_flare_text,
             flare_vcf,
             flare_query,
             "FLARE VCF",
@@ -3926,8 +4088,9 @@ int main(int argc, char** argv) {
             region,
             n_extract_contigs
         );
-        bool have_flare_extract_reader = init_synced_region_reader(
+        bool have_flare_extract_reader = init_indexed_region_reader(
             &flare_region_reader,
+            fast_flare_text,
             flare_vcf,
             flare_query,
             "FLARE VCF",
@@ -3996,6 +4159,15 @@ int main(int argc, char** argv) {
             flare_text_raw_to_output[static_cast<size_t>(raw_i)] = static_cast<int>(out_i);
         }
     }
+    if (fast_genotype_text) {
+        bcf_hdr_t* compact_ghdr = make_contig_only_header(ghdr);
+        bcf_hdr_destroy(ghdr);
+        ghdr = compact_ghdr;
+    }
+    if (fast_flare_text) {
+        bcf_hdr_destroy(ahdr);
+        ahdr = nullptr;
+    }
     if (fast_genotype_text || fast_flare_text) {
         std::fprintf(
             stderr,
@@ -4041,6 +4213,7 @@ int main(int argc, char** argv) {
     std::string samples_path = std::string(out_prefix) + ".samples";
     std::string meta_path = std::string(out_prefix) + ".meta";
 
+    report_stage(out_prefix, "opening output files");
     FILE* common_fp = open_output_or_die(common_bin, "wb");
     FILE* common_mks_fp = open_output_or_die(common_mks, "wb");
     FILE* common_idx_fp = open_output_or_die(common_idx, "wb");
@@ -4064,6 +4237,7 @@ int main(int argc, char** argv) {
     write_magic_header(rare_idx_fp, rare_idx_magic);
     write_magic_header(anc_idx_fp, anc_idx_magic);
 
+    report_stage(out_prefix, "writing sample and metadata sidecars");
     write_sidecars(
         samples_path,
         meta_path,
@@ -4079,6 +4253,7 @@ int main(int argc, char** argv) {
         extract_path.empty() ? nullptr : extract_path.c_str(),
         bed
     );
+    report_stage(out_prefix, "finished writing sample and metadata sidecars");
 
     bcf1_t* grec_storage = bcf_init();
     bcf1_t* arec_storage = bcf_init();
@@ -4181,6 +4356,7 @@ int main(int argc, char** argv) {
     };
     bool has_lai_record = false;
     if (!skip_genotype_loop) {
+        report_stage(out_prefix, "reading initial FLARE ancestry record");
         has_lai_record = next_lai_record();
     }
     if (!has_lai_record && !skip_genotype_loop && region.active &&
@@ -4229,6 +4405,9 @@ int main(int argc, char** argv) {
     int64_t ancestry_state_start = 0;
     int64_t ancestry_state_end = 0;
 
+    if (!skip_genotype_loop) {
+        report_stage(out_prefix, "scanning genotype records");
+    }
     while (!skip_genotype_loop && next_genotype_record() == 0) {
         progress.record_scanned();
 
@@ -4701,14 +4880,15 @@ int main(int argc, char** argv) {
         n_words
     );
 
+    report_stage(out_prefix, "finalizing output files");
     bcf_destroy(grec_storage);
     bcf_destroy(arec_storage);
     if (fast_genotype_text) destroy_fast_text_reader(fast_genotype_reader);
     if (fast_flare_text) destroy_fast_text_reader(fast_flare_reader);
     if (genotype_region_reader) bcf_sr_destroy(genotype_region_reader);
     if (flare_region_reader) bcf_sr_destroy(flare_region_reader);
-    bcf_hdr_destroy(ghdr);
-    bcf_hdr_destroy(ahdr);
+    if (ghdr) bcf_hdr_destroy(ghdr);
+    if (ahdr) bcf_hdr_destroy(ahdr);
     bcf_close(gfp);
     bcf_close(afp);
 
@@ -4733,6 +4913,7 @@ int main(int argc, char** argv) {
 
     progress.finish(global_variant_index, common_index, rare_index);
 
+    report_stage(out_prefix, "conversion complete");
     std::fprintf(stderr, "Finished.\n");
     std::fprintf(stderr, "Global split variants: %u\n", global_variant_index);
     std::fprintf(stderr, "Common variants:       %llu\n", static_cast<unsigned long long>(common_index));
