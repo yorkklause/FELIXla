@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 
-from run_keep_extract_intense import build_inputs, read_meta
+from run_keep_extract_intense import build_inputs, read_ancestry_blocks, read_meta
 
 
 SUFFIXES = [
@@ -266,6 +266,56 @@ def main() -> int:
         if complement_meta.get("concat_bed_1") != f"^{exclude_middle}":
             fail(f"complement BED provenance is wrong: {complement_meta}")
 
+        whole_first_bed = work / "coalesce.whole.bed"
+        whole_first_bed.write_text("chr1\t0\t250\n")
+        whole_first_list = work / "coalesce.whole.list"
+        write_bed_list(whole_first_list, [(source_a, whole_first_bed, False)])
+        whole_first = work / "coalesce.whole.merged"
+        concat_plink(felixla, whole_first_list, whole_first)
+
+        coalesce_left_bed = work / "coalesce.left.bed"
+        coalesce_right_bed = work / "coalesce.right.bed"
+        coalesce_left_bed.write_text("chr1\t0\t100\n")
+        coalesce_right_bed.write_text("chr1\t100\t250\n")
+        coalesce_list = work / "coalesce.adjacent.list"
+        write_bed_list(
+            coalesce_list,
+            [
+                (source_b, coalesce_right_bed, False),
+                (source_a, coalesce_left_bed, False),
+            ],
+        )
+        coalesced = work / "coalesce.adjacent.merged"
+        concat_plink(felixla, coalesce_list, coalesced)
+        compare_binary_prefixes(whole_first, coalesced)
+        coalesced_blocks = read_ancestry_blocks(coalesced)
+        coalesced_ranges = [
+            (block["chrom"], block["start"], block["end"])
+            for block in coalesced_blocks
+        ]
+        if coalesced_ranges != [("chr1", 1, 250)]:
+            fail(f"adjacent identical ancestry pieces were not collapsed: {coalesced_ranges}")
+        coalesced_meta = read_meta(coalesced)
+        if coalesced_meta.get("concat_ancestry_block_simplification") != "adjacent-identical-masks":
+            fail(f"ancestry simplification provenance is missing: {coalesced_meta}")
+        if coalesced_meta.get("concat_ancestry_block_pieces_collapsed") != "1":
+            fail(f"wrong ancestry collapse count: {coalesced_meta}")
+
+        gapped_bed = work / "coalesce.gapped.bed"
+        gapped_bed.write_text("chr1\t0\t50\nchr1\t100\t150\n")
+        gapped_list = work / "coalesce.gapped.list"
+        write_bed_list(gapped_list, [(source_a, gapped_bed, False)])
+        gapped = work / "coalesce.gapped.merged"
+        concat_plink(felixla, gapped_list, gapped)
+        gapped_ranges = [
+            (block["chrom"], block["start"], block["end"])
+            for block in read_ancestry_blocks(gapped)
+        ]
+        if gapped_ranges != [("chr1", 1, 50), ("chr1", 101, 150)]:
+            fail(f"ancestry simplification crossed an unselected BED gap: {gapped_ranges}")
+        if read_meta(gapped).get("concat_ancestry_block_pieces_collapsed") != "0":
+            fail("gapped ancestry blocks were incorrectly reported as collapsed")
+
         striped_a = work / "striped.a.bed"
         striped_b = work / "striped.b.bed"
         striped_rows = {striped_a: [], striped_b: []}
@@ -284,9 +334,12 @@ def main() -> int:
         concat_plink(felixla, striped_list, striped)
         striped_meta = read_meta(striped)
         direct_meta_for_bed = read_meta(direct)
-        for key in ["global_variants", "common_variants", "rare_variants"]:
+        for key in ["global_variants", "common_variants", "rare_variants", "ancestry_blocks"]:
             if striped_meta[key] != direct_meta_for_bed[key]:
                 fail(f"striped BED merge changed {key}: {striped_meta}")
+        if int(striped_meta.get("concat_ancestry_block_pieces_collapsed", "0")) <= 0:
+            fail(f"striped BED merge did not collapse ancestry pieces: {striped_meta}")
+        compare_binary_prefixes(direct, striped)
         striped_vcf = export_prefix(felixla, striped, work / "bed.striped.export")
         direct_bed_vcf = export_prefix(felixla, direct, work / "bed.direct.export")
         striped_comparison = run(
@@ -341,6 +394,10 @@ def main() -> int:
                 resource.setrlimit(resource.RLIMIT_NOFILE, original_nofile)
         if can_raise and "raised open-file soft limit" not in many_result.stderr:
             fail(f"many-input BED merge did not raise its file limit:\n{many_result.stderr}")
+        many_meta = read_meta(many)
+        if many_meta["ancestry_blocks"] != direct_meta_for_bed["ancestry_blocks"]:
+            fail(f"10-way BED merge did not simplify ancestry blocks: {many_meta}")
+        compare_binary_prefixes(direct, many)
         many_vcf = export_prefix(felixla, many, work / "bed.many.export")
         many_comparison = run(
             [str(felixla), "--compare-vcfs", str(direct_bed_vcf), str(many_vcf)]

@@ -741,6 +741,7 @@ struct MergeState {
     uint64_t common_variants = 0;
     uint64_t rare_variants = 0;
     uint64_t ancestry_blocks = 0;
+    uint64_t ancestry_block_pieces_collapsed = 0;
     std::unordered_map<std::string, int64_t> last_variant_pos;
     std::unordered_map<std::string, int64_t> last_block_end;
 };
@@ -1527,6 +1528,7 @@ public:
     }
 
     const std::vector<uint8_t>& payload_buffer() const { return buffer_; }
+    uint64_t payload_fingerprint() const { return payload_fingerprint_; }
 
     void mark_emitted(uint32_t new_block_id) {
         if (!current_) fail("internal ancestry stream emit error for " + input_.prefix);
@@ -1562,7 +1564,8 @@ private:
         last_selected_end_ = record.end;
     }
 
-    void validate_masks(const AncRecord& record) const {
+    uint64_t validate_masks(const AncRecord& record) const {
+        uint64_t fingerprint = 1469598103934665603ULL;
         uint64_t tail_bits = input_.meta.n_haps % 64;
         uint64_t tail_mask = tail_bits == 0 ? std::numeric_limits<uint64_t>::max() :
                              ((uint64_t{1} << tail_bits) - 1);
@@ -1572,6 +1575,8 @@ private:
                 uint64_t word_index = ancestry * input_.meta.n_words + word;
                 uint64_t bits = load_u64_le(
                     buffer_.data() + checked_size_t(word_index * 8, "ancestry word"));
+                fingerprint ^= bits;
+                fingerprint *= 1099511628211ULL;
                 if ((combined & bits) != 0) {
                     fail("overlapping ancestry masks in block " +
                          std::to_string(record.block_id) + " of " + input_.prefix);
@@ -1585,6 +1590,7 @@ private:
                      std::to_string(record.block_id) + " of " + input_.prefix);
             }
         }
+        return fingerprint;
     }
 
     void read_source_block() {
@@ -1617,7 +1623,7 @@ private:
         local_last_end_[record.chr] = record.end;
 
         payload_.read(buffer_.data(), buffer_.size());
-        validate_masks(record);
+        payload_fingerprint_ = validate_masks(record);
         blocks_.push_back(record);
         mappings_.emplace_back();
         coverage_[record.chr].push_back({record.start, record.end});
@@ -1664,6 +1670,7 @@ private:
     BinaryInput idx_;
     BinaryInput payload_;
     std::vector<uint8_t> buffer_;
+    uint64_t payload_fingerprint_ = 0;
     std::vector<AncRecord> blocks_;
     IntervalMap coverage_;
     std::vector<std::vector<OutputBlockPiece>> mappings_;
@@ -1695,6 +1702,13 @@ struct AncestryHeapGreater {
         if (a.end != b.end) return a.end > b.end;
         return a.source > b.source;
     }
+};
+
+struct PendingOutputAncestryBlock {
+    AncRecord record;
+    uint32_t block_id = 0;
+    uint64_t payload_fingerprint = 0;
+    std::vector<uint8_t> payload;
 };
 
 AncestryHeapNode ancestry_heap_node(
@@ -1736,6 +1750,20 @@ void merge_bed_ancestry(
     bool have_previous = false;
     size_t previous_rank = 0;
     int64_t previous_end = 0;
+    std::optional<PendingOutputAncestryBlock> pending;
+    auto flush_pending = [&]() {
+        if (!pending) return;
+        uint64_t new_payload = output.anc_bin.tell();
+        output.anc_bin.write(pending->payload.data(), pending->payload.size());
+        uint64_t new_marker = output.anc_mks.tell();
+        write_anc_marker(
+            output.anc_mks, pending->record, pending->block_id, new_payload);
+        output.anc_idx.write_u32(pending->block_id);
+        output.anc_idx.write_u64(new_marker);
+        output.anc_idx.write_u64(new_payload);
+        state.last_block_end[pending->record.chr] = pending->record.end;
+        pending.reset();
+    };
     while (!heap.empty()) {
         AncestryHeapNode node = heap.top();
         heap.pop();
@@ -1747,31 +1775,39 @@ void merge_bed_ancestry(
             fail("selected BED regions produce overlapping or unsorted ancestry blocks on " +
                  record.chr + " at " + std::to_string(record.start));
         }
-        if (state.ancestry_blocks >= std::numeric_limits<uint32_t>::max()) {
-            fail("concatenated ancestry block count exceeds uint32_t limit");
-        }
-        uint32_t new_block = static_cast<uint32_t>(state.ancestry_blocks);
-        uint64_t new_payload = output.anc_bin.tell();
+
         const std::vector<uint8_t>& payload = stream.payload_buffer();
-        output.anc_bin.write(payload.data(), payload.size());
-        uint64_t new_marker = output.anc_mks.tell();
-        write_anc_marker(output.anc_mks, record, new_block, new_payload);
-        output.anc_idx.write_u32(new_block);
-        output.anc_idx.write_u64(new_marker);
-        output.anc_idx.write_u64(new_payload);
-        std::string emitted_chr = record.chr;
-        int64_t emitted_end = record.end;
+        bool adjacent_to_pending =
+            pending && pending->record.chr == record.chr &&
+            pending->record.end < std::numeric_limits<int64_t>::max() &&
+            record.start == pending->record.end + 1;
+        uint32_t new_block = 0;
+        if (adjacent_to_pending &&
+            pending->payload_fingerprint == stream.payload_fingerprint() &&
+            pending->payload == payload) {
+            new_block = pending->block_id;
+            pending->record.end = record.end;
+            ++state.ancestry_block_pieces_collapsed;
+        } else {
+            flush_pending();
+            if (state.ancestry_blocks >= std::numeric_limits<uint32_t>::max()) {
+                fail("concatenated ancestry block count exceeds uint32_t limit");
+            }
+            new_block = static_cast<uint32_t>(state.ancestry_blocks);
+            pending = PendingOutputAncestryBlock{
+                record, new_block, stream.payload_fingerprint(), payload};
+            ++state.ancestry_blocks;
+        }
         stream.mark_emitted(new_block);
-        ++state.ancestry_blocks;
-        state.last_block_end[emitted_chr] = emitted_end;
         have_previous = true;
         previous_rank = node.chromosome_rank;
-        previous_end = emitted_end;
+        previous_end = record.end;
 
         if (stream.next()) {
             heap.push(ancestry_heap_node(node.source, stream, chromosome_ranks));
         }
     }
+    flush_pending();
 }
 
 class BedVariantStream {
@@ -2228,6 +2264,9 @@ void write_meta_file(
     if (beds) {
         out << "concat_bed_coordinates\t0-based-half-open\n";
         out << "concat_bed_overlap_check\teffective-selections-disjoint\n";
+        out << "concat_ancestry_block_simplification\tadjacent-identical-masks\n";
+        out << "concat_ancestry_block_pieces_collapsed\t"
+            << state.ancestry_block_pieces_collapsed << '\n';
     }
     out.close();
     if (!out) fail("failed writing " + path);
@@ -2583,6 +2622,10 @@ int run_concat(const std::string& list_path, const std::string& out_prefix) {
               << "Common variants:       " << state.common_variants << '\n'
               << "Rare variants:         " << state.rare_variants << '\n'
               << "Ancestry blocks:       " << state.ancestry_blocks << '\n';
+    if (prefix_list.bed_mode) {
+        std::cerr << "Ancestry pieces collapsed: "
+                  << state.ancestry_block_pieces_collapsed << '\n';
+    }
     return 0;
 }
 

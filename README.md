@@ -301,6 +301,14 @@ payloads are therefore read twice intentionally: once to establish that the
 whole list is valid, then once to produce output. The temporary prefix is
 published with `.meta` last, after the merge completes.
 
+BED-filtered merging also simplifies ancestry blocks created by chunk or BED
+boundaries. Two pieces are collapsed only when they are on the same chromosome,
+their coordinates are directly adjacent, and every ancestry haplotype-mask byte
+is identical. Pieces separated by even one unselected base remain distinct, so
+an output block never bridges a BED gap. Metadata records the rule in
+`concat_ancestry_block_simplification` and the number of removed boundaries in
+`concat_ancestry_block_pieces_collapsed`.
+
 Newly written FELIXla metadata includes `global_variants`, `common_variants`,
 `rare_variants`, and `ancestry_blocks`. Concat cross-checks these declarations
 when present. Older format-version-1 prefixes without the four count fields
