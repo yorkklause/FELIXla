@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import resource
 import shutil
 import struct
 import subprocess
@@ -76,6 +77,26 @@ def write_list(path: pathlib.Path, prefixes: list[pathlib.Path], *, meta_first: 
     for i, prefix in enumerate(prefixes):
         rows.append(str(prefix) + (".meta" if meta_first and i == 0 else ""))
     path.write_text("\n".join(rows) + "\n")
+
+
+def write_bed_list(
+    path: pathlib.Path,
+    rows: list[tuple[pathlib.Path, pathlib.Path, bool]],
+) -> None:
+    lines = ["# FELIXla prefix-tab-BED merge", ""]
+    for prefix, bed, complement in rows:
+        lines.append(f"{prefix}\t{'^' if complement else ''}{bed}")
+    path.write_text("\n".join(lines) + "\n")
+
+
+def compare_binary_prefixes(expected: pathlib.Path, observed: pathlib.Path) -> None:
+    for suffix in SUFFIXES:
+        if suffix == ".meta":
+            continue
+        expected_bytes = pathlib.Path(str(expected) + suffix).read_bytes()
+        observed_bytes = pathlib.Path(str(observed) + suffix).read_bytes()
+        if expected_bytes != observed_bytes:
+            fail(f"BED merge changed binary component {suffix}")
 
 
 def clone_prefix(source: pathlib.Path, target: pathlib.Path) -> None:
@@ -198,6 +219,237 @@ def main() -> int:
         _samples, _records, _ancestry, genotype, flare = build_inputs(work)
         direct = work / "direct"
         build_prefix(felixla, genotype, flare, direct)
+
+        source_a = work / "bed.source.a"
+        source_b = work / "bed.source.b"
+        clone_prefix(direct, source_a)
+        clone_prefix(direct, source_b)
+
+        include_a = work / "include.a.bed"
+        include_a.write_text(
+            "track name=source_a\n"
+            "chr2\t0\t1000\tall_chr2\n"
+            "chr1\t750\t1000\tright_2\n"
+            "chr1\t0\t250\tleft\n"
+            "chr1\t500\t750\tright_1\n"
+        )
+        include_b = work / "include.b.bed"
+        include_b.write_text("chr1\t250\t500\tmiddle\n")
+        interleaved_list = work / "bed.interleaved.list"
+        # Deliberately list the middle source first; output must still be genomic.
+        write_bed_list(
+            interleaved_list,
+            [(source_b, include_b, False), (source_a, include_a, False)],
+        )
+        interleaved = work / "bed.interleaved.merged"
+        interleaved_result = concat_plink(felixla, interleaved_list, interleaved)
+        if "exact sample IDs/order verified" not in interleaved_result.stderr:
+            fail(f"BED concat did not report exact sample verification:\n{interleaved_result.stderr}")
+        compare_binary_prefixes(direct, interleaved)
+        interleaved_meta = read_meta(interleaved)
+        if interleaved_meta.get("concat_bed_coordinates") != "0-based-half-open":
+            fail(f"BED coordinate provenance is missing: {interleaved_meta}")
+        if interleaved_meta.get("concat_bed_overlap_check") != "effective-selections-disjoint":
+            fail(f"BED overlap provenance is missing: {interleaved_meta}")
+
+        exclude_middle = work / "exclude.middle.bed"
+        exclude_middle.write_text("chr1\t250\t500\n")
+        complement_list = work / "bed.complement.list"
+        write_bed_list(
+            complement_list,
+            [(source_a, exclude_middle, True), (source_b, include_b, False)],
+        )
+        complement_merged = work / "bed.complement.merged"
+        concat_plink(felixla, complement_list, complement_merged)
+        compare_binary_prefixes(direct, complement_merged)
+        complement_meta = read_meta(complement_merged)
+        if complement_meta.get("concat_bed_1") != f"^{exclude_middle}":
+            fail(f"complement BED provenance is wrong: {complement_meta}")
+
+        striped_a = work / "striped.a.bed"
+        striped_b = work / "striped.b.bed"
+        striped_rows = {striped_a: [], striped_b: []}
+        for chrom in ["chr2", "chr1"]:
+            for start0 in range(0, 1000, 50):
+                owner = striped_a if (start0 // 50) % 2 == 0 else striped_b
+                striped_rows[owner].append(f"{chrom}\t{start0}\t{start0 + 50}")
+        for path, rows in striped_rows.items():
+            path.write_text("\n".join(reversed(rows)) + "\n")
+        striped_list = work / "bed.striped.list"
+        write_bed_list(
+            striped_list,
+            [(source_b, striped_b, False), (source_a, striped_a, False)],
+        )
+        striped = work / "bed.striped.merged"
+        concat_plink(felixla, striped_list, striped)
+        striped_meta = read_meta(striped)
+        direct_meta_for_bed = read_meta(direct)
+        for key in ["global_variants", "common_variants", "rare_variants"]:
+            if striped_meta[key] != direct_meta_for_bed[key]:
+                fail(f"striped BED merge changed {key}: {striped_meta}")
+        striped_vcf = export_prefix(felixla, striped, work / "bed.striped.export")
+        direct_bed_vcf = export_prefix(felixla, direct, work / "bed.direct.export")
+        striped_comparison = run(
+            [str(felixla), "--compare-vcfs", str(direct_bed_vcf), str(striped_vcf)]
+        )
+        if "Differences:             0" not in striped_comparison.stdout:
+            fail(f"striped BED merge changed exported genotypes:\n{striped_comparison.stdout}")
+        compare_queries(
+            felixla,
+            direct,
+            striped,
+            int(direct_meta_for_bed["global_variants"]),
+            work,
+        )
+
+        many_sources: list[pathlib.Path] = []
+        many_beds: list[pathlib.Path] = []
+        many_rows: list[list[str]] = [[] for _ in range(10)]
+        for chrom in ["chr1", "chr2"]:
+            for segment, start0 in enumerate(range(0, 1000, 50)):
+                owner = segment % len(many_rows)
+                many_rows[owner].append(f"{chrom}\t{start0}\t{start0 + 50}")
+        for index, rows in enumerate(many_rows):
+            source = work / f"bed.many.source.{index:02d}"
+            bed = work / f"bed.many.{index:02d}.bed"
+            clone_prefix(direct, source)
+            bed.write_text("\n".join(reversed(rows)) + "\n")
+            many_sources.append(source)
+            many_beds.append(bed)
+        many_list = work / "bed.many.list"
+        write_bed_list(
+            many_list,
+            list(reversed([
+                (source, bed, False)
+                for source, bed in zip(many_sources, many_beds)
+            ])),
+        )
+        original_nofile = resource.getrlimit(resource.RLIMIT_NOFILE)
+        lowered_nofile = (
+            64
+            if original_nofile[0] == resource.RLIM_INFINITY
+            else min(original_nofile[0], 64)
+        )
+        can_raise = original_nofile[1] == resource.RLIM_INFINITY or original_nofile[1] >= 76
+        if can_raise:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (lowered_nofile, original_nofile[1]))
+        try:
+            many = work / "bed.many.merged"
+            many_result = concat_plink(felixla, many_list, many)
+        finally:
+            if can_raise:
+                resource.setrlimit(resource.RLIMIT_NOFILE, original_nofile)
+        if can_raise and "raised open-file soft limit" not in many_result.stderr:
+            fail(f"many-input BED merge did not raise its file limit:\n{many_result.stderr}")
+        many_vcf = export_prefix(felixla, many, work / "bed.many.export")
+        many_comparison = run(
+            [str(felixla), "--compare-vcfs", str(direct_bed_vcf), str(many_vcf)]
+        )
+        if "Differences:             0" not in many_comparison.stdout:
+            fail(f"10-way BED merge changed exported genotypes:\n{many_comparison.stdout}")
+
+        overlap_a = work / "overlap.a.bed"
+        overlap_b = work / "overlap.b.bed"
+        overlap_a.write_text("chr1\t0\t500\n")
+        overlap_b.write_text("chr1\t250\t750\n")
+        bed_overlap_list = work / "bed.overlap.list"
+        write_bed_list(
+            bed_overlap_list,
+            [(source_a, overlap_a, False), (source_b, overlap_b, False)],
+        )
+        bed_overlap_result = concat_plink(
+            felixla, bed_overlap_list, work / "bed.overlap.out", fail_ok=True
+        )
+        overlap_report = bed_overlap_result.stdout + bed_overlap_result.stderr
+        if "effective BED selection overlaps" not in overlap_report:
+            fail(f"overlapping BED selections were not diagnosed:\n{overlap_report}")
+        for source in [source_a, source_b]:
+            if str(source) not in overlap_report:
+                fail(f"BED overlap report omitted {source}:\n{overlap_report}")
+
+        duplicate_bed = work / "duplicate.within.bed"
+        duplicate_bed.write_text("chr1\t0\t300\nchr1\t200\t400\n")
+        duplicate_bed_list = work / "bed.duplicate.list"
+        write_bed_list(
+            duplicate_bed_list,
+            [(source_a, duplicate_bed, False), (source_b, include_b, False)],
+        )
+        duplicate_result = concat_plink(
+            felixla, duplicate_bed_list, work / "bed.duplicate.out", fail_ok=True
+        )
+        if "overlaps or duplicates an earlier BED interval" not in (
+            duplicate_result.stdout + duplicate_result.stderr
+        ):
+            fail("within-BED overlap was not rejected during preflight")
+
+        unselected_corrupt = work / "bed.unselected.corrupt"
+        clone_prefix(direct, unselected_corrupt)
+        corrupt_binary_tail(pathlib.Path(str(unselected_corrupt) + ".ancblock.bin"))
+        first_quarter = work / "first.quarter.bed"
+        first_quarter.write_text("chr1\t0\t250\n")
+        unselected_corrupt_list = work / "bed.unselected.corrupt.list"
+        write_bed_list(
+            unselected_corrupt_list,
+            [
+                (unselected_corrupt, first_quarter, False),
+                (source_b, include_b, False),
+            ],
+        )
+        unselected_corrupt_result = concat_plink(
+            felixla,
+            unselected_corrupt_list,
+            work / "bed.unselected.corrupt.out",
+            fail_ok=True,
+        )
+        if "unexpected EOF" not in (
+            unselected_corrupt_result.stdout + unselected_corrupt_result.stderr
+        ):
+            fail("BED mode did not validate a corrupted payload outside its selected region")
+
+        missing_bed = work / "does.not.exist.bed"
+        malformed_bed = work / "malformed.bed"
+        malformed_bed.write_text("chr1\t100\n")
+        bad_beds_list = work / "bed.multiple_bad.list"
+        write_bed_list(
+            bad_beds_list,
+            [(source_a, missing_bed, False), (source_b, malformed_bed, False)],
+        )
+        bad_beds_result = concat_plink(
+            felixla, bad_beds_list, work / "bed.multiple_bad.out", fail_ok=True
+        )
+        bad_beds_report = bad_beds_result.stdout + bad_beds_result.stderr
+        if "found 2 problematic prefix(es)" not in bad_beds_report:
+            fail(f"multiple bad BEDs were not aggregated:\n{bad_beds_report}")
+        for expected in ["cannot open BED", "must contain at least three BED columns"]:
+            if expected not in bad_beds_report:
+                fail(f"bad BED aggregate report omitted {expected!r}:\n{bad_beds_report}")
+
+        sample_bad = work / "bed.sample.bad"
+        clone_prefix(source_b, sample_bad)
+        sample_bad_path = pathlib.Path(str(sample_bad) + ".samples")
+        sample_bad_rows = sample_bad_path.read_text().splitlines()
+        sample_bad_rows[0], sample_bad_rows[1] = sample_bad_rows[1], sample_bad_rows[0]
+        sample_bad_path.write_text("\n".join(sample_bad_rows) + "\n")
+        sample_bad_list = work / "bed.sample.bad.list"
+        write_bed_list(
+            sample_bad_list,
+            [(source_a, include_a, False), (sample_bad, include_b, False)],
+        )
+        sample_bad_result = concat_plink(
+            felixla, sample_bad_list, work / "bed.sample.bad.out", fail_ok=True
+        )
+        if "sample IDs/order differ" not in (sample_bad_result.stdout + sample_bad_result.stderr):
+            fail("BED concat accepted mismatched sample order")
+
+        mixed_list = work / "bed.mixed_columns.list"
+        mixed_list.write_text(f"{source_a}\t{include_a}\n{source_b}\n")
+        mixed_result = concat_plink(
+            felixla, mixed_list, work / "bed.mixed_columns.out", fail_ok=True
+        )
+        if "mixes one-column and prefix-tab-BED rows" not in (
+            mixed_result.stdout + mixed_result.stderr
+        ):
+            fail("mixed one-column/two-column merge list was not rejected")
 
         regions = [
             "chr1:1-250",

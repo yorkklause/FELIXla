@@ -59,7 +59,7 @@ Primary input flags:
   --rfmix-msp PATH              RFMix MSP file.
   --tractor-dosage-vcf PATH     TRACTOR dosage VCF/BCF with ANC#/DS# fields.
   --felixla PREFIX              Existing FELIXla/tractor_hybrid prefix.
-  --pmerge-list FILE            FELIXla prefixes to concatenate, one per line.
+  --pmerge-list FILE            One prefix per line, or prefix<TAB>[^]BED for filtered merge.
   --vcf PATH                    VCF input for --admixture; may be repeated.
 
 Action flags:

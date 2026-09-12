@@ -242,12 +242,45 @@ also accepted. Paths are interpreted relative to the working directory. The
 equivalent compatibility command is
 `felixla concat chr1.prefixes.txt chr1.merged`.
 
+To extract a different BED from each input and merge the retained records in
+genomic coordinate order, use two tab-delimited columns on every data row:
+
+```text
+# FELIXla prefix<TAB>BED
+out/source_B	beds/middle.bed
+out/source_A	beds/outer.bed
+```
+
+List order does not determine record order in this mode. For example,
+`outer.bed` may select `chr1:1-100` and `chr1:301-400`, while `middle.bed`
+selects `chr1:101-300`; the merged output is ordered `1-400`. FELIXla reads
+only the first three BED columns and interprets them as standard 0-based,
+half-open intervals. Empty, malformed, duplicate, or overlapping intervals
+within one BED are rejected; directly adjacent intervals are coalesced.
+
+Prefix the BED path with `^` to select its complement, following the bcftools
+targets convention:
+
+```text
+out/source_A	^beds/middle.bed
+out/source_B	beds/middle.bed
+```
+
+For `^BED`, the selection universe is the ancestry-block coverage actually
+present in that FELIXla prefix, not an inferred chromosome length. Plain BED
+selections are likewise intersected with actual ancestry-block coverage.
+Before writing output, FELIXla computes every effective selection and rejects
+any overlap between inputs, reporting all affected prefixes. One-column and
+two-column rows cannot be mixed in the same list.
+
 Concatenation is a format-aware rewrite, not a bytewise `cat`. FELIXla remaps
 global variant ordinals, common/rare local indexes, ancestry block IDs, marker
 offsets, payload offsets, and sparse-carrier `pos_index` values. Prefixes must
 have identical format version, sample order, sample/haplotype/word counts,
-ancestry count, and rare threshold. Regions and actual records on the same
-chromosome must be non-overlapping and listed in increasing coordinate order.
+ancestry count, and rare threshold. Sample IDs and their order must match
+exactly, including in BED-filtered mode. For a one-column list, regions and
+actual records on the same chromosome must be non-overlapping and listed in
+increasing coordinate order.
 
 Concatenation runs in two strict phases. The first phase validates every listed
 prefix without opening any output file. It does not stop after one bad prefix:
@@ -260,9 +293,12 @@ packed ancestry/haplotype ranges, ancestry-mask partitioning, and variant/block
 ordering.
 
 Only after the complete preflight passes does the second phase reread the
-inputs, remap indexes, and write the merged data under a temporary prefix. The
-large payloads are therefore read twice intentionally: once to establish that
-the whole list is valid, then once to produce output. The temporary prefix is
+inputs, remap indexes, and write the merged data under a temporary prefix. In
+two-column mode, ancestry blocks and common/rare variants are filtered and
+coordinate-merged as bounded streams; the implementation neither materializes
+all variants in memory nor invokes bcftools or another executable. The large
+payloads are therefore read twice intentionally: once to establish that the
+whole list is valid, then once to produce output. The temporary prefix is
 published with `.meta` last, after the merge completes.
 
 Newly written FELIXla metadata includes `global_variants`, `common_variants`,
