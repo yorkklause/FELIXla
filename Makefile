@@ -112,7 +112,11 @@ HTSLIB_LIBS := -lhts
 endif
 HTSLIB_STATIC_LIBS ?= $(if $(PKG_HTSLIB_STATIC_LIBS),$(PKG_HTSLIB_STATIC_LIBS),$(BREW_HTSLIB_STATIC_LIBS))
 
-CXXFLAGS ?= -O3 -march=native -std=c++17 -Wall -Wextra -Wpedantic
+# No -march here on purpose. The hot VCF scanning loops select their AVX2
+# implementation at run time, so a baseline build keeps that speed while
+# staying runnable on any x86-64 node -- which -march=native does not, when the
+# build host is newer than the compute host.
+CXXFLAGS ?= -O3 -std=c++17 -Wall -Wextra -Wpedantic
 STATIC_FULLY ?= 0
 STATIC_LDFLAGS ?=
 ifeq ($(STATIC_FULLY),1)

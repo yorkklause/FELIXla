@@ -93,7 +93,8 @@ felixla \
   [ --region CHR:START-END ] \
   [ --keep SAMPLE_LIST ] \
   [ --extract SITE_LIST ] \
-  [ --extract-bed BED_INTERVALS ]
+  [ --extract-bed BED_INTERVALS ] \
+  [ --threads N_THREADS ]
 ```
 
 - PHASED_VCF (required): Full path and filename of a phased diploid genotype
@@ -157,6 +158,31 @@ felixla \
   one tabix request per BED row. This is intentional for large interval lists
   and remote object-store mounts. Without a usable index, it streams the input
   once and applies the same exact interval filter.
+
+- N_THREADS (optional): Number of BGZF decompression threads shared by the
+  genotype and FLARE readers. Default is `1`, which keeps one conversion in one
+  core. Decompression is the largest single cost when both inputs are
+  BGZF-compressed, so raising this is the most effective way to speed up a
+  single conversion; it does not change the output. Parsing is serial and
+  becomes the limit at roughly 8 threads. Threads and region workers compete
+  for the same cores: use `--threads` when you run few conversions at a time,
+  and leave it at `1` when you already saturate the machine with concurrent
+  region jobs.
+
+### Decompression Performance
+
+Most of a conversion's work is BGZF decompression, so the htslib FELIXla is
+linked against matters as much as FELIXla's own code. htslib uses
+[libdeflate](https://github.com/ebiggers/libdeflate) when it is present at
+build time, which is substantially faster than zlib for both inflate and the
+per-block CRC. htslib's `configure` detects it automatically, so installing the
+libdeflate development package before building htslib is enough; the published
+static release binaries are built this way.
+
+On a 50,000-sample, 2,000-variant BGZF fixture (AMD EPYC 7742), one conversion
+took 6.1 s against a zlib-only htslib, 2.6 s against a libdeflate htslib, and
+1.1 s with `--threads 8`. Verify a given build with `htsfile --version`, which
+lists libdeflate among its features.
 
 ## Planning Parallel Chunks
 
