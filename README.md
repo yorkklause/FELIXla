@@ -638,6 +638,29 @@ requested with:
 make static STATIC_FULLY=1
 ```
 
+A fully static build needs a static archive for everything htslib reports in
+`pkg-config --libs --static htslib`, so the simplest htslib to build against is
+one configured for exactly what FELIXla reads. `bz2` and `lzma` are only used
+for CRAM, and remote-URL support is not needed to read local VCF/BCF:
+
+```
+./configure --prefix=$PREFIX --with-libdeflate \
+    --disable-libcurl --disable-s3 --disable-gcs --disable-plugins \
+    --disable-bz2 --disable-lzma
+make libhts.a
+make install-pkgconfig prefix=$PREFIX
+install -d $PREFIX/lib $PREFIX/include/htslib
+install -m644 libhts.a $PREFIX/lib/
+install -m644 htslib/*.h $PREFIX/include/htslib/
+```
+
+Build the `libhts.a` target rather than the default one: `libhts.so` does not
+link against a static `libdeflate.a` or `libz.a` unless those were compiled as
+position-independent code, and FELIXla needs only the archive. Then point
+FELIXla at it with `PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig make static
+STATIC_FULLY=1`. The result is about 4 MB stripped, runs with no
+`LD_LIBRARY_PATH`, and keeps both libdeflate decompression and `--threads`.
+
 The Docker image is built from `docker/felixla/Dockerfile`. On pushes to
 `main`, GitHub Actions publishes a multi-architecture image for `linux/amd64`
 and `linux/arm64` at `ghcr.io/yorkklause/felixla:latest`.

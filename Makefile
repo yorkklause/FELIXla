@@ -78,14 +78,24 @@ PKG_LIBLZMA_STATIC_LIBS := $(PKG_LIBLZMA_STATIC_ARCHIVE) $(filter-out -llzma -pt
 endif
 PKG_LIBCURL_STATIC_LIBS := $(filter-out -lz,$(shell $(PKG_CONFIG) --libs --static libcurl 2>/dev/null))
 HTSLIB_STATIC_DEPS := $(filter-out -lhts,$(PKG_HTSLIB_STATIC_LIBS_RAW))
+# Each archive is substituted only for a library htslib actually reports
+# needing. Appending them unconditionally drags in whatever the build host
+# happens to have a .pc for -- an htslib configured --disable-libcurl would
+# still be linked against curl and its TLS, LDAP and Kerberos dependencies.
+ifneq ($(filter -ldeflate,$(HTSLIB_STATIC_DEPS)),)
 ifneq ($(strip $(PKG_LIBDEFLATE_STATIC_LIBS)),)
 HTSLIB_STATIC_DEPS := $(filter-out -ldeflate,$(HTSLIB_STATIC_DEPS)) $(PKG_LIBDEFLATE_STATIC_LIBS)
 endif
+endif
+ifneq ($(filter -llzma,$(HTSLIB_STATIC_DEPS)),)
 ifneq ($(strip $(PKG_LIBLZMA_STATIC_LIBS)),)
 HTSLIB_STATIC_DEPS := $(filter-out -llzma,$(HTSLIB_STATIC_DEPS)) $(PKG_LIBLZMA_STATIC_LIBS)
 endif
+endif
+ifneq ($(filter -lcurl,$(HTSLIB_STATIC_DEPS)),)
 ifneq ($(strip $(PKG_LIBCURL_STATIC_LIBS)),)
 HTSLIB_STATIC_DEPS := $(filter-out -lcurl,$(HTSLIB_STATIC_DEPS)) $(PKG_LIBCURL_STATIC_LIBS)
+endif
 endif
 PKG_HTSLIB_STATIC_LIBS :=
 ifneq ($(wildcard $(PKG_HTSLIB_STATIC_ARCHIVE)),)
