@@ -203,12 +203,16 @@ AMD EPYC 7742, each step leaving the output byte-identical:
 |---|---|
 | zlib htslib, stock FLARE | 6.1 s |
 | libdeflate htslib, stock FLARE | 2.5 s |
-| libdeflate htslib, slim FLARE | 0.9 s |
-| libdeflate htslib, stock FLARE, `--threads 8` | 1.1 s |
+| libdeflate htslib, stock FLARE, `--threads 8` | 1.0 s |
+| libdeflate htslib, slim FLARE | 0.7 s |
+| libdeflate htslib, slim FLARE, `--threads 4` | 0.4 s |
 
-Slimming the FLARE input and linking against libdeflate both beat spending
-eight cores on the stock input, and they compose: prefer them before
-`--threads`, which is most useful when few conversions run at once.
+Slimming the FLARE input and linking against libdeflate each beat spending
+eight cores on the stock input, and they compose, so prefer them before
+`--threads`. Slim columns are also the shape the ancestry reader decodes eight
+at a time, which is why the gain is larger than the file shrinks. After both,
+roughly 70% of what is left is decompression, so `--threads` is what remains;
+it is most useful when few conversions run at once.
 
 ## Planning Parallel Chunks
 
