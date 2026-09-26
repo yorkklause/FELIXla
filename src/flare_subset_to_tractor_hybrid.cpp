@@ -2017,6 +2017,35 @@ static size_t scan_tab_offsets_avx2(
 }
 #endif
 
+static size_t count_tabs_generic(const char* data, size_t length) {
+    size_t n = 0;
+    for (size_t i = 0; i < length; ++i) n += data[i] == '\t';
+    return n;
+}
+
+#if defined(FELIXLA_X86_SIMD)
+__attribute__((target("avx2")))
+static size_t count_tabs_avx2(const char* data, size_t length) {
+    size_t n = 0;
+    size_t i = 0;
+    const __m256i tab = _mm256_set1_epi8('\t');
+    for (; i + 32 <= length; i += 32) {
+        __m256i chunk =
+            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i));
+        n += static_cast<size_t>(__builtin_popcount(static_cast<uint32_t>(
+            _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, tab)))));
+    }
+    return n + count_tabs_generic(data + i, length - i);
+}
+#endif
+
+static size_t count_sample_field_separators(const char* data, size_t length) {
+#if defined(FELIXLA_X86_SIMD)
+    if (g_have_avx2) return count_tabs_avx2(data, length);
+#endif
+    return count_tabs_generic(data, length);
+}
+
 // Records the end offset of every tab-separated column in `data`. Returns the
 // column count, or `capacity + 1` when there are more columns than expected.
 static size_t scan_sample_field_ends(
@@ -2674,12 +2703,6 @@ static void decode_fast_flare_samples(
         out.changes.reserve(n_haps);
     }
 
-    if (scan_sample_field_ends(
-            samples, samples_length, raw_to_output.size(), decoder.field_ends) !=
-        raw_to_output.size()) {
-        die("FLARE sample count mismatch");
-    }
-
     if (decoder.identity_mapping < 0) {
         bool identity = raw_to_output.size() ==
                         static_cast<size_t>(n_output_samples);
@@ -2690,39 +2713,59 @@ static void decode_fast_flare_samples(
     }
 
     // FLARE writes every sample column at the same width, which lets the two
-    // ancestry labels be read at a fixed stride with no per-column parsing and
-    // no data-dependent branch. Anything unexpected sets `rejected` and the
-    // general loop below re-reads the record and reports the exact problem.
+    // ancestry labels be read at a fixed stride without recording where each
+    // column ended. Counting the separators and checking that one sits at every
+    // stride boundary pins the column layout exactly: the count rules out a
+    // stray separator inside a column, and the boundary checks rule out a
+    // missing one. Anything unexpected sets `rejected`, and the general loop
+    // below re-reads the record and reports the exact problem.
+    // `AN1:AN2...` and `GT:AN1:AN2...` are the two layouts FLARE emits; both
+    // put single-digit labels at a fixed offset inside the column.
+    bool ancestry_first = an1_index == 0 && an2_index == 1;
+    bool genotype_first = an1_index == 1 && an2_index == 2;
+    size_t n_columns = raw_to_output.size();
     if (!g_scalar_paths_only && decoder.identity_mapping == 1 &&
-        an1_index == 1 && an2_index == 2 && !raw_to_output.empty()) {
-        size_t n = raw_to_output.size();
-        uint32_t stride = decoder.field_ends[0] + 1;
-        uint32_t layout_mismatch = 0;
-        for (size_t i = 1; i < n; ++i) {
-            layout_mismatch |= decoder.field_ends[i] ^
-                static_cast<uint32_t>((i + 1) * stride - 1);
-        }
+        (ancestry_first || genotype_first) && n_columns > 0 &&
+        (samples_length + 1) % n_columns == 0) {
+        uint32_t stride = static_cast<uint32_t>((samples_length + 1) / n_columns);
         uint32_t width = stride - 1;
-        if (layout_mismatch == 0 && width >= 7) {
+        uint32_t label1 = ancestry_first ? 0u : 4u;
+        uint32_t label2 = label1 + 2u;
+        uint32_t min_width = label2 + 1u;
+        // A column wider than the labels themselves has a tail this never
+        // inspects, so a stray separator could hide there; counting rules that
+        // out. A column with no tail is checked byte for byte below.
+        bool layout_known =
+            width >= min_width &&
+            (width == min_width ||
+             count_sample_field_separators(samples, samples_length) ==
+                 n_columns - 1);
+        if (layout_known) {
             size_t base_changes = out.changes.size();
             unsigned limit = static_cast<unsigned>(n_ancestries);
-            char tail_delimiter = width > 7 ? ':' : '\0';
             uint32_t rejected = 0;
-            for (size_t i = 0; i < n; ++i) {
+            for (size_t i = 0; i < n_columns; ++i) {
                 const char* field = samples + i * stride;
-                unsigned a1 = static_cast<unsigned char>(field[4]) - '0';
-                unsigned a2 = static_cast<unsigned char>(field[6]) - '0';
+                unsigned a1 = static_cast<unsigned char>(field[label1]) - '0';
+                unsigned a2 = static_cast<unsigned char>(field[label2]) - '0';
                 rejected |= static_cast<uint32_t>(a1 >= limit);
                 rejected |= static_cast<uint32_t>(a2 >= limit);
+                rejected |= static_cast<uint32_t>(field[label1 + 1] != ':');
+                if (genotype_first) {
+                    rejected |= static_cast<uint32_t>(
+                        static_cast<unsigned char>(field[0]) - '0' >= 10u);
+                    rejected |= static_cast<uint32_t>(
+                        static_cast<unsigned char>(field[2]) - '0' >= 10u);
+                    rejected |= static_cast<uint32_t>(field[1] != '|');
+                    rejected |= static_cast<uint32_t>(field[3] != ':');
+                }
+                // The kstring is NUL-terminated, so the last column's
+                // terminator is checked with the same load as every other's.
                 rejected |= static_cast<uint32_t>(
-                    static_cast<unsigned char>(field[0]) - '0' >= 10u);
-                rejected |= static_cast<uint32_t>(
-                    static_cast<unsigned char>(field[2]) - '0' >= 10u);
-                rejected |= static_cast<uint32_t>(field[1] != '|');
-                rejected |= static_cast<uint32_t>(field[3] != ':');
-                rejected |= static_cast<uint32_t>(field[5] != ':');
-                rejected |= static_cast<uint32_t>(
-                    tail_delimiter != '\0' && field[7] != tail_delimiter);
+                    field[width] != (i + 1 < n_columns ? '\t' : '\0'));
+                if (width > min_width) {
+                    rejected |= static_cast<uint32_t>(field[min_width] != ':');
+                }
                 uint32_t hap0 = static_cast<uint32_t>(2 * i);
                 int8_t next_a1 = static_cast<int8_t>(a1);
                 int8_t next_a2 = static_cast<int8_t>(a2);
@@ -2744,6 +2787,12 @@ static void decode_fast_flare_samples(
             }
             out.changes.resize(base_changes);
         }
+    }
+
+    if (scan_sample_field_ends(
+            samples, samples_length, raw_to_output.size(), decoder.field_ends) !=
+        raw_to_output.size()) {
+        die("FLARE sample count mismatch");
     }
 
     size_t field_start = 0;
@@ -2813,6 +2862,29 @@ static void decode_fast_flare_samples(
     }
 }
 
+// Decompressing the FLARE VCF is the largest single cost of a conversion, and
+// only AN1 and AN2 are read out of it, so a FORMAT carrying anything else is
+// worth pointing at once.
+static void report_unread_flare_format_once(const char* format) {
+    static bool reported = false;
+    if (reported) return;
+    reported = true;
+
+    int n_fields = 1;
+    for (const char* p = format; *p; ++p) n_fields += *p == ':';
+    if (n_fields <= 2) return;
+
+    std::fprintf(
+        stderr,
+        "NOTE: FLARE FORMAT is %s; FELIXla reads only AN1 and AN2. Dropping the\n"
+        "      other %d field(s) leaves the output unchanged and cuts the FLARE\n"
+        "      decompression that dominates this run:\n"
+        "      bcftools annotate -x '^FORMAT/AN1,FORMAT/AN2' -Oz -o slim.vcf.gz FLARE_VCF\n",
+        format,
+        n_fields - 2
+    );
+}
+
 static bool read_next_fast_lai_record(
     FastTextVcfReader& reader,
     bcf_hdr_t* ghdr,
@@ -2841,6 +2913,7 @@ static bool read_next_fast_lai_record(
         if (an1_index < 0 || an2_index < 0) {
             die("FLARE VCF must contain scalar FORMAT/AN1 and FORMAT/AN2");
         }
+        report_unread_flare_format_once(fields[8]);
         out.valid = true;
         out.merged_duplicate = false;
         out.geno_rid = geno_rid;

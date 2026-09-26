@@ -171,18 +171,44 @@ felixla \
 
 ### Decompression Performance
 
-Most of a conversion's work is BGZF decompression, so the htslib FELIXla is
-linked against matters as much as FELIXla's own code. htslib uses
+Most of a conversion's work is BGZF decompression, and most of what is
+decompressed is discarded: FELIXla reads `FORMAT/AN1` and `FORMAT/AN2` from the
+FLARE VCF and nothing else, while a stock FLARE record also carries `GT`,
+`ANP1` and `ANP2`. Dropping them is the single largest saving available and
+does not change the output:
+
+```bash
+bcftools annotate -x '^FORMAT/AN1,FORMAT/AN2' -Oz -o flare.slim.vcf.gz FLARE_VCF
+tabix -p vcf flare.slim.vcf.gz
+```
+
+FELIXla prints a one-line note when it sees a FLARE `FORMAT` carrying fields it
+does not read.
+
+Which htslib FELIXla is linked against matters as much as FELIXla's own code.
+htslib uses
 [libdeflate](https://github.com/ebiggers/libdeflate) when it is present at
 build time, which is substantially faster than zlib for both inflate and the
 per-block CRC. htslib's `configure` detects it automatically, so installing the
 libdeflate development package before building htslib is enough; the published
 static release binaries are built this way.
 
-On a 50,000-sample, 2,000-variant BGZF fixture (AMD EPYC 7742), one conversion
-took 6.1 s against a zlib-only htslib, 2.6 s against a libdeflate htslib, and
-1.1 s with `--threads 8`. Verify a given build with `htsfile --version`, which
-lists libdeflate among its features.
+Verify a given build with `htsfile --version`, which lists libdeflate among its
+features.
+
+One conversion of a 50,000-sample, 2,000-variant BGZF fixture on one core of an
+AMD EPYC 7742, each step leaving the output byte-identical:
+
+| | wall |
+|---|---|
+| zlib htslib, stock FLARE | 6.1 s |
+| libdeflate htslib, stock FLARE | 2.5 s |
+| libdeflate htslib, slim FLARE | 0.9 s |
+| libdeflate htslib, stock FLARE, `--threads 8` | 1.1 s |
+
+Slimming the FLARE input and linking against libdeflate both beat spending
+eight cores on the stock input, and they compose: prefer them before
+`--threads`, which is most useful when few conversions run at once.
 
 ## Planning Parallel Chunks
 
