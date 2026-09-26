@@ -1953,9 +1953,13 @@ static int find_format_field_index(const char* format, const char* tag) {
 // Sample columns are located once per record with a wide scan instead of one
 // library call per column. The release binaries are built for baseline
 // x86-64, so the wide path is chosen at run time, not at compile time.
+// FELIXLA_SCALAR_PATHS=1 forces the column-at-a-time code that the wide paths
+// must agree with; tests/run_scalar_equivalence.py packs both ways.
+static const bool g_scalar_paths_only = std::getenv("FELIXLA_SCALAR_PATHS") != nullptr;
+
 static const bool g_have_avx2 =
 #if defined(FELIXLA_X86_SIMD)
-    __builtin_cpu_supports("avx2");
+    __builtin_cpu_supports("avx2") && !g_scalar_paths_only;
 #else
     false;
 #endif
@@ -2689,8 +2693,8 @@ static void decode_fast_flare_samples(
     // ancestry labels be read at a fixed stride with no per-column parsing and
     // no data-dependent branch. Anything unexpected sets `rejected` and the
     // general loop below re-reads the record and reports the exact problem.
-    if (decoder.identity_mapping == 1 && an1_index == 1 && an2_index == 2 &&
-        !raw_to_output.empty()) {
+    if (!g_scalar_paths_only && decoder.identity_mapping == 1 &&
+        an1_index == 1 && an2_index == 2 && !raw_to_output.empty()) {
         size_t n = raw_to_output.size();
         uint32_t stride = decoder.field_ends[0] + 1;
         uint32_t layout_mismatch = 0;

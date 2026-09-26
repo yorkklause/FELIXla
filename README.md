@@ -558,6 +558,16 @@ truth, and checks every concat component plus malformed filter inputs for
 fail-closed behavior. The BED suite also verifies 20,001 disjoint intervals and
 byte-identical non-metadata output when BED covers the complete input.
 
+`test-intense` also packs randomized fixtures twice and requires byte-identical
+output both ways: once normally, and once with `FELIXLA_SCALAR_PATHS=1`, which
+forces the column-at-a-time reader instead of the wide scanning paths the FLARE
+reader and genotype packer select at run time. The fixtures deliberately
+straddle the conditions those paths test, including ragged versus uniform FLARE
+column widths, two-digit ancestry labels, the three `FORMAT` layouts, sample
+counts either side of a 32-column word, sample subsets, and multiallelic
+records. Setting `FELIXLA_SCALAR_PATHS=1` is also the way to confirm that a
+suspected packing difference comes from the wide paths rather than the input.
+
 ## Build Notes
 
 If htslib is installed in a non-standard location, pass explicit flags:
