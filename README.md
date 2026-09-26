@@ -29,37 +29,27 @@ GitHub repository and record the commit hash used in the analysis.
 
 ## Getting Started
 
-- Clone this repository using the following git command:
+FELIXla is distributed as a statically linked executable, so there is nothing
+to install alongside it: no htslib, no shared libraries, no `LD_LIBRARY_PATH`.
+Download it, mark it executable, and run it.
 
-    `git clone https://github.com/yorkklause/FELIXla.git`
+- Linux x86_64 static binaries are attached to every GitHub Release as
+  `felixla-linux-x86_64-static` and `vcf_tbi_chunks-linux-x86_64-static`, with
+  SHA256 checksums:
 
-    Alternatively, download the source files from the GitHub website
-    (https://github.com/yorkklause/FELIXla).
+    ```bash
+    curl -LO https://github.com/yorkklause/FELIXla/releases/latest/download/felixla-linux-x86_64-static
+    chmod +x felixla-linux-x86_64-static
+    ./felixla-linux-x86_64-static --help
+    ```
 
-- **FELIXla** requires a C++17 compiler and **htslib** headers and library.
+    They carry their own htslib, built with
+    [libdeflate](https://github.com/ebiggers/libdeflate) for fast BGZF
+    decompression, and read local files only -- there is no libcurl remote-URL
+    support.
 
-    On macOS with Homebrew:
-
-    `brew install htslib`
-
-    On Linux, install htslib through your system package manager or provide
-    explicit compiler and linker flags as shown below.
-
-- Compile FELIXla using the following command:
-
-    `make`
-
-- Once compilation is done, the complete `felixla` executable and the separate
-  `vcf_tbi_chunks` planning utility will be found in the `bin` folder. Type
-
-    `bin/felixla --help` or `bin/felixla -h`
-
-    to print a list of command-line options.
-
-- FELIXla is a complete binary entry point. It does not invoke separate FELIXla
-  helper executables at runtime.
-
-- A Docker image is published through GitHub Container Registry:
+- A Docker image is published through GitHub Container Registry, holding the
+  same static executables:
 
     `docker pull ghcr.io/yorkklause/felixla:latest`
 
@@ -73,10 +63,30 @@ GitHub repository and record the commit hash used in the analysis.
 
     `docker run --rm --entrypoint vcf_tbi_chunks ghcr.io/yorkklause/felixla:latest --help`
 
-- Linux x86_64 static binaries are attached to GitHub Releases as
-  `felixla-linux-x86_64-static` and `vcf_tbi_chunks-linux-x86_64-static`.
-  They are linked against a local-file htslib build without libcurl remote-URL
-  support.
+- FELIXla is a complete binary entry point. It does not invoke separate FELIXla
+  helper executables at runtime.
+
+### Building from source
+
+Building is only needed to develop FELIXla or to run it somewhere the released
+binaries do not fit. It requires a C++17 compiler and **htslib** headers and
+library:
+
+- Clone this repository:
+
+    `git clone https://github.com/yorkklause/FELIXla.git`
+
+- Install htslib. On macOS with Homebrew, `brew install htslib`; on Linux, use
+  the system package manager or pass explicit flags as shown under
+  [Build Notes](#build-notes).
+
+- Compile with `make`. The complete `felixla` executable and the separate
+  `vcf_tbi_chunks` planning utility are written to `bin/`.
+
+Prefer an htslib built with libdeflate; see
+[Decompression Performance](#decompression-performance) for what it is worth.
+To reproduce the self-contained release executables instead, see
+[Build Notes](#build-notes).
 
 ## Using FELIXla
 

@@ -38,7 +38,7 @@ jobs:
             python3 \
             zlib1g-dev
 
-      - name: Build static htslib without libcurl
+      - name: Build static htslib with libdeflate and without libcurl
         run: |
           set -euo pipefail
           curl -L \
@@ -47,11 +47,16 @@ jobs:
           mkdir -p /tmp/htslib-src
           tar -xjf /tmp/htslib.tar.bz2 -C /tmp/htslib-src --strip-components=1
           cd /tmp/htslib-src
+          # --with-libdeflate rather than the default autodetection: libdeflate
+          # is most of the decompression speed, and a missing dev package
+          # should fail the release rather than quietly halve it.
           ./configure \
             --prefix=/opt/htslib-static \
+            --with-libdeflate \
             --disable-libcurl \
             --disable-s3 \
-            --disable-gcs
+            --disable-gcs \
+            --disable-plugins
           make -j"$(nproc)"
           sudo make install
 
@@ -63,6 +68,7 @@ jobs:
           make test-static STATIC_FULLY=1 CXXFLAGS="${FELIXLA_CXXFLAGS}"
           python3 tests/run_keep_extract_intense.py --bin-dir "${PWD}/bin-static"
           python3 tests/run_concat_intense.py --bin-dir "${PWD}/bin-static"
+          python3 tests/run_scalar_equivalence.py --bin-dir "${PWD}/bin-static"
           file bin-static/felixla
           file bin-static/vcf_tbi_chunks
           ldd bin-static/felixla 2>&1 | tee /tmp/ldd.txt || true
