@@ -2681,6 +2681,54 @@ static inline bool is_ascii_digit(char c) {
     return c >= '0' && c <= '9';
 }
 
+#if defined(FELIXLA_X86_SIMD)
+// Reads the ancestry labels of eight "a:b<TAB>" columns at once and reports
+// which of their sixteen haplotypes carry a label different from the current
+// one. Returns false when the block is not exactly that shape with both labels
+// below `label_limit`, leaving the caller to redo it a column at a time.
+__attribute__((target("avx2")))
+static bool flare_label_block_avx2(
+    const char* columns,
+    const int8_t* current,
+    unsigned label_limit,
+    int8_t* labels,
+    uint32_t& changed
+) {
+    const __m256i block =
+        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(columns));
+    uint32_t colons = static_cast<uint32_t>(
+        _mm256_movemask_epi8(_mm256_cmpeq_epi8(block, _mm256_set1_epi8(':'))));
+    uint32_t tabs = static_cast<uint32_t>(
+        _mm256_movemask_epi8(_mm256_cmpeq_epi8(block, _mm256_set1_epi8('\t'))));
+    if ((colons & 0x22222222u) != 0x22222222u) return false;
+    if ((tabs & 0x88888888u) != 0x88888888u) return false;
+
+    // Byte 0 and byte 2 of every four-byte column, compacted to the low half
+    // of each 128-bit lane, then the two lanes joined.
+    const __m256i pick = _mm256_setr_epi8(
+        0, 2, 4, 6, 8, 10, 12, 14, -1, -1, -1, -1, -1, -1, -1, -1,
+        0, 2, 4, 6, 8, 10, 12, 14, -1, -1, -1, -1, -1, -1, -1, -1);
+    __m128i digits = _mm256_castsi256_si128(_mm256_permutevar8x32_epi32(
+        _mm256_shuffle_epi8(block, pick),
+        _mm256_setr_epi32(0, 1, 4, 5, 0, 1, 4, 5)));
+    __m128i values = _mm_sub_epi8(digits, _mm_set1_epi8('0'));
+
+    // Saturating unsigned subtract leaves zero only below the limit, and a
+    // byte under '0' wraps high, so non-digits are rejected here as well.
+    __m128i over = _mm_subs_epu8(
+        values, _mm_set1_epi8(static_cast<char>(label_limit - 1)));
+    if (_mm_movemask_epi8(_mm_cmpeq_epi8(over, _mm_setzero_si128())) != 0xFFFF) {
+        return false;
+    }
+
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(labels), values);
+    __m128i now = _mm_loadu_si128(reinterpret_cast<const __m128i*>(current));
+    changed = (~static_cast<uint32_t>(
+        _mm_movemask_epi8(_mm_cmpeq_epi8(values, now)))) & 0xFFFFu;
+    return true;
+}
+#endif
+
 static void decode_fast_flare_samples(
     const char* samples,
     size_t samples_length,
@@ -2742,20 +2790,53 @@ static void decode_fast_flare_samples(
                  n_columns - 1);
         if (layout_known) {
             size_t base_changes = out.changes.size();
-            unsigned limit = static_cast<unsigned>(n_ancestries);
+            // This path only reads one digit per label, so a label that is not
+            // a single digit below the ancestry count must reach the general
+            // loop -- which parses it in full, or reports it.
+            unsigned label_limit =
+                n_ancestries < 10 ? static_cast<unsigned>(n_ancestries) : 10u;
             uint32_t rejected = 0;
-            for (size_t i = 0; i < n_columns; ++i) {
+            size_t i = 0;
+
+#if defined(FELIXLA_X86_SIMD)
+            // Eight columns per block, never including the last column: its
+            // terminator is NUL rather than TAB, which the block check does
+            // not allow for.
+            if (g_have_avx2 && ancestry_first && stride == 4 && n_columns > 1) {
+                int8_t labels[16];
+                size_t wide_columns = ((n_columns - 1) / 8) * 8;
+                for (; i < wide_columns; i += 8) {
+                    uint32_t changed = 0;
+                    if (!flare_label_block_avx2(
+                            samples + i * 4, &decoder.hap_ancestry[2 * i],
+                            label_limit, labels, changed)) {
+                        break;
+                    }
+                    while (changed != 0) {
+                        uint32_t bit = static_cast<uint32_t>(
+                            __builtin_ctz(changed));
+                        changed &= changed - 1;
+                        out.changes.push_back(AncestryChange{
+                            static_cast<uint32_t>(2 * i) + bit, labels[bit]});
+                    }
+                }
+            }
+#endif
+
+            for (; i < n_columns; ++i) {
                 const char* field = samples + i * stride;
                 unsigned a1 = static_cast<unsigned char>(field[label1]) - '0';
                 unsigned a2 = static_cast<unsigned char>(field[label2]) - '0';
-                rejected |= static_cast<uint32_t>(a1 >= limit);
-                rejected |= static_cast<uint32_t>(a2 >= limit);
+                rejected |= static_cast<uint32_t>(a1 >= label_limit);
+                rejected |= static_cast<uint32_t>(a2 >= label_limit);
                 rejected |= static_cast<uint32_t>(field[label1 + 1] != ':');
                 if (genotype_first) {
-                    rejected |= static_cast<uint32_t>(
-                        static_cast<unsigned char>(field[0]) - '0' >= 10u);
-                    rejected |= static_cast<uint32_t>(
-                        static_cast<unsigned char>(field[2]) - '0' >= 10u);
+                    unsigned allele0 =
+                        static_cast<unsigned char>(field[0]) - unsigned{'0'};
+                    unsigned allele1 =
+                        static_cast<unsigned char>(field[2]) - unsigned{'0'};
+                    rejected |= static_cast<uint32_t>(allele0 >= 10u);
+                    rejected |= static_cast<uint32_t>(allele1 >= 10u);
                     rejected |= static_cast<uint32_t>(field[1] != '|');
                     rejected |= static_cast<uint32_t>(field[3] != ':');
                 }

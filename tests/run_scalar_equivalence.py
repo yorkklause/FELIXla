@@ -29,7 +29,9 @@ COMPONENTS = (
     "ancblock.bin", "ancblock.mks", "ancblock.idx", "samples",
 )
 
-LAYOUTS = ("gt_first", "anc_first", "anc_late")
+# "anc_only" is the slimmed FLARE layout, whose three-byte columns are the ones
+# the ancestry reader decodes eight at a time.
+LAYOUTS = ("gt_first", "anc_first", "anc_late", "anc_only")
 
 
 def write_fixture(directory, rng, n_samples, n_records, n_ancestries, layout,
@@ -66,6 +68,7 @@ def write_fixture(directory, rng, n_samples, n_records, n_ancestries, layout,
         "gt_first": "GT:AN1:AN2:ANP1:ANP2",
         "anc_first": "AN1:AN2:ANP1:ANP2",
         "anc_late": "GT:ANP1:AN1:AN2:ANP2",
+        "anc_only": "AN1:AN2",
     }[layout]
 
     with flare.open("w") as out:
@@ -95,6 +98,8 @@ def write_fixture(directory, rng, n_samples, n_records, n_ancestries, layout,
                     columns.append("%s:%d:%d:%s:%s" % (call, a1, a2, p1, p2))
                 elif layout == "anc_first":
                     columns.append("%d:%d:%s:%s" % (a1, a2, p1, p2))
+                elif layout == "anc_only":
+                    columns.append("%d:%d" % (a1, a2))
                 else:
                     columns.append("%s:%s:%d:%d:%s" % (call, p1, a1, a2, p2))
             out.write("chr1\t%d\t.\tA\tC\t.\tPASS\t.\t%s\t%s\n"
