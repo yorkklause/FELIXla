@@ -137,13 +137,19 @@ struct FastGenotypeRecord {
     bool gt_only = false;
 };
 
+// A whole-genome site list can hold tens of millions of entries, and every
+// region worker loads its own copy, so a position stores only fixed-width
+// fields: contig names are interned and allele text lives in one shared arena.
+// That is 32 bytes plus the allele bytes, against roughly 150 for a record
+// holding its own std::string contig, REF and ALT vector.
 struct ExtractPosition {
-    std::string chr;
     int64_t pos = 0;
-    std::string ref;
-    std::vector<std::string> alts;
-    int geno_rid = -1;
-    uint64_t line_no = 0;
+    int32_t geno_rid = -1;
+    uint32_t chr_id = 0;
+    uint32_t ref = 0;       // byte offset into ExtractSites::allele_arena
+    uint32_t alts = 0;      // first index into ExtractSites::alt_offsets
+    uint32_t n_alts = 0;
+    uint32_t line_no = 0;   // saturates; only ever reported in diagnostics
 };
 
 struct ExtractCoordinateMatch {
@@ -158,8 +164,25 @@ struct ExtractSites {
     std::string path;
     std::unordered_set<std::string> contigs;
     std::vector<ExtractPosition> positions;
+    std::vector<char> allele_arena;
+    std::vector<uint32_t> alt_offsets;
+    std::vector<std::string> contig_names;
+    std::unordered_map<std::string, uint32_t> contig_ids;
     uint64_t source_position_count = 0;
     uint64_t allele_count = 0;
+
+    const char* allele(uint32_t offset) const {
+        return allele_arena.data() + offset;
+    }
+    const char* ref_of(const ExtractPosition& position) const {
+        return allele(position.ref);
+    }
+    const char* alt_of(const ExtractPosition& position, size_t index) const {
+        return allele(alt_offsets[position.alts + index]);
+    }
+    const std::string& chr_of(const ExtractPosition& position) const {
+        return contig_names[position.chr_id];
+    }
 };
 
 struct BedInterval {
@@ -831,6 +854,29 @@ static BedIntervals load_bed_intervals(
     return bed;
 }
 
+static uint32_t intern_extract_contig(ExtractSites& sites, std::string chr) {
+    auto found = sites.contig_ids.find(chr);
+    if (found != sites.contig_ids.end()) return found->second;
+    uint32_t id = static_cast<uint32_t>(sites.contig_names.size());
+    sites.contig_names.push_back(chr);
+    sites.contig_ids.emplace(std::move(chr), id);
+    return id;
+}
+
+static uint32_t append_extract_allele(
+    ExtractSites& sites,
+    const char* data,
+    size_t length
+) {
+    size_t offset = sites.allele_arena.size();
+    if (offset + length + 1 > std::numeric_limits<uint32_t>::max()) {
+        die("--extract allele text exceeds 4 GiB: %s", sites.path.c_str());
+    }
+    sites.allele_arena.insert(sites.allele_arena.end(), data, data + length);
+    sites.allele_arena.push_back('\0');
+    return static_cast<uint32_t>(offset);
+}
+
 static ExtractSites load_extract_sites(
     const std::string& path,
     const Region& region
@@ -887,29 +933,46 @@ static ExtractSites load_extract_sites(
         }
 
         ExtractPosition position;
-        position.chr.assign(fields[0].data, fields[0].length);
+        position.chr_id = intern_extract_contig(
+            sites, std::string(fields[0].data, fields[0].length));
         position.pos = pos;
-        position.ref.assign(fields[3].data, fields[3].length);
+        position.ref = append_extract_allele(
+            sites, fields[3].data, fields[3].length);
+        position.line_no = line_no <= std::numeric_limits<uint32_t>::max()
+            ? static_cast<uint32_t>(line_no)
+            : std::numeric_limits<uint32_t>::max();
+
+        position.alts = static_cast<uint32_t>(sites.alt_offsets.size());
         std::string alts(fields[4].data, fields[4].length);
-        position.alts = split_commas(alts);
-        position.line_no = line_no;
-        std::sort(position.alts.begin(), position.alts.end());
-        for (size_t i = 1; i < position.alts.size(); ++i) {
-            if (position.alts[i - 1] == position.alts[i]) {
+        for (const std::string& alt : split_commas(alts)) {
+            sites.alt_offsets.push_back(
+                append_extract_allele(sites, alt.data(), alt.size()));
+        }
+        position.n_alts =
+            static_cast<uint32_t>(sites.alt_offsets.size()) - position.alts;
+
+        uint32_t* alt_begin = sites.alt_offsets.data() + position.alts;
+        uint32_t* alt_end = alt_begin + position.n_alts;
+        const char* arena = sites.allele_arena.data();
+        std::sort(alt_begin, alt_end, [arena](uint32_t a, uint32_t b) {
+            return std::strcmp(arena + a, arena + b) < 0;
+        });
+        for (uint32_t i = 1; i < position.n_alts; ++i) {
+            if (std::strcmp(arena + alt_begin[i - 1], arena + alt_begin[i]) == 0) {
                 die(
                     "duplicate allele in --extract list at %s:%llu: %s:%lld %s>%s",
                     path.c_str(),
                     static_cast<unsigned long long>(line_no),
-                    position.chr.c_str(),
+                    sites.chr_of(position).c_str(),
                     static_cast<long long>(pos),
-                    position.ref.c_str(),
-                    position.alts[i].c_str()
+                    sites.ref_of(position),
+                    arena + alt_begin[i]
                 );
             }
         }
-        sites.allele_count += position.alts.size();
-        sites.contigs.insert(position.chr);
-        sites.positions.push_back(std::move(position));
+        sites.allele_count += position.n_alts;
+        sites.contigs.insert(sites.chr_of(position));
+        sites.positions.push_back(position);
     }
 
     if (sites.source_position_count == 0) {
@@ -3099,11 +3162,9 @@ static int add_contigs_from_extract_if_missing(
 ) {
     if (!extract_sites.active) return 0;
 
-    std::unordered_set<std::string> seen;
     int added = 0;
-    for (const ExtractPosition& position : extract_sites.positions) {
-        if (!seen.insert(position.chr).second) continue;
-        if (add_contig_to_header_if_missing(dst, position.chr, dst_label)) {
+    for (const std::string& chr : extract_sites.contig_names) {
+        if (add_contig_to_header_if_missing(dst, chr, dst_label)) {
             ++added;
         }
     }
@@ -3120,11 +3181,12 @@ static int add_contigs_from_extract_if_missing(
 }
 
 static bool extract_position_in_region(
+    const ExtractSites& sites,
     const ExtractPosition& position,
     const Region& region
 ) {
     if (!region.active) return true;
-    return position.chr == region.chr &&
+    return sites.chr_of(position) == region.chr &&
            position.pos >= region.start &&
            position.pos <= region.end;
 }
@@ -3168,107 +3230,119 @@ static NormalizedAlleleView normalize_allele(
     return NormalizedAlleleView{pos, ref, alt};
 }
 
-static bool extract_position_less(const ExtractPosition& a, const ExtractPosition& b) {
+static bool extract_position_less(
+    const ExtractSites& sites,
+    const ExtractPosition& a,
+    const ExtractPosition& b
+) {
     if (a.geno_rid != b.geno_rid) return a.geno_rid < b.geno_rid;
-    if (a.chr != b.chr) return a.chr < b.chr;
+    if (a.chr_id != b.chr_id) {
+        return sites.chr_of(a) < sites.chr_of(b);
+    }
     if (a.pos != b.pos) return a.pos < b.pos;
-    return a.ref < b.ref;
+    return std::strcmp(sites.ref_of(a), sites.ref_of(b)) < 0;
 }
 
+// The merged list is appended rather than written in place, so the offsets the
+// other positions hold stay valid. Duplicate coordinates are rare, so the few
+// entries the old range leaves behind are not worth reclaiming.
 static void merge_extract_alts(
+    ExtractSites& sites,
     ExtractPosition& destination,
-    const ExtractPosition& source,
-    const std::string& path
+    const ExtractPosition& source
 ) {
-    std::vector<std::string> merged;
-    merged.reserve(destination.alts.size() + source.alts.size());
+    std::vector<uint32_t> merged;
+    merged.reserve(destination.n_alts + source.n_alts);
 
-    size_t destination_i = 0;
-    size_t source_i = 0;
-    while (destination_i < destination.alts.size() && source_i < source.alts.size()) {
-        const std::string& destination_alt = destination.alts[destination_i];
-        const std::string& source_alt = source.alts[source_i];
-        if (destination_alt < source_alt) {
-            merged.push_back(destination_alt);
+    uint32_t destination_i = 0;
+    uint32_t source_i = 0;
+    while (destination_i < destination.n_alts && source_i < source.n_alts) {
+        const char* destination_alt = sites.alt_of(destination, destination_i);
+        const char* source_alt = sites.alt_of(source, source_i);
+        int order = std::strcmp(destination_alt, source_alt);
+        if (order < 0) {
+            merged.push_back(sites.alt_offsets[destination.alts + destination_i]);
             ++destination_i;
-        } else if (source_alt < destination_alt) {
-            merged.push_back(source_alt);
+        } else if (order > 0) {
+            merged.push_back(sites.alt_offsets[source.alts + source_i]);
             ++source_i;
         } else {
             die(
                 "duplicate allele in --extract list at %s:%llu: %s:%lld %s>%s",
-                path.c_str(),
+                sites.path.c_str(),
                 static_cast<unsigned long long>(source.line_no),
-                source.chr.c_str(),
+                sites.chr_of(source).c_str(),
                 static_cast<long long>(source.pos),
-                source.ref.c_str(),
-                source_alt.c_str()
+                sites.ref_of(source),
+                source_alt
             );
         }
     }
-    merged.insert(
-        merged.end(),
-        destination.alts.begin() + static_cast<std::ptrdiff_t>(destination_i),
-        destination.alts.end()
-    );
-    merged.insert(
-        merged.end(),
-        source.alts.begin() + static_cast<std::ptrdiff_t>(source_i),
-        source.alts.end()
-    );
-    destination.alts = std::move(merged);
+    for (; destination_i < destination.n_alts; ++destination_i) {
+        merged.push_back(sites.alt_offsets[destination.alts + destination_i]);
+    }
+    for (; source_i < source.n_alts; ++source_i) {
+        merged.push_back(sites.alt_offsets[source.alts + source_i]);
+    }
+
+    destination.alts = static_cast<uint32_t>(sites.alt_offsets.size());
+    destination.n_alts = static_cast<uint32_t>(merged.size());
+    sites.alt_offsets.insert(
+        sites.alt_offsets.end(), merged.begin(), merged.end());
 }
 
 static void prepare_extract_positions(ExtractSites& extract_sites, bcf_hdr_t* ghdr) {
     if (!extract_sites.active) return;
 
+    std::vector<int32_t> contig_rid(extract_sites.contig_names.size(), -1);
+    for (size_t i = 0; i < extract_sites.contig_names.size(); ++i) {
+        const std::string& chr = extract_sites.contig_names[i];
+        int rid = bcf_hdr_name2id(ghdr, chr.c_str());
+        contig_rid[i] = rid >= 0 ? rid : extract_position_sort_rid(ghdr, chr);
+    }
     for (ExtractPosition& position : extract_sites.positions) {
-        position.geno_rid = bcf_hdr_name2id(ghdr, position.chr.c_str());
-        if (position.geno_rid < 0) {
-            position.geno_rid = extract_position_sort_rid(ghdr, position.chr);
-        }
+        position.geno_rid = contig_rid[position.chr_id];
     }
 
+    const ExtractSites& sites = extract_sites;
+    auto less = [&sites](const ExtractPosition& a, const ExtractPosition& b) {
+        return extract_position_less(sites, a, b);
+    };
     bool already_sorted = std::is_sorted(
-        extract_sites.positions.begin(),
-        extract_sites.positions.end(),
-        extract_position_less
-    );
+        extract_sites.positions.begin(), extract_sites.positions.end(), less);
     if (!already_sorted) {
         std::sort(
-            extract_sites.positions.begin(),
-            extract_sites.positions.end(),
-            extract_position_less
-        );
+            extract_sites.positions.begin(), extract_sites.positions.end(), less);
     }
 
     size_t write_i = 0;
     for (size_t read_i = 0; read_i < extract_sites.positions.size(); ++read_i) {
-        ExtractPosition& source = extract_sites.positions[read_i];
+        ExtractPosition source = extract_sites.positions[read_i];
         if (write_i == 0 ||
             extract_sites.positions[write_i - 1].geno_rid != source.geno_rid ||
-            extract_sites.positions[write_i - 1].chr != source.chr ||
+            extract_sites.positions[write_i - 1].chr_id != source.chr_id ||
             extract_sites.positions[write_i - 1].pos != source.pos) {
             if (write_i != read_i) {
-                extract_sites.positions[write_i] = std::move(source);
+                extract_sites.positions[write_i] = source;
             }
             ++write_i;
             continue;
         }
 
         ExtractPosition& destination = extract_sites.positions[write_i - 1];
-        if (destination.ref != source.ref) {
+        if (std::strcmp(extract_sites.ref_of(destination),
+                        extract_sites.ref_of(source)) != 0) {
             die(
                 "conflicting REF values in --extract list at %s:%llu for %s:%lld: %s vs %s",
                 extract_sites.path.c_str(),
                 static_cast<unsigned long long>(source.line_no),
-                source.chr.c_str(),
+                extract_sites.chr_of(source).c_str(),
                 static_cast<long long>(source.pos),
-                destination.ref.c_str(),
-                source.ref.c_str()
+                extract_sites.ref_of(destination),
+                extract_sites.ref_of(source)
             );
         }
-        merge_extract_alts(destination, source, extract_sites.path);
+        merge_extract_alts(extract_sites, destination, source);
     }
     extract_sites.positions.resize(write_i);
 
@@ -3338,13 +3412,15 @@ static void prepare_bed_intervals(BedIntervals& bed, bcf_hdr_t* ghdr) {
 }
 
 static bool bed_interval_precedes_extract_position(
+    const ExtractSites& sites,
     const BedInterval& interval,
     const ExtractPosition& position
 ) {
     if (interval.geno_rid != position.geno_rid) {
         return interval.geno_rid < position.geno_rid;
     }
-    if (interval.chr != position.chr) return interval.chr < position.chr;
+    const std::string& chr = sites.chr_of(position);
+    if (interval.chr != chr) return interval.chr < chr;
     return interval.end < position.pos;
 }
 
@@ -3360,24 +3436,25 @@ static void intersect_extract_positions_with_bed(
     std::unordered_set<std::string> retained_contigs;
 
     for (size_t read_i = 0; read_i < extract_sites.positions.size(); ++read_i) {
-        ExtractPosition& position = extract_sites.positions[read_i];
+        const ExtractPosition& position = extract_sites.positions[read_i];
         while (bed_i < bed.intervals.size() &&
-               bed_interval_precedes_extract_position(bed.intervals[bed_i], position)) {
+               bed_interval_precedes_extract_position(
+                   extract_sites, bed.intervals[bed_i], position)) {
             ++bed_i;
         }
         if (bed_i >= bed.intervals.size()) break;
 
         const BedInterval& interval = bed.intervals[bed_i];
         bool selected = interval.geno_rid == position.geno_rid &&
-                        interval.chr == position.chr &&
+                        interval.chr == extract_sites.chr_of(position) &&
                         position.pos >= interval.start &&
                         position.pos <= interval.end;
         if (!selected) continue;
 
-        retained_alleles += position.alts.size();
-        retained_contigs.insert(position.chr);
+        retained_alleles += position.n_alts;
+        retained_contigs.insert(extract_sites.chr_of(position));
         if (write_i != read_i) {
-            extract_sites.positions[write_i] = std::move(position);
+            extract_sites.positions[write_i] = position;
         }
         ++write_i;
     }
@@ -3453,14 +3530,17 @@ static const ExtractPosition* match_next_extract_position(
     return &positions[cursor];
 }
 
-static void finish_extract_coordinate_match(ExtractCoordinateMatch& match) {
+static void finish_extract_coordinate_match(
+    const ExtractSites& sites,
+    ExtractCoordinateMatch& match
+) {
     if (!match.position) return;
     if (!match.raw_ref_matched && !match.normalized_allele_matched) {
         die(
             "REF mismatch for --extract site %s:%lld: list has %s, genotype VCF has %s",
-            match.position->chr.c_str(),
+            sites.chr_of(*match.position).c_str(),
             static_cast<long long>(match.position->pos),
-            match.position->ref.c_str(),
+            sites.ref_of(*match.position),
             match.first_genotype_ref.c_str()
         );
     }
@@ -3468,17 +3548,19 @@ static void finish_extract_coordinate_match(ExtractCoordinateMatch& match) {
 }
 
 static void finish_extract_coordinate_before_record(
+    const ExtractSites& sites,
     ExtractCoordinateMatch& match,
     int record_rid,
     int64_t record_pos
 ) {
     if (!match.position) return;
     if (match.position->geno_rid != record_rid || match.position->pos != record_pos) {
-        finish_extract_coordinate_match(match);
+        finish_extract_coordinate_match(sites, match);
     }
 }
 
 static void note_extract_coordinate_record(
+    const ExtractSites& sites,
     ExtractCoordinateMatch& match,
     const ExtractPosition& position,
     const char* record_chr,
@@ -3496,7 +3578,7 @@ static void note_extract_coordinate_record(
     if (!match.position) {
         match.position = &position;
     }
-    bool raw_ref_matched = position.ref == record_ref;
+    bool raw_ref_matched = std::strcmp(sites.ref_of(position), record_ref) == 0;
     if (!raw_ref_matched && match.first_genotype_ref.empty()) {
         match.first_genotype_ref = record_ref;
     }
@@ -3506,21 +3588,25 @@ static void note_extract_coordinate_record(
 }
 
 static bool normalized_extract_allele_matches(
+    const ExtractSites& sites,
     const ExtractPosition& position,
     int64_t record_pos,
     const char* record_ref,
     const char* record_alt
 ) {
-    if (position.ref == record_ref) {
-        auto exact = std::lower_bound(
-            position.alts.begin(),
-            position.alts.end(),
+    const char* position_ref = sites.ref_of(position);
+    const uint32_t* alts = sites.alt_offsets.data() + position.alts;
+    if (std::strcmp(position_ref, record_ref) == 0) {
+        const uint32_t* exact = std::lower_bound(
+            alts,
+            alts + position.n_alts,
             record_alt,
-            [](const std::string& stored, const char* value) {
-                return stored.compare(value) < 0;
+            [&sites](uint32_t stored, const char* value) {
+                return std::strcmp(sites.allele(stored), value) < 0;
             }
         );
-        return exact != position.alts.end() && *exact == record_alt;
+        return exact != alts + position.n_alts &&
+               std::strcmp(sites.allele(*exact), record_alt) == 0;
     }
 
     NormalizedAlleleView query = normalize_allele(
@@ -3528,11 +3614,11 @@ static bool normalized_extract_allele_matches(
         record_ref,
         record_alt
     );
-    for (const std::string& extract_alt : position.alts) {
+    for (uint32_t i = 0; i < position.n_alts; ++i) {
         NormalizedAlleleView candidate = normalize_allele(
             position.pos,
-            position.ref,
-            extract_alt
+            position_ref,
+            sites.allele(alts[i])
         );
         if (candidate.pos == query.pos &&
             candidate.ref == query.ref &&
@@ -3545,6 +3631,7 @@ static bool normalized_extract_allele_matches(
 
 static bool fill_selected_alt_mask(
     bcf1_t* rec,
+    const ExtractSites& sites,
     const ExtractPosition* extract_position,
     std::vector<uint8_t>& selected
 ) {
@@ -3555,6 +3642,7 @@ static bool fill_selected_alt_mask(
     for (int alt_idx = 1; alt_idx < rec->n_allele; ++alt_idx) {
         const char* alt = rec->d.allele[alt_idx];
         bool matched = normalized_extract_allele_matches(
+            sites,
             *extract_position,
             static_cast<int64_t>(rec->pos) + 1,
             rec->d.allele[0],
@@ -3568,6 +3656,7 @@ static bool fill_selected_alt_mask(
 
 static bool fill_selected_alt_mask_fast(
     const FastGenotypeRecord& rec,
+    const ExtractSites& sites,
     const ExtractPosition* extract_position,
     std::vector<uint8_t>& selected
 ) {
@@ -3577,6 +3666,7 @@ static bool fill_selected_alt_mask_fast(
     for (size_t alt_idx = 1; alt_idx < rec.alleles.size(); ++alt_idx) {
         const char* alt = rec.alleles[alt_idx];
         bool matched = normalized_extract_allele_matches(
+            sites,
             *extract_position,
             rec.pos,
             rec.ref,
@@ -3681,25 +3771,26 @@ static std::string build_extract_genotype_region_query(
     };
 
     for (const ExtractPosition& position : extract_sites.positions) {
-        if (!extract_position_in_region(position, region)) continue;
-        if (position.chr == last_chr && position.pos == last_pos) continue;
+        if (!extract_position_in_region(extract_sites, position, region)) continue;
+        const std::string& chr = extract_sites.chr_of(position);
+        if (chr == last_chr && position.pos == last_pos) continue;
 
         if (!have_interval) {
-            interval_chr = position.chr;
+            interval_chr = chr;
             interval_start = position.pos;
             interval_end = position.pos;
             have_interval = true;
-        } else if (position.chr == interval_chr) {
+        } else if (chr == interval_chr) {
             interval_end = position.pos;
         } else {
             flush_interval();
-            interval_chr = position.chr;
+            interval_chr = chr;
             interval_start = position.pos;
             interval_end = position.pos;
             have_interval = true;
         }
 
-        last_chr = position.chr;
+        last_chr = chr;
         last_pos = position.pos;
         ++n_positions;
     }
@@ -3718,10 +3809,11 @@ static std::string build_extract_flare_region_query(
     std::string query;
     std::string last_chr;
     for (const ExtractPosition& position : extract_sites.positions) {
-        if (!extract_position_in_region(position, region)) continue;
-        if (position.chr == last_chr) continue;
-        append_region_query(query, position.chr, 1, kMaxVcfCoordinate);
-        last_chr = position.chr;
+        if (!extract_position_in_region(extract_sites, position, region)) continue;
+        const std::string& chr = extract_sites.chr_of(position);
+        if (chr == last_chr) continue;
+        append_region_query(query, chr, 1, kMaxVcfCoordinate);
+        last_chr = chr;
         ++n_contigs;
     }
 
@@ -4869,6 +4961,7 @@ int main(int argc, char** argv) {
 
         if (extract_sites.active) {
             finish_extract_coordinate_before_record(
+                extract_sites,
                 extract_coordinate_match,
                 g_rid,
                 g_pos
@@ -5076,9 +5169,12 @@ int main(int argc, char** argv) {
             }
 
             bool selected_any = fast_genotype_text
-                ? fill_selected_alt_mask_fast(fast_grec, extract_position, selected_alts)
-                : fill_selected_alt_mask(grec, extract_position, selected_alts);
+                ? fill_selected_alt_mask_fast(
+                      fast_grec, extract_sites, extract_position, selected_alts)
+                : fill_selected_alt_mask(
+                      grec, extract_sites, extract_position, selected_alts);
             note_extract_coordinate_record(
+                extract_sites,
                 extract_coordinate_match,
                 *extract_position,
                 g_chr,
@@ -5240,7 +5336,7 @@ int main(int argc, char** argv) {
     }
 
     if (extract_sites.active) {
-        finish_extract_coordinate_match(extract_coordinate_match);
+        finish_extract_coordinate_match(extract_sites, extract_coordinate_match);
     }
 
     close_open_block(
