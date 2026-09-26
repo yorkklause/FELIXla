@@ -8,6 +8,7 @@
 #include <htslib/kstring.h>
 #include <htslib/synced_bcf_reader.h>
 #include <htslib/tbx.h>
+#include <htslib/thread_pool.h>
 #include <htslib/vcf.h>
 
 #include <algorithm>
@@ -26,6 +27,11 @@
 #include <vector>
 
 #include <unistd.h>
+
+#if defined(__x86_64__) || defined(__i386__)
+#define FELIXLA_X86_SIMD 1
+#include <immintrin.h>
+#endif
 
 namespace {
 
@@ -73,6 +79,8 @@ struct LaiRecord {
 struct FlareDeltaDecoder {
     int geno_rid = -1;
     std::vector<int8_t> hap_ancestry;
+    std::vector<uint32_t> field_ends;
+    int identity_mapping = -1;  // -1 until the sample mapping is inspected
 };
 
 struct Region {
@@ -177,6 +185,16 @@ static constexpr int64_t kMaxVcfCoordinate = 2147483647LL;
 static constexpr int kInputBlockSize = 8 * 1024 * 1024;
 static bool g_progress_line_open = false;
 
+// Shared across every input file so one pool of workers serves the genotype
+// VCF, the FLARE VCF and any sidecar list rather than one pool per file.
+static htsThreadPool g_input_thread_pool{nullptr, 0};
+
+static void attach_input_thread_pool(htsFile* fp) {
+    if (fp && g_input_thread_pool.pool) {
+        hts_set_opt(fp, HTS_OPT_THREAD_POOL, &g_input_thread_pool);
+    }
+}
+
 static void report_stage(const char* out_prefix, const char* stage) {
     if (g_progress_line_open) {
         std::fputc('\n', stderr);
@@ -261,6 +279,7 @@ public:
         fp_ = hts_open(path.c_str(), "r");
         if (!fp_) die("cannot open %s: %s", label, path.c_str());
         hts_set_opt(fp_, HTS_OPT_BLOCK_SIZE, kInputBlockSize);
+        attach_input_thread_pool(fp_);
     }
 
     TextLineReader(const TextLineReader&) = delete;
@@ -1876,6 +1895,7 @@ static void init_fast_text_reader(
     reader.owns_fp = true;
     reader.queries = split_region_queries(indexed_query);
     hts_set_opt(reader.fp, HTS_OPT_BLOCK_SIZE, kInputBlockSize);
+    attach_input_thread_pool(reader.fp);
 }
 
 static int fast_text_next_line(FastTextVcfReader& reader) {
@@ -1928,6 +1948,93 @@ static int find_format_field_index(const char* format, const char* tag) {
         ++index;
     }
     return -1;
+}
+
+// Sample columns are located once per record with a wide scan instead of one
+// library call per column. The release binaries are built for baseline
+// x86-64, so the wide path is chosen at run time, not at compile time.
+static const bool g_have_avx2 =
+#if defined(FELIXLA_X86_SIMD)
+    __builtin_cpu_supports("avx2");
+#else
+    false;
+#endif
+
+static size_t scan_tab_offsets_generic(
+    const char* data,
+    size_t length,
+    uint32_t* out,
+    size_t capacity
+) {
+    size_t n = 0;
+    const char* cursor = data;
+    const char* end = data + length;
+    while (n < capacity) {
+        const void* hit = std::memchr(
+            cursor, '\t', static_cast<size_t>(end - cursor));
+        if (!hit) break;
+        const char* tab = static_cast<const char*>(hit);
+        out[n++] = static_cast<uint32_t>(tab - data);
+        cursor = tab + 1;
+    }
+    return n;
+}
+
+#if defined(FELIXLA_X86_SIMD)
+__attribute__((target("avx2")))
+static size_t scan_tab_offsets_avx2(
+    const char* data,
+    size_t length,
+    uint32_t* out,
+    size_t capacity
+) {
+    size_t n = 0;
+    size_t i = 0;
+    const __m256i tab = _mm256_set1_epi8('\t');
+    for (; i + 32 <= length && n < capacity; i += 32) {
+        __m256i chunk =
+            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i));
+        uint32_t mask = static_cast<uint32_t>(
+            _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, tab)));
+        while (mask != 0 && n < capacity) {
+            out[n++] = static_cast<uint32_t>(i + __builtin_ctz(mask));
+            mask &= mask - 1;
+        }
+    }
+    if (i < length && n < capacity) {
+        size_t added = scan_tab_offsets_generic(
+            data + i, length - i, out + n, capacity - n);
+        for (size_t k = n; k < n + added; ++k) {
+            out[k] += static_cast<uint32_t>(i);
+        }
+        n += added;
+    }
+    return n;
+}
+#endif
+
+// Records the end offset of every tab-separated column in `data`. Returns the
+// column count, or `capacity + 1` when there are more columns than expected.
+static size_t scan_sample_field_ends(
+    const char* data,
+    size_t length,
+    size_t expected_fields,
+    std::vector<uint32_t>& ends
+) {
+    if (expected_fields == 0 || length > std::numeric_limits<uint32_t>::max()) {
+        return expected_fields + 1;
+    }
+    ends.resize(expected_fields);
+    size_t n_tabs =
+#if defined(FELIXLA_X86_SIMD)
+        g_have_avx2
+            ? scan_tab_offsets_avx2(data, length, ends.data(), expected_fields)
+            :
+#endif
+              scan_tab_offsets_generic(data, length, ends.data(), expected_fields);
+    if (n_tabs >= expected_fields) return expected_fields + 1;
+    ends[n_tabs] = static_cast<uint32_t>(length);
+    return n_tabs + 1;
 }
 
 static void split_fast_vcf_fixed_fields(char* line, char* fields[9], char*& samples) {
@@ -2089,6 +2196,46 @@ static inline void append_carrier_word(
     builder.dense_bits[word_index] = carrier_word;
 }
 
+#if defined(FELIXLA_X86_SIMD)
+// Packs 32 "a|b<TAB>" columns into one carrier word. Returns false when any
+// column is not exactly that shape with alleles 0 or 1, leaving the caller to
+// redo the word one column at a time so it reports the problem as before.
+// PEXT would express the gather directly but is microcoded on Zen 1/2, so the
+// allele bytes are compacted with an in-lane shuffle instead.
+__attribute__((target("avx2")))
+static bool compact_gt_word_avx2(const char* cursor, uint64_t& carrier_word) {
+    const __m256i zero = _mm256_set1_epi8('0');
+    const __m256i one = _mm256_set1_epi8('1');
+    const __m256i pipe = _mm256_set1_epi8('|');
+    const __m256i tab = _mm256_set1_epi8('\t');
+    const __m256i gather = _mm256_setr_epi8(
+        0, 2, 4, 6, 8, 10, 12, 14, -1, -1, -1, -1, -1, -1, -1, -1,
+        0, 2, 4, 6, 8, 10, 12, 14, -1, -1, -1, -1, -1, -1, -1, -1);
+    uint64_t word = 0;
+    for (int chunk = 0; chunk < 4; ++chunk) {
+        __m256i v = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(cursor + chunk * 32));
+        __m256i eq_one = _mm256_cmpeq_epi8(v, one);
+        uint32_t is_zero = static_cast<uint32_t>(
+            _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, zero)));
+        uint32_t is_one = static_cast<uint32_t>(_mm256_movemask_epi8(eq_one));
+        uint32_t is_pipe = static_cast<uint32_t>(
+            _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, pipe)));
+        uint32_t is_tab = static_cast<uint32_t>(
+            _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, tab)));
+        if (((is_zero | is_one) & 0x55555555u) != 0x55555555u) return false;
+        if ((is_pipe & 0x22222222u) != 0x22222222u) return false;
+        if ((is_tab & 0x88888888u) != 0x88888888u) return false;
+        uint32_t packed = static_cast<uint32_t>(
+            _mm256_movemask_epi8(_mm256_shuffle_epi8(eq_one, gather)));
+        uint64_t bits = (packed & 0xFFu) | ((packed >> 8) & 0xFF00u);
+        word |= bits << (chunk * 16);
+    }
+    carrier_word = word;
+    return true;
+}
+#endif
+
 static bool process_compact_gt_words(
     const FastGenotypeRecord& record,
     int genotype_text_n_samples,
@@ -2119,7 +2266,20 @@ static bool process_compact_gt_words(
                  ++word_index) {
                 int samples_in_word = std::min(32, genotype_text_n_samples - out_i);
                 uint64_t carrier_word = 0;
-                for (int sample_in_word = 0; sample_in_word < samples_in_word;
+                bool packed_wide = false;
+#if defined(FELIXLA_X86_SIMD)
+                // The final column ends in NUL rather than TAB, so the word
+                // holding it stays on the column-at-a-time path.
+                if (g_have_avx2 && samples_in_word == 32 &&
+                    out_i + 32 < genotype_text_n_samples &&
+                    compact_gt_word_avx2(cursor, carrier_word)) {
+                    cursor += 128;
+                    out_i += 32;
+                    packed_wide = true;
+                }
+#endif
+                for (int sample_in_word = 0;
+                     !packed_wide && sample_in_word < samples_in_word;
                      ++sample_in_word, ++out_i) {
                     char expected_delimiter =
                         out_i + 1 == genotype_text_n_samples ? '\0' : '\t';
@@ -2484,8 +2644,13 @@ static void process_fast_text_genotypes(
     }
 }
 
+static inline bool is_ascii_digit(char c) {
+    return c >= '0' && c <= '9';
+}
+
 static void decode_fast_flare_samples(
     const char* samples,
+    size_t samples_length,
     int an1_index,
     int an2_index,
     const std::vector<int>& raw_to_output,
@@ -2505,108 +2670,142 @@ static void decode_fast_flare_samples(
         out.changes.reserve(n_haps);
     }
 
-    const char* cursor = samples;
-    for (size_t raw_i = 0; raw_i < raw_to_output.size(); ++raw_i) {
-        int out_i = raw_to_output[raw_i];
-        const char* sample_end = nullptr;
-        const char* next_cursor = nullptr;
-        bool has_next_sample = false;
-        if (out_i >= 0) {
-            int a1 = 0;
-            int a2 = 0;
-            bool compact_ancestry_first =
-                an1_index == 0 && an2_index == 1 &&
-                cursor[0] >= '0' && cursor[0] <= '9' &&
-                cursor[1] == ':' &&
-                cursor[2] >= '0' && cursor[2] <= '9' &&
-                (cursor[3] == '\t' || cursor[3] == ':' || cursor[3] == '\0');
-            bool compact_flare_layout =
-                an1_index == 1 && an2_index == 2 &&
-                cursor[0] >= '0' && cursor[0] <= '9' &&
-                cursor[1] == '|' &&
-                cursor[2] >= '0' && cursor[2] <= '9' &&
-                cursor[3] == ':' &&
-                cursor[4] >= '0' && cursor[4] <= '9' &&
-                cursor[5] == ':' &&
-                cursor[6] >= '0' && cursor[6] <= '9' &&
-                (cursor[7] == '\t' || cursor[7] == ':' || cursor[7] == '\0');
-            if (compact_ancestry_first) {
-                a1 = cursor[0] - '0';
-                a2 = cursor[2] - '0';
-                if (cursor[3] == '\t') {
-                    has_next_sample = true;
-                    next_cursor = cursor + 4;
-                } else if (cursor[3] == '\0') {
-                    next_cursor = cursor + 3;
-                } else {
-                    sample_end = std::strchr(cursor + 4, '\t');
-                    has_next_sample = sample_end != nullptr;
-                    next_cursor = sample_end ? sample_end + 1
-                                             : cursor + std::strlen(cursor);
-                }
-            } else if (compact_flare_layout) {
-                a1 = cursor[4] - '0';
-                a2 = cursor[6] - '0';
-                if (cursor[7] == '\t') {
-                    has_next_sample = true;
-                    next_cursor = cursor + 8;
-                } else if (cursor[7] == '\0') {
-                    next_cursor = cursor + 7;
-                } else {
-                    sample_end = std::strchr(cursor + 8, '\t');
-                    has_next_sample = sample_end != nullptr;
-                    next_cursor = sample_end ? sample_end + 1
-                                             : cursor + std::strlen(cursor);
-                }
-            } else {
-                sample_end = std::strchr(cursor, '\t');
-                if (!sample_end) sample_end = cursor + std::strlen(cursor);
-                const char* an1_end = nullptr;
-                const char* an2_end = nullptr;
-                const char* an1_start = locate_sample_subfield(
-                    cursor, sample_end, an1_index, an1_end);
-                const char* an2_start = locate_sample_subfield(
-                    cursor, sample_end, an2_index, an2_end);
-                if (!an1_start || !an2_start) {
-                    die("missing FORMAT/AN1 or FORMAT/AN2 in FLARE record at sample index %llu",
-                        static_cast<unsigned long long>(raw_i));
-                }
-                a1 = parse_fast_nonnegative_int(an1_start, an1_end, "FORMAT/AN1");
-                a2 = parse_fast_nonnegative_int(an2_start, an2_end, "FORMAT/AN2");
-                has_next_sample = *sample_end == '\t';
-                next_cursor = *sample_end ? sample_end + 1 : sample_end;
-            }
-            if (a1 >= n_ancestries) {
-                die("FORMAT/AN1 value out of range at sample index %llu: %d",
-                    static_cast<unsigned long long>(raw_i), a1);
-            }
-            if (a2 >= n_ancestries) {
-                die("FORMAT/AN2 value out of range at sample index %llu: %d",
-                    static_cast<unsigned long long>(raw_i), a2);
-            }
-            uint32_t hap0 = static_cast<uint32_t>(2 * out_i);
-            uint32_t hap1 = hap0 + 1;
-            int8_t next_a1 = static_cast<int8_t>(a1);
-            int8_t next_a2 = static_cast<int8_t>(a2);
-            if (decoder.hap_ancestry[hap0] != next_a1) {
-                decoder.hap_ancestry[hap0] = next_a1;
-                out.changes.push_back(AncestryChange{hap0, next_a1});
-            }
-            if (decoder.hap_ancestry[hap1] != next_a2) {
-                decoder.hap_ancestry[hap1] = next_a2;
-                out.changes.push_back(AncestryChange{hap1, next_a2});
-            }
-        } else {
-            sample_end = std::strchr(cursor, '\t');
-            if (!sample_end) sample_end = cursor + std::strlen(cursor);
-            has_next_sample = *sample_end == '\t';
-            next_cursor = *sample_end ? sample_end + 1 : sample_end;
-        }
+    if (scan_sample_field_ends(
+            samples, samples_length, raw_to_output.size(), decoder.field_ends) !=
+        raw_to_output.size()) {
+        die("FLARE sample count mismatch");
+    }
 
-        if ((raw_i + 1 == raw_to_output.size()) == has_next_sample) {
-            die("FLARE sample count mismatch");
+    if (decoder.identity_mapping < 0) {
+        bool identity = raw_to_output.size() ==
+                        static_cast<size_t>(n_output_samples);
+        for (size_t i = 0; identity && i < raw_to_output.size(); ++i) {
+            identity = raw_to_output[i] == static_cast<int>(i);
         }
-        cursor = next_cursor;
+        decoder.identity_mapping = identity ? 1 : 0;
+    }
+
+    // FLARE writes every sample column at the same width, which lets the two
+    // ancestry labels be read at a fixed stride with no per-column parsing and
+    // no data-dependent branch. Anything unexpected sets `rejected` and the
+    // general loop below re-reads the record and reports the exact problem.
+    if (decoder.identity_mapping == 1 && an1_index == 1 && an2_index == 2 &&
+        !raw_to_output.empty()) {
+        size_t n = raw_to_output.size();
+        uint32_t stride = decoder.field_ends[0] + 1;
+        uint32_t layout_mismatch = 0;
+        for (size_t i = 1; i < n; ++i) {
+            layout_mismatch |= decoder.field_ends[i] ^
+                static_cast<uint32_t>((i + 1) * stride - 1);
+        }
+        uint32_t width = stride - 1;
+        if (layout_mismatch == 0 && width >= 7) {
+            size_t base_changes = out.changes.size();
+            unsigned limit = static_cast<unsigned>(n_ancestries);
+            char tail_delimiter = width > 7 ? ':' : '\0';
+            uint32_t rejected = 0;
+            for (size_t i = 0; i < n; ++i) {
+                const char* field = samples + i * stride;
+                unsigned a1 = static_cast<unsigned char>(field[4]) - '0';
+                unsigned a2 = static_cast<unsigned char>(field[6]) - '0';
+                rejected |= static_cast<uint32_t>(a1 >= limit);
+                rejected |= static_cast<uint32_t>(a2 >= limit);
+                rejected |= static_cast<uint32_t>(
+                    static_cast<unsigned char>(field[0]) - '0' >= 10u);
+                rejected |= static_cast<uint32_t>(
+                    static_cast<unsigned char>(field[2]) - '0' >= 10u);
+                rejected |= static_cast<uint32_t>(field[1] != '|');
+                rejected |= static_cast<uint32_t>(field[3] != ':');
+                rejected |= static_cast<uint32_t>(field[5] != ':');
+                rejected |= static_cast<uint32_t>(
+                    tail_delimiter != '\0' && field[7] != tail_delimiter);
+                uint32_t hap0 = static_cast<uint32_t>(2 * i);
+                int8_t next_a1 = static_cast<int8_t>(a1);
+                int8_t next_a2 = static_cast<int8_t>(a2);
+                if (decoder.hap_ancestry[hap0] != next_a1) {
+                    out.changes.push_back(AncestryChange{hap0, next_a1});
+                }
+                if (decoder.hap_ancestry[hap0 + 1] != next_a2) {
+                    out.changes.push_back(AncestryChange{hap0 + 1, next_a2});
+                }
+            }
+            if (rejected == 0) {
+                // Each haplotype appears once per record, so the reads above
+                // never needed the updates this applies.
+                for (size_t k = base_changes; k < out.changes.size(); ++k) {
+                    decoder.hap_ancestry[out.changes[k].hap_id] =
+                        out.changes[k].ancestry;
+                }
+                return;
+            }
+            out.changes.resize(base_changes);
+        }
+    }
+
+    size_t field_start = 0;
+    for (size_t raw_i = 0; raw_i < raw_to_output.size(); ++raw_i) {
+        const char* field = samples + field_start;
+        size_t field_length = decoder.field_ends[raw_i] - field_start;
+        field_start = decoder.field_ends[raw_i] + 1;
+
+        int out_i = raw_to_output[raw_i];
+        if (out_i < 0) continue;
+
+        int a1 = 0;
+        int a2 = 0;
+        bool compact_ancestry_first =
+            an1_index == 0 && an2_index == 1 && field_length >= 3 &&
+            is_ascii_digit(field[0]) && field[1] == ':' &&
+            is_ascii_digit(field[2]) &&
+            (field_length == 3 || field[3] == ':');
+        bool compact_flare_layout =
+            an1_index == 1 && an2_index == 2 && field_length >= 7 &&
+            is_ascii_digit(field[0]) && field[1] == '|' &&
+            is_ascii_digit(field[2]) && field[3] == ':' &&
+            is_ascii_digit(field[4]) && field[5] == ':' &&
+            is_ascii_digit(field[6]) &&
+            (field_length == 7 || field[7] == ':');
+        if (compact_ancestry_first) {
+            a1 = field[0] - '0';
+            a2 = field[2] - '0';
+        } else if (compact_flare_layout) {
+            a1 = field[4] - '0';
+            a2 = field[6] - '0';
+        } else {
+            const char* field_end = field + field_length;
+            const char* an1_end = nullptr;
+            const char* an2_end = nullptr;
+            const char* an1_start = locate_sample_subfield(
+                field, field_end, an1_index, an1_end);
+            const char* an2_start = locate_sample_subfield(
+                field, field_end, an2_index, an2_end);
+            if (!an1_start || !an2_start) {
+                die("missing FORMAT/AN1 or FORMAT/AN2 in FLARE record at sample index %llu",
+                    static_cast<unsigned long long>(raw_i));
+            }
+            a1 = parse_fast_nonnegative_int(an1_start, an1_end, "FORMAT/AN1");
+            a2 = parse_fast_nonnegative_int(an2_start, an2_end, "FORMAT/AN2");
+        }
+        if (a1 >= n_ancestries) {
+            die("FORMAT/AN1 value out of range at sample index %llu: %d",
+                static_cast<unsigned long long>(raw_i), a1);
+        }
+        if (a2 >= n_ancestries) {
+            die("FORMAT/AN2 value out of range at sample index %llu: %d",
+                static_cast<unsigned long long>(raw_i), a2);
+        }
+        uint32_t hap0 = static_cast<uint32_t>(2 * out_i);
+        uint32_t hap1 = hap0 + 1;
+        int8_t next_a1 = static_cast<int8_t>(a1);
+        int8_t next_a2 = static_cast<int8_t>(a2);
+        if (decoder.hap_ancestry[hap0] != next_a1) {
+            decoder.hap_ancestry[hap0] = next_a1;
+            out.changes.push_back(AncestryChange{hap0, next_a1});
+        }
+        if (decoder.hap_ancestry[hap1] != next_a2) {
+            decoder.hap_ancestry[hap1] = next_a2;
+            out.changes.push_back(AncestryChange{hap1, next_a2});
+        }
     }
 }
 
@@ -2645,6 +2844,7 @@ static bool read_next_fast_lai_record(
         out.pos = parse_fast_positive_pos(fields[1]);
         decode_fast_flare_samples(
             samples,
+            reader.line.l - static_cast<size_t>(samples - reader.line.s),
             an1_index,
             an2_index,
             raw_to_output,
@@ -3527,6 +3727,7 @@ static bool init_synced_region_reader(
 
     if (reader->nreaders > 0 && reader->readers[0].file) {
         hts_set_opt(reader->readers[0].file, HTS_OPT_BLOCK_SIZE, kInputBlockSize);
+        attach_input_thread_pool(reader->readers[0].file);
     }
 
     *out = reader;
@@ -3712,7 +3913,7 @@ static void print_usage(const char* prog) {
     std::fprintf(
         stderr,
         "Usage:\n"
-        "  %s genotype.phased.vcf.gz flare.anc.vcf.gz n_ancestries rare_threshold|auto out_prefix [chr:start-end] [--keep samples.txt] [--extract sites.pvar|sites.vcf] [--extract-bed intervals.bed]\n\n"
+        "  %s genotype.phased.vcf.gz flare.anc.vcf.gz n_ancestries rare_threshold|auto out_prefix [chr:start-end] [--keep samples.txt] [--extract sites.pvar|sites.vcf] [--extract-bed intervals.bed] [--threads N]\n\n"
         "Example:\n"
         "  %s chr1.phased.vcf.gz chr1.flare.anc.vcf.gz 3 auto chr1\n"
         "  %s chr22.phased.vcf.gz chr22.flare.anc.vcf.gz 5 512 chr22.1 chr22:1-50000000\n",
@@ -3759,9 +3960,17 @@ int main(int argc, char** argv) {
     std::string keep_path;
     std::string extract_path;
     std::string extract_bed_path;
+    int decompress_threads = 1;
     for (int argi = 6; argi < argc; ++argi) {
         std::string arg = argv[argi];
-        if (arg == "--keep") {
+        if (arg == "--threads") {
+            if (argi + 1 >= argc) die("--threads requires a value");
+            decompress_threads = static_cast<int>(
+                parse_i64_string(argv[++argi], "--threads"));
+            if (decompress_threads < 1 || decompress_threads > 128) {
+                die("--threads must be in [1, 128]");
+            }
+        } else if (arg == "--keep") {
             if (argi + 1 >= argc) die("--keep requires a value");
             keep_path = argv[++argi];
         } else if (arg == "--extract") {
@@ -3783,6 +3992,12 @@ int main(int argc, char** argv) {
     }
 
     report_stage(out_prefix, "opening input files and reading headers");
+    if (decompress_threads > 1) {
+        if (!(g_input_thread_pool.pool = hts_tpool_init(decompress_threads))) {
+            die("cannot create %d decompression threads", decompress_threads);
+        }
+    }
+
     htsFile* gfp = bcf_open(geno_vcf, "r");
     htsFile* afp = bcf_open(flare_vcf, "r");
 
@@ -3792,6 +4007,8 @@ int main(int argc, char** argv) {
 
     hts_set_opt(gfp, HTS_OPT_BLOCK_SIZE, kInputBlockSize);
     hts_set_opt(afp, HTS_OPT_BLOCK_SIZE, kInputBlockSize);
+    attach_input_thread_pool(gfp);
+    attach_input_thread_pool(afp);
 
     bcf_hdr_t* ghdr = bcf_hdr_read(gfp);
     bcf_hdr_t* ahdr = bcf_hdr_read(afp);
@@ -4891,6 +5108,10 @@ int main(int argc, char** argv) {
     if (ahdr) bcf_hdr_destroy(ahdr);
     bcf_close(gfp);
     bcf_close(afp);
+    if (g_input_thread_pool.pool) {
+        hts_tpool_destroy(g_input_thread_pool.pool);
+        g_input_thread_pool.pool = nullptr;
+    }
 
     std::fclose(common_fp);
     std::fclose(common_mks_fp);
