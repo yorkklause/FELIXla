@@ -387,6 +387,13 @@ overlapping entries are retained in memory; unsorted lists remain supported.
 Because a plain site list has no coordinate index, every worker still streams
 that file once, so keep it on local storage when launching many regions.
 
+A retained site costs about 41 bytes: contig names are interned, allele text is
+held in one arena, and the per-site record is fixed-width. A 10-million-site
+whole-genome list is therefore roughly 430 MB. That is per process, so budget
+it against the worker count before raising concurrency, and narrow the list
+with `--region` where possible -- sites outside the region are dropped as the
+file is read and never held.
+
 With `--extract-bed`, overlapping and adjacent intervals are merged first. The
 genotype reader makes at most one indexed span query per retained chromosome
 and performs exact BED membership checks while scanning that span. Sparse BED
