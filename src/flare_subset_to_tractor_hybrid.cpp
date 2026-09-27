@@ -1453,6 +1453,7 @@ static void write_sidecars(
     const char* keep_path,
     const char* extract_path,
     const char* exclude_path,
+    const char* contig_filter,
     const BedIntervals& bed,
     const std::string& command_line
 ) {
@@ -1511,6 +1512,9 @@ static void write_sidecars(
     }
     if (exclude_path) {
         std::fprintf(meta_fp, "exclude_sites\t%s\n", exclude_path);
+    }
+    if (contig_filter && *contig_filter) {
+        std::fprintf(meta_fp, "contig_filter\t%s\n", contig_filter);
     }
     if (bed.active) {
         std::fprintf(meta_fp, "extract_bed\t%s\n", bed.path.c_str());
@@ -3418,6 +3422,157 @@ static void prepare_extract_positions(ExtractSites& extract_sites, bcf_hdr_t* gh
     );
 }
 
+// --chr and friends select whole contigs, so intersecting them with a BED set
+// is just dropping the intervals on unselected contigs, and without a BED set
+// they become one whole-contig interval each. Everything downstream -- indexed
+// span queries, the per-record cursor, ancestry-block handling -- then applies
+// unchanged.
+struct ContigSelection {
+    bool active = false;
+    bool negated = false;
+    std::vector<std::string> tokens;
+    std::string label;
+};
+
+static void append_contig_tokens(ContigSelection& selection, const char* text) {
+    for (const std::string& part : split_commas(text)) {
+        if (part.empty()) continue;
+        size_t dash = part.find('-', 1);
+        long from = 0;
+        long to = 0;
+        if (dash != std::string::npos) {
+            const std::string low = part.substr(0, dash);
+            const std::string high = part.substr(dash + 1);
+            char* low_end = nullptr;
+            char* high_end = nullptr;
+            from = std::strtol(low.c_str(), &low_end, 10);
+            to = std::strtol(high.c_str(), &high_end, 10);
+            if (low_end && *low_end == '\0' && high_end && *high_end == '\0' &&
+                from >= 1 && to >= from && to <= 1000) {
+                for (long i = from; i <= to; ++i) {
+                    selection.tokens.push_back(std::to_string(i));
+                }
+                continue;
+            }
+        }
+        selection.tokens.push_back(part);
+    }
+}
+
+// A token is matched against the genotype header as written, then with a chr
+// prefix added, then removed, so "--chr 1" works on a chr-prefixed header and
+// the other way round.
+static int resolve_contig_token(bcf_hdr_t* hdr, const std::string& token) {
+    int rid = bcf_hdr_name2id(hdr, token.c_str());
+    if (rid >= 0) return rid;
+    if (token.compare(0, 3, "chr") != 0) {
+        rid = bcf_hdr_name2id(hdr, ("chr" + token).c_str());
+        if (rid >= 0) return rid;
+    } else {
+        rid = bcf_hdr_name2id(hdr, token.substr(3).c_str());
+        if (rid >= 0) return rid;
+    }
+    return -1;
+}
+
+static int64_t contig_length_or_max(bcf_hdr_t* hdr, int rid) {
+    if (rid < 0 || rid >= hdr->n[BCF_DT_CTG]) return kMaxVcfCoordinate;
+    uint64_t length = hdr->id[BCF_DT_CTG][rid].val
+        ? static_cast<uint64_t>(hdr->id[BCF_DT_CTG][rid].val->info[0])
+        : 0;
+    if (length == 0 || length > static_cast<uint64_t>(kMaxVcfCoordinate)) {
+        return kMaxVcfCoordinate;
+    }
+    return static_cast<int64_t>(length);
+}
+
+static void apply_contig_selection(
+    const ContigSelection& selection,
+    BedIntervals& bed,
+    const Region& region,
+    bcf_hdr_t* ghdr
+) {
+    if (!selection.active) return;
+
+    std::unordered_set<int> named;
+    for (const std::string& token : selection.tokens) {
+        int rid = resolve_contig_token(ghdr, token);
+        if (rid < 0) {
+            std::fprintf(
+                stderr,
+                "WARNING: %s names a contig absent from the genotype VCF header: %s\n",
+                selection.label.c_str(),
+                token.c_str()
+            );
+            continue;
+        }
+        named.insert(rid);
+    }
+
+    std::vector<int> selected;
+    if (selection.negated) {
+        for (int rid = 0; rid < ghdr->n[BCF_DT_CTG]; ++rid) {
+            if (named.count(rid) == 0) selected.push_back(rid);
+        }
+    } else {
+        selected.assign(named.begin(), named.end());
+        std::sort(selected.begin(), selected.end());
+    }
+
+    if (region.active) {
+        bool region_kept = std::find(selected.begin(), selected.end(),
+                                     region.geno_rid) != selected.end();
+        if (!region_kept) {
+            die("%s excludes the --region contig %s",
+                selection.label.c_str(), region.chr.c_str());
+        }
+        return;  // --region already pins the scan to that one contig
+    }
+
+    std::unordered_set<int> keep(selected.begin(), selected.end());
+    if (bed.active) {
+        size_t write_i = 0;
+        for (size_t read_i = 0; read_i < bed.intervals.size(); ++read_i) {
+            if (keep.count(bed.intervals[read_i].geno_rid) == 0) continue;
+            if (write_i != read_i) {
+                bed.intervals[write_i] = std::move(bed.intervals[read_i]);
+            }
+            ++write_i;
+        }
+        bed.intervals.resize(write_i);
+        bed.selected_interval_count = static_cast<uint64_t>(bed.intervals.size());
+        std::fprintf(
+            stderr,
+            "Applied %s to --extract-bed: %llu interval(s) remain across %llu contig(s).\n",
+            selection.label.c_str(),
+            static_cast<unsigned long long>(bed.intervals.size()),
+            static_cast<unsigned long long>(keep.size())
+        );
+        return;
+    }
+
+    bed.active = true;
+    bed.path = selection.label;
+    bed.intervals.clear();
+    for (int rid : selected) {
+        BedInterval interval;
+        interval.chr = bcf_hdr_id2name(ghdr, rid);
+        interval.start = 1;
+        interval.end = contig_length_or_max(ghdr, rid);
+        interval.geno_rid = rid;
+        bed.intervals.push_back(std::move(interval));
+    }
+    bed.source_interval_count = static_cast<uint64_t>(bed.intervals.size());
+    bed.merged_interval_count = bed.source_interval_count;
+    bed.selected_interval_count = bed.source_interval_count;
+    std::fprintf(
+        stderr,
+        "Applied %s: converting %llu whole contig(s).\n",
+        selection.label.c_str(),
+        static_cast<unsigned long long>(bed.intervals.size())
+    );
+}
+
 static bool bed_interval_less(const BedInterval& a, const BedInterval& b) {
     if (a.geno_rid != b.geno_rid) return a.geno_rid < b.geno_rid;
     if (a.chr != b.chr) return a.chr < b.chr;
@@ -4274,6 +4429,7 @@ int main(int argc, char** argv) {
     std::string extract_path;
     std::string exclude_path;
     std::string extract_bed_path;
+    ContigSelection contigs;
     int decompress_threads = 1;
     for (int argi = 6; argi < argc; ++argi) {
         std::string arg = argv[argi];
@@ -4293,6 +4449,20 @@ int main(int argc, char** argv) {
         } else if (arg == "--exclude") {
             if (argi + 1 >= argc) die("--exclude requires a value");
             exclude_path = argv[++argi];
+        } else if (arg == "--chr" || arg == "--not-chr") {
+            if (argi + 1 >= argc) die("%s requires a value", arg.c_str());
+            if (contigs.active) die("--chr/--not-chr/--autosome are exclusive");
+            contigs.active = true;
+            contigs.negated = arg == "--not-chr";
+            contigs.label = arg;
+            append_contig_tokens(contigs, argv[++argi]);
+        } else if (arg == "--autosome") {
+            if (contigs.active) die("--chr/--not-chr/--autosome are exclusive");
+            contigs.active = true;
+            contigs.label = arg;
+            for (int c = 1; c <= 22; ++c) {
+                contigs.tokens.push_back(std::to_string(c));
+            }
         } else if (arg == "--extract-bed") {
             if (argi + 1 >= argc) die("--extract-bed requires a value");
             extract_bed_path = argv[++argi];
@@ -4425,6 +4595,15 @@ int main(int argc, char** argv) {
     prepare_extract_positions(extract_sites, ghdr);
     prepare_extract_positions(exclude_sites, ghdr);
     prepare_bed_intervals(bed, ghdr);
+    apply_contig_selection(contigs, bed, region, ghdr);
+    std::string contig_filter_label;
+    if (contigs.active) {
+        contig_filter_label = contigs.label;
+        for (size_t i = 0; i < contigs.tokens.size(); ++i) {
+            contig_filter_label += i == 0 ? ' ' : ',';
+            contig_filter_label += contigs.tokens[i];
+        }
+    }
     intersect_extract_positions_with_bed(extract_sites, bed);
 
     if (extract_sites.active) {
@@ -4800,6 +4979,7 @@ int main(int argc, char** argv) {
         keep_path.empty() ? nullptr : keep_path.c_str(),
         extract_path.empty() ? nullptr : extract_path.c_str(),
         exclude_path.empty() ? nullptr : exclude_path.c_str(),
+        contig_filter_label.c_str(),
         bed,
         g_felixla_invocation.empty() ? join_command_line(argc, argv)
                                      : g_felixla_invocation

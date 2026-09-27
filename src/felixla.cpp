@@ -79,6 +79,9 @@ Common output and parameter flags:
   --keep FILE                   Sample IDs to retain, one ID per line.
   --extract FILE                PVAR/VCF alleles; ID ignored, shared padding normalized.
   --exclude FILE                PVAR/VCF alleles to drop; applied after --extract.
+  --chr LIST                    Contigs to convert, comma-separated; ranges like 1-22 allowed.
+  --not-chr LIST                Contigs to skip; same spelling rules as --chr.
+  --autosome                    Equivalent to --chr 1-22.
   --extract-bed FILE            BED intervals; standard 0-based half-open coordinates.
   --threads INT                 BGZF decompression threads for --make-felixla. Default: 1.
   --region CHR:START-END        Region for conversion/extraction.
@@ -459,6 +462,8 @@ struct PlinkArgs {
     std::string keep_path;
     std::string extract_path;
     std::string exclude_path;
+    std::string not_chr;
+    bool autosome = false;
     std::string extract_bed_path;
     std::string threads;
     std::string max_diffs;
@@ -546,6 +551,10 @@ PlinkArgs parse_plink_args(int argc, char** argv) {
             args.extract_path = require_value(i, argc, argv, arg);
         } else if (arg == "--exclude") {
             args.exclude_path = require_value(i, argc, argv, arg);
+        } else if (arg == "--not-chr") {
+            args.not_chr = require_value(i, argc, argv, arg);
+        } else if (arg == "--autosome") {
+            args.autosome = true;
         } else if (arg == "--extract-bed") {
             args.extract_bed_path = require_value(i, argc, argv, arg);
         } else if (arg == "--threads") {
@@ -612,7 +621,7 @@ int run_plink_style(int argc, char** argv) {
     PlinkArgs args = parse_plink_args(argc, argv);
 
     if (!args.keep_path.empty() || !args.extract_path.empty() ||
-        !args.exclude_path.empty() ||
+        !args.exclude_path.empty() || !args.not_chr.empty() || args.autosome ||
         !args.extract_bed_path.empty() || !args.threads.empty()) {
         if (!args.make_felixla ||
             args.query_action ||
@@ -623,7 +632,7 @@ int run_plink_style(int argc, char** argv) {
             !args.export_format.empty() ||
             args.phase_vcf.empty() ||
             args.flare_vcf.empty()) {
-            die("--keep/--extract/--exclude/--extract-bed/--threads are currently supported only for --phase-vcf + --flare-vcf --make-felixla");
+            die("--keep/--extract/--exclude/--not-chr/--autosome/--extract-bed/--threads are currently supported only for --phase-vcf + --flare-vcf --make-felixla");
         }
     }
 
@@ -765,6 +774,20 @@ int run_plink_style(int argc, char** argv) {
                 pack_args.push_back("--exclude");
                 pack_args.push_back(args.exclude_path);
             }
+            if (!args.chr.empty() &&
+                (!args.from_bp.empty() || !args.to_bp.empty())) {
+                die("--chr with --from-bp/--to-bp is the extraction region form; "
+                    "use --region CHR:START-END when writing from --phase-vcf");
+            }
+            if (!args.chr.empty()) {
+                pack_args.push_back("--chr");
+                pack_args.push_back(args.chr);
+            }
+            if (!args.not_chr.empty()) {
+                pack_args.push_back("--not-chr");
+                pack_args.push_back(args.not_chr);
+            }
+            if (args.autosome) pack_args.push_back("--autosome");
             if (!args.extract_bed_path.empty()) {
                 pack_args.push_back("--extract-bed");
                 pack_args.push_back(args.extract_bed_path);

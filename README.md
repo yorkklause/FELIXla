@@ -104,6 +104,7 @@ felixla \
   [ --keep SAMPLE_LIST ] \
   [ --extract SITE_LIST ] \
   [ --exclude SITE_LIST ] \
+  [ --chr CONTIGS | --not-chr CONTIGS | --autosome ] \
   [ --extract-bed BED_INTERVALS ] \
   [ --threads N_THREADS ]
 ```
@@ -164,6 +165,20 @@ felixla \
   Note that neither `--extract` nor `--exclude` uses the `ID` column: matching
   is on `CHROM`, `POS` and the normalized `REF`/`ALT`. A PLINK-style file of
   bare variant IDs is therefore rejected rather than silently misread.
+
+- `--chr` / `--not-chr` / `--autosome` (optional): Select whole contigs to
+  convert. CONTIGS is comma-separated and accepts numeric ranges, so
+  `--chr 1-22,X` and `--chr chr1,chr2` both work; `--autosome` is exactly
+  `--chr 1-22`. Each name is matched against the genotype VCF header as
+  written, then with a `chr` prefix added, then removed, so the same command
+  works on either naming convention. A name matching no contig in the header
+  is a warning, not an error. The three flags are mutually exclusive.
+
+  Selecting whole contigs composes with the interval filters: with
+  `--extract-bed`, intervals on unselected contigs are dropped; without it,
+  each selected contig becomes one whole-contig interval. Combining a contig
+  selection with a `--region` on an unselected contig is an error rather than
+  a silently empty run.
 
 - BED_INTERVALS (optional): A BED or gzip-compressed BED file. FELIXla reads
   the first three columns and ignores later columns, `track`/`browser` rows,
