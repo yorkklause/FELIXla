@@ -9,7 +9,9 @@
 FROM debian:bookworm-slim AS build
 ARG DEBIAN_FRONTEND=noninteractive
 ARG FELIXLA_CXXFLAGS="-O3 -std=c++17 -Wall -Wextra -Wpedantic"
-ARG HTSLIB_VERSION=1.21
+# Kept in step with HTSLIB_VERSION in .github/workflows/static-release.yml,
+# so the image and the released binaries carry the same htslib.
+ARG HTSLIB_VERSION=1.23.1
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
