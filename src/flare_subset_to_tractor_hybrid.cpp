@@ -3577,6 +3577,90 @@ static void prepare_bed_intervals(BedIntervals& bed, bcf_hdr_t* ghdr) {
     }
 }
 
+// Excluding intervals is expressed as narrowing the selection rather than as a
+// second per-record filter, so ancestry blocks are clipped at exclusion
+// boundaries by the same code that clips them at --extract-bed gaps instead of
+// by a parallel mechanism that would have to agree with it.
+static void apply_bed_exclusion(
+    BedIntervals& bed,
+    const BedIntervals& exclude,
+    const Region& region,
+    bcf_hdr_t* ghdr
+) {
+    if (!exclude.active) return;
+
+    // Subtracting from "everything" needs an everything to subtract from.
+    if (!bed.active) {
+        bed.active = true;
+        bed.from_file = false;
+        bed.path = "--exclude-bed complement";
+        bed.intervals.clear();
+        if (region.active) {
+            BedInterval whole;
+            whole.chr = region.chr;
+            whole.start = region.start;
+            whole.end = region.end;
+            whole.geno_rid = region.geno_rid;
+            bed.intervals.push_back(std::move(whole));
+        } else {
+            for (int rid = 0; rid < ghdr->n[BCF_DT_CTG]; ++rid) {
+                BedInterval whole;
+                whole.chr = bcf_hdr_id2name(ghdr, rid);
+                whole.start = 1;
+                whole.end = contig_length_or_max(ghdr, rid);
+                whole.geno_rid = rid;
+                bed.intervals.push_back(std::move(whole));
+            }
+        }
+    }
+
+    std::vector<BedInterval> kept;
+    kept.reserve(bed.intervals.size());
+    size_t first_candidate = 0;
+    for (const BedInterval& selected : bed.intervals) {
+        while (first_candidate < exclude.intervals.size()) {
+            const BedInterval& e = exclude.intervals[first_candidate];
+            if (e.geno_rid < selected.geno_rid ||
+                (e.geno_rid == selected.geno_rid && e.end < selected.start)) {
+                ++first_candidate;
+                continue;
+            }
+            break;
+        }
+
+        int64_t cursor = selected.start;
+        // A later selected interval may overlap the same exclusion, so the
+        // shared cursor only skips exclusions that can never be needed again.
+        for (size_t i = first_candidate; i < exclude.intervals.size(); ++i) {
+            const BedInterval& e = exclude.intervals[i];
+            if (e.geno_rid != selected.geno_rid || e.start > selected.end) break;
+            if (e.start > cursor) {
+                BedInterval piece = selected;
+                piece.start = cursor;
+                piece.end = std::min(e.start - 1, selected.end);
+                kept.push_back(std::move(piece));
+            }
+            cursor = std::max(cursor, e.end + 1);
+            if (cursor > selected.end) break;
+        }
+        if (cursor <= selected.end) {
+            BedInterval piece = selected;
+            piece.start = cursor;
+            kept.push_back(std::move(piece));
+        }
+    }
+
+    bed.intervals = std::move(kept);
+    bed.selected_interval_count = static_cast<uint64_t>(bed.intervals.size());
+    log_line("exclude-bed-retained-intervals %llu",
+        static_cast<unsigned long long>(bed.intervals.size()));
+    std::fprintf(
+        stderr,
+        "Applied --exclude-bed: %llu selected interval(s) remain.\n",
+        static_cast<unsigned long long>(bed.intervals.size())
+    );
+}
+
 static bool bed_interval_precedes_extract_position(
     const ExtractSites& sites,
     const BedInterval& interval,
@@ -4377,6 +4461,7 @@ int main(int argc, char** argv) {
     std::string extract_path;
     std::string exclude_path;
     std::string extract_bed_path;
+    std::string exclude_bed_path;
     ContigSelection contigs;
     int decompress_threads = 1;
     for (int argi = 6; argi < argc; ++argi) {
@@ -4405,6 +4490,9 @@ int main(int argc, char** argv) {
         } else if (arg == "--extract-bed") {
             if (argi + 1 >= argc) die("--extract-bed requires a value");
             extract_bed_path = argv[++argi];
+        } else if (arg == "--exclude-bed") {
+            if (argi + 1 >= argc) die("--exclude-bed requires a value");
+            exclude_bed_path = argv[++argi];
         } else if (!arg.empty() && arg[0] == '-') {
             die("unknown option: %s", arg.c_str());
         } else {
@@ -4432,6 +4520,7 @@ int main(int argc, char** argv) {
         log_line("extract-bed %s", extract_bed_path.c_str());
         log_line("extract-bed-coordinates 0-based-half-open");
     }
+    if (!exclude_bed_path.empty()) log_line("exclude-bed %s", exclude_bed_path.c_str());
     if (contigs.active) {
         std::string tokens;
         for (size_t i = 0; i < contigs.tokens.size(); ++i) {
@@ -4494,6 +4583,7 @@ int main(int argc, char** argv) {
 
     report_stage(out_prefix, "loading variant filters");
     BedIntervals bed = load_bed_intervals(extract_bed_path, region);
+    BedIntervals exclude_bed = load_bed_intervals(exclude_bed_path, Region{});
     ExtractSites extract_sites = load_extract_sites(extract_path, region);
     // An exclusion list is not narrowed by --region: a site outside the region
     // is already absent from the output, so intersecting would only lose the
@@ -4559,6 +4649,8 @@ int main(int argc, char** argv) {
     prepare_extract_positions(exclude_sites, ghdr);
     prepare_bed_intervals(bed, ghdr);
     apply_contig_selection(contigs, bed, region, ghdr);
+    prepare_bed_intervals(exclude_bed, ghdr);
+    apply_bed_exclusion(bed, exclude_bed, region, ghdr);
     if (bed.active && bed.from_file) {
         log_line("extract-bed-source-intervals %llu",
             static_cast<unsigned long long>(bed.source_interval_count));

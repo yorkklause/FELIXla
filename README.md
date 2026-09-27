@@ -106,6 +106,7 @@ felixla \
   [ --exclude SITE_LIST ] \
   [ --chr CONTIGS ] \
   [ --extract-bed BED_INTERVALS ] \
+  [ --exclude-bed BED_INTERVALS ] \
   [ --threads N_THREADS ]
 ```
 
@@ -193,6 +194,15 @@ felixla \
   `--extract` narrows the allele set. `--extract-bed`, `--extract`, and
   `--region` are intersected when combined. Ancestry blocks are clipped and
   split at BED gaps.
+
+- `--exclude-bed` BED_INTERVALS (optional): BED intervals to drop, in the same
+  0-based half-open convention as `--extract-bed`. Exclusion narrows the
+  selection rather than filtering records separately, so the ancestry blocks
+  are clipped at exclusion boundaries by the same rule that clips them at
+  `--extract-bed` gaps, and a block never covers an excluded base. With no
+  `--extract-bed`, the selection starts as the whole of every genotype contig,
+  or as `--region` when one is given. Like `--exclude`, the list is not
+  narrowed by `--region`.
 
   With an indexed genotype VCF/BCF, FELIXla creates one bounded read span from
   the first through last retained BED interval on each chromosome, then applies
