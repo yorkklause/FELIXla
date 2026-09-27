@@ -1450,17 +1450,12 @@ static void write_anc_mks_record(
 static void write_sidecars(
     const std::string& samples_path,
     const std::string& meta_path,
-    const char* geno_vcf,
-    const char* flare_vcf,
     const std::vector<std::string>& sample_ids,
     uint64_t n_haps,
     int n_words,
     int n_ancestries,
     int rare_threshold,
-    const char* selected_region,
-    const char* keep_path,
-    const char* extract_path,
-    const BedIntervals& bed
+    const char* selected_region
 ) {
     FILE* samples_fp = open_output_or_die(samples_path, "w");
     constexpr size_t kSampleWriteBufferBytes = 1024 * 1024;
@@ -1498,26 +1493,8 @@ static void write_sidecars(
     std::fprintf(meta_fp, "n_words\t%d\n", n_words);
     std::fprintf(meta_fp, "n_ancestries\t%d\n", n_ancestries);
     std::fprintf(meta_fp, "rare_threshold\t%d\n", rare_threshold);
-    std::fprintf(meta_fp, "source_genotype\t%s\n", geno_vcf);
-    std::fprintf(meta_fp, "source_flare\t%s\n", flare_vcf);
     if (selected_region) {
         std::fprintf(meta_fp, "selected_region\t%s\n", selected_region);
-    }
-    if (keep_path) {
-        std::fprintf(meta_fp, "keep_samples\t%s\n", keep_path);
-    }
-    if (extract_path) {
-        std::fprintf(meta_fp, "extract_sites\t%s\n", extract_path);
-    }
-    if (bed.active && bed.from_file) {
-        std::fprintf(meta_fp, "extract_bed\t%s\n", bed.path.c_str());
-        std::fprintf(meta_fp, "extract_bed_coordinates\t0-based-half-open\n");
-        std::fprintf(meta_fp, "extract_bed_source_intervals\t%llu\n",
-            static_cast<unsigned long long>(bed.source_interval_count));
-        std::fprintf(meta_fp, "extract_bed_merged_intervals\t%llu\n",
-            static_cast<unsigned long long>(bed.merged_interval_count));
-        std::fprintf(meta_fp, "extract_bed_selected_intervals\t%llu\n",
-            static_cast<unsigned long long>(bed.selected_interval_count));
     }
     std::fclose(meta_fp);
 }
@@ -4502,7 +4479,10 @@ int main(int argc, char** argv) {
     if (!keep_path.empty()) log_line("keep %s", keep_path.c_str());
     if (!extract_path.empty()) log_line("extract %s", extract_path.c_str());
     if (!exclude_path.empty()) log_line("exclude %s", exclude_path.c_str());
-    if (!extract_bed_path.empty()) log_line("extract-bed %s", extract_bed_path.c_str());
+    if (!extract_bed_path.empty()) {
+        log_line("extract-bed %s", extract_bed_path.c_str());
+        log_line("extract-bed-coordinates 0-based-half-open");
+    }
     if (contigs.active) {
         std::string tokens;
         for (size_t i = 0; i < contigs.tokens.size(); ++i) {
@@ -4630,6 +4610,14 @@ int main(int argc, char** argv) {
     prepare_extract_positions(exclude_sites, ghdr);
     prepare_bed_intervals(bed, ghdr);
     apply_contig_selection(contigs, bed, region, ghdr);
+    if (bed.active && bed.from_file) {
+        log_line("extract-bed-source-intervals %llu",
+            static_cast<unsigned long long>(bed.source_interval_count));
+        log_line("extract-bed-merged-intervals %llu",
+            static_cast<unsigned long long>(bed.merged_interval_count));
+        log_line("extract-bed-selected-intervals %llu",
+            static_cast<unsigned long long>(bed.selected_interval_count));
+    }
     intersect_extract_positions_with_bed(extract_sites, bed);
 
     if (extract_sites.active) {
@@ -4994,17 +4982,12 @@ int main(int argc, char** argv) {
     write_sidecars(
         samples_path,
         meta_path,
-        geno_vcf,
-        flare_vcf,
         sample_selection.sample_ids,
         n_haps,
         n_words,
         n_ancestries,
         rare_threshold,
-        region.active ? region.label.c_str() : nullptr,
-        keep_path.empty() ? nullptr : keep_path.c_str(),
-        extract_path.empty() ? nullptr : extract_path.c_str(),
-        bed
+        region.active ? region.label.c_str() : nullptr
     );
     report_stage(out_prefix, "finished writing sample and metadata sidecars");
 

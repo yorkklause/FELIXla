@@ -246,6 +246,17 @@ def read_meta(prefix: pathlib.Path) -> dict[str, str]:
     return meta
 
 
+def read_log(prefix: pathlib.Path) -> dict[str, str]:
+    """The run record beside the prefix: one `key value` line each."""
+    log = {}
+    with pathlib.Path(str(prefix) + ".log").open() as fh:
+        for line in fh:
+            parts = line.rstrip("\n").split(" ", 1)
+            if len(parts) == 2:
+                log[parts[0]] = parts[1]
+    return log
+
+
 def read_ancestry_blocks(prefix: pathlib.Path) -> list[dict]:
     data = pathlib.Path(str(prefix) + ".ancblock.mks").read_bytes()
     if data[:8] != b"TRANMKS1":
@@ -1099,12 +1110,12 @@ def check_extract_bed_basic(
         ancestry,
     )
 
-    meta = read_meta(prefix)
-    assert meta["extract_bed"] == str(bed_path), meta
-    assert meta["extract_bed_coordinates"] == "0-based-half-open", meta
-    assert meta["extract_bed_source_intervals"] == "7", meta
-    assert meta["extract_bed_merged_intervals"] == "5", meta
-    assert meta["extract_bed_selected_intervals"] == "5", meta
+    log = read_log(prefix)
+    assert log["extract-bed"] == str(bed_path), log
+    assert log["extract-bed-coordinates"] == "0-based-half-open", log
+    assert log["extract-bed-source-intervals"] == "7", log
+    assert log["extract-bed-merged-intervals"] == "5", log
+    assert log["extract-bed-selected-intervals"] == "5", log
     assert_ancestry_blocks_inside_bed(prefix, merged_intervals)
 
     blocks = read_ancestry_blocks(prefix)
@@ -1220,10 +1231,10 @@ def check_indexed_and_large_extract_bed(
     large_expected = repacked_bed_expected(full_expected, [("chr1", 130, 130)])
     large_vcf = export_prefix(bin_dir, large_prefix)
     assert_vcf_matches(large_vcf, samples, large_expected)
-    large_meta = read_meta(large_prefix)
-    assert large_meta["extract_bed_source_intervals"] == "20001", large_meta
-    assert large_meta["extract_bed_merged_intervals"] == "20001", large_meta
-    assert large_meta["extract_bed_selected_intervals"] == "20001", large_meta
+    large_log = read_log(large_prefix)
+    assert large_log["extract-bed-source-intervals"] == "20001", large_log
+    assert large_log["extract-bed-merged-intervals"] == "20001", large_log
+    assert large_log["extract-bed-selected-intervals"] == "20001", large_log
 
 
 def main() -> int:
@@ -1371,8 +1382,9 @@ def main() -> int:
         assert subset_meta["n_samples"] == str(len(keep_indices)), subset_meta
         assert subset_meta["n_words"] == "2", subset_meta
         assert subset_meta["rare_threshold"] == str(math.ceil(len(keep_indices) / 32)), subset_meta
-        assert subset_meta["keep_samples"] == str(keep_path), subset_meta
-        assert subset_meta["extract_sites"] == str(vcfgz_path), subset_meta
+        subset_log = read_log(subset_prefix)
+        assert subset_log["keep"] == str(keep_path), subset_log
+        assert subset_log["extract"] == str(vcfgz_path), subset_log
         assert read_samples(subset_prefix) == keep_samples
 
         pvar_prefix = work / "subset.pvar"
@@ -1555,11 +1567,15 @@ def main() -> int:
             bed_intersection_prefix,
             bed_region_intervals,
         )
+        # selected_region stays in .meta: concat parses it to learn which
+        # coordinate span the prefix covers. The interval accounting describes
+        # the run, so it moved to the log.
         bed_intersection_meta = read_meta(bed_intersection_prefix)
         assert bed_intersection_meta["selected_region"] == "chr1:100-600", bed_intersection_meta
-        assert bed_intersection_meta["extract_bed_source_intervals"] == "7", bed_intersection_meta
-        assert bed_intersection_meta["extract_bed_merged_intervals"] == "2", bed_intersection_meta
-        assert bed_intersection_meta["extract_bed_selected_intervals"] == "2", bed_intersection_meta
+        bed_intersection_log = read_log(bed_intersection_prefix)
+        assert bed_intersection_log["extract-bed-source-intervals"] == "7", bed_intersection_log
+        assert bed_intersection_log["extract-bed-merged-intervals"] == "2", bed_intersection_log
+        assert bed_intersection_log["extract-bed-selected-intervals"] == "2", bed_intersection_log
 
         bad_keep_dup = work / "bad.keep.dup"
         bad_keep_dup.write_text(f"{samples[0]}\n{samples[0]}\n")

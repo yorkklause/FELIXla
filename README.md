@@ -490,13 +490,25 @@ executables.
 
 ## Output
 
-Every conversion also writes `<prefix>.log`: the FELIXla version that ran, the
-command as invoked, the inputs and every filter applied, the variant and
-ancestry-block counts, and a closing `completed` line. A fatal error is
-appended there too, so a failed run leaves its own explanation. A log that
-does not end in `completed` is a run that did not finish, and its prefix must
-not be concatenated. `<prefix>.meta` stays the machine-read description of the
-packed data itself.
+`<prefix>.log` records the run and `<prefix>.meta` describes the data, and the
+split is deliberate: anything that would differ between two runs producing the
+same file belongs in the log, and anything a reader needs in order to
+interpret the file belongs in the metadata.
+
+The log holds the FELIXla version that ran, the command as invoked, the input
+paths, every filter applied, the resulting counts, and a closing `completed`
+line. A fatal error is appended there too, so a failed run leaves its own
+explanation, and a log not ending in `completed` marks a prefix that did not
+finish and must not be concatenated.
+
+The metadata holds `format_version`, `n_samples`, `n_haps`, `n_words`,
+`n_ancestries`, `rare_threshold`, the four variant and ancestry-block counts,
+and `selected_region`. Every one of those is read by something:
+`format_version`, `n_samples`, `n_haps`, `n_words` and `n_ancestries` are
+required by FELIXassoc, and concat additionally reads `rare_threshold`, the
+counts, and `selected_region`, which tells it the coordinate span the prefix
+covers. Readers ignore keys they do not know, so the metadata can gain fields
+without breaking them.
 
 
 A FELIXla packed prefix writes the following files:
