@@ -113,7 +113,7 @@ def pack(felixla, genotype, flare, n_ancestries, prefix, keep, scalar_paths):
                "--phase-vcf", str(genotype),
                "--flare-vcf", str(flare),
                "--n-ancestries", str(n_ancestries),
-               "--make-felixla",
+               "--export-felixla",
                "--out", str(prefix)]
     if keep:
         command += ["--keep", str(keep)]

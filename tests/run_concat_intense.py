@@ -12,6 +12,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+import felixla_check
 from run_keep_extract_intense import build_inputs, read_ancestry_blocks, read_meta
 
 
@@ -63,7 +66,7 @@ def build_prefix(
         str(flare),
         "--n-ancestries",
         "3",
-        "--make-felixla",
+        "--export-felixla",
         "--out",
         str(out),
     ]
@@ -117,9 +120,9 @@ def concat_plink(felixla: pathlib.Path, list_path: pathlib.Path, out: pathlib.Pa
     result = run(
         [
             str(felixla),
-            "--pmerge-list",
+            "--merge-list",
             str(list_path),
-            "--make-felixla",
+            "--export-felixla",
             "--out",
             str(out),
         ],
@@ -131,7 +134,7 @@ def concat_plink(felixla: pathlib.Path, list_path: pathlib.Path, out: pathlib.Pa
 
 
 def export_prefix(felixla: pathlib.Path, prefix: pathlib.Path, out: pathlib.Path) -> pathlib.Path:
-    run([str(felixla), "--felixla", str(prefix), "--export", "vcf", "--out", str(out)])
+    run([str(felixla), "--felixla", str(prefix), "--export-vcf", "--out", str(out)])
     return pathlib.Path(str(out) + ".vcf.gz")
 
 
@@ -142,34 +145,14 @@ def compare_queries(
     global_count: int,
     work: pathlib.Path,
 ) -> None:
-    indices = sorted({0, 1, 2, global_count // 3, global_count // 2, global_count - 1})
-    for index in indices:
-        direct_out = work / f"query.direct.{index}.tsv"
-        merged_out = work / f"query.merged.{index}.tsv"
-        run(
-            [
-                str(felixla),
-                "--felixla",
-                str(direct),
-                "--global-index",
-                str(index),
-                "--out",
-                str(direct_out),
-            ]
-        )
-        run(
-            [
-                str(felixla),
-                "--felixla",
-                str(merged),
-                "--global-index",
-                str(index),
-                "--out",
-                str(merged_out),
-            ]
-        )
-        if direct_out.read_bytes() != merged_out.read_bytes():
-            fail(f"ancestry-specific query mismatch at global index {index}")
+    """A merged prefix must serve the same dosages as the direct one.
+
+    Read out of the packed files rather than asked of FELIXla, so a bug in the
+    reader cannot cancel a matching bug in the writer.
+    """
+    del felixla, global_count, work
+    if felixla_check.read_dosages(direct) != felixla_check.read_dosages(merged):
+        fail("ancestry-specific dosages differ between direct and merged")
 
 
 def corrupt_binary_tail(path: pathlib.Path) -> None:
@@ -342,11 +325,10 @@ def main() -> int:
         compare_binary_prefixes(direct, striped)
         striped_vcf = export_prefix(felixla, striped, work / "bed.striped.export")
         direct_bed_vcf = export_prefix(felixla, direct, work / "bed.direct.export")
-        striped_comparison = run(
-            [str(felixla), "--compare-vcfs", str(direct_bed_vcf), str(striped_vcf)]
-        )
-        if "Differences:             0" not in striped_comparison.stdout:
-            fail(f"striped BED merge changed exported genotypes:\n{striped_comparison.stdout}")
+        diffs = felixla_check.compare_vcfs(direct_bed_vcf, striped_vcf)
+        if diffs:
+            fail("striped BED merge changed exported genotypes:\n  "
+                 + "\n  ".join(diffs))
         compare_queries(
             felixla,
             direct,
@@ -399,11 +381,10 @@ def main() -> int:
             fail(f"10-way BED merge did not simplify ancestry blocks: {many_meta}")
         compare_binary_prefixes(direct, many)
         many_vcf = export_prefix(felixla, many, work / "bed.many.export")
-        many_comparison = run(
-            [str(felixla), "--compare-vcfs", str(direct_bed_vcf), str(many_vcf)]
-        )
-        if "Differences:             0" not in many_comparison.stdout:
-            fail(f"10-way BED merge changed exported genotypes:\n{many_comparison.stdout}")
+        diffs = felixla_check.compare_vcfs(direct_bed_vcf, many_vcf)
+        if diffs:
+            fail("10-way BED merge changed exported genotypes:\n  "
+                 + "\n  ".join(diffs))
 
         overlap_a = work / "overlap.a.bed"
         overlap_b = work / "overlap.b.bed"
@@ -544,9 +525,9 @@ def main() -> int:
 
         direct_vcf = export_prefix(felixla, direct, work / "direct.export")
         merged_vcf = export_prefix(felixla, merged, work / "merged.export")
-        comparison = run([str(felixla), "--compare-vcfs", str(direct_vcf), str(merged_vcf)])
-        if "Differences:             0" not in comparison.stdout:
-            fail(f"direct/merged VCF mismatch:\n{comparison.stdout}")
+        diffs = felixla_check.compare_vcfs(direct_vcf, merged_vcf)
+        if diffs:
+            fail("direct/merged VCF mismatch:\n  " + "\n  ".join(diffs))
         compare_queries(
             felixla,
             direct,
@@ -584,7 +565,7 @@ def main() -> int:
                 str(merged),
                 "--region",
                 "chr1:1-500",
-                "--make-felixla",
+                "--export-felixla",
                 "--out",
                 str(extracted),
             ]

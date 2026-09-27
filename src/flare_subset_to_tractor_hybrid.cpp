@@ -4666,8 +4666,10 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (n_ancestries <= 0 || n_ancestries > 32) {
-        die("n_ancestries must be in [1, 32]");
+    // The count may still be unset here: it is settled once the FLARE header
+    // has been read, which is where the range is checked.
+    if (n_ancestries > 32) {
+        die("ancestry count must be in [1, 32], got %d", n_ancestries);
     }
 
     if (!felixla::log_open(out_prefix, argc, argv)) {
@@ -4675,7 +4677,6 @@ int main(int argc, char** argv) {
     }
     log_line("genotype %s", geno_vcf);
     log_line("flare %s", flare_vcf);
-    log_line("n_ancestries %d", n_ancestries);
     if (decompress_threads > 1) log_line("threads %d", decompress_threads);
     if (region.active) log_line("region %s", region.label.c_str());
     if (!keep_path.empty()) log_line("keep %s", keep_path.c_str());
@@ -4746,6 +4747,9 @@ int main(int argc, char** argv) {
             listed += "ANC" + std::to_string(i + 1) + "=" + ancestry_names[i];
         }
         log_line("ancestries %s", listed.c_str());
+    }
+    if (n_ancestries > 0) {
+        log_line("n_ancestries %d", n_ancestries);
     } else if (n_ancestries <= 0) {
         die("FLARE VCF header has no ##ANCESTRY lines, so the ancestry count "
             "cannot be determined; counting labels in the data would be wrong "

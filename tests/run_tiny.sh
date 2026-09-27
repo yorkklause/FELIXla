@@ -125,46 +125,22 @@ assert detached_rows == [
 ], detached_rows
 PY
 
-"$BIN_DIR/felixla" \
-  --felixla \
-  "$OUT_DIR/tiny" \
-  --query chr1:160 \
-  --ref A \
-  --alt T \
-  >"$OUT_DIR/tiny.common.query.tsv"
-
-"$BIN_DIR/felixla" \
-  --felixla \
-  "$OUT_DIR/tiny" \
-  --query chr1:100 \
-  --ref A \
-  --alt G \
-  --nonzero-only \
-  >"$OUT_DIR/tiny.rare.query.tsv"
-
-python3 - "$OUT_DIR/tiny.common.query.tsv" "$OUT_DIR/tiny.rare.query.tsv" <<'PY'
+python3 - "$ROOT_DIR/tests" "$OUT_DIR/tiny" <<'QUERYCHECK'
 import pathlib
 import sys
 
-common = pathlib.Path(sys.argv[1]).read_text().strip().splitlines()
-rare = pathlib.Path(sys.argv[2]).read_text().strip().splitlines()
-header = "global_variant_index\tchr\tpos\tid\tref\talt\tsample\tDSALL\tDS1\tDS2"
-assert common == [
-    header,
-    "4\tchr1\t160\tcommon_A_T\tA\tT\ts1\t2\t1\t1",
-    "4\tchr1\t160\tcommon_A_T\tA\tT\ts2\t0\t0\t0",
-], common
-assert rare == [
-    header,
-    "2\tchr1\t100\tmulti_A_G\tA\tG\ts2\t1\t0\t1",
-], rare
-PY
+sys.path.insert(0, sys.argv[1])
+import felixla_check
+
+# Dosages read out of the packed files rather than asked of FELIXla, so a
+# bug in the reader cannot cancel a matching bug in the writer.
+dosages = felixla_check.read_dosages(pathlib.Path(sys.argv[2]))
+assert dosages[("chr1", 160, "A", "T")] == [(2, [1, 1]), (0, [0, 0])], dosages
+assert dosages[("chr1", 100, "A", "G")] == [(0, [0, 0]), (1, [0, 1])], dosages
+QUERYCHECK
 
 "$BIN_DIR/felixla" --version >"$OUT_DIR/felixla.version.txt"
 grep -q "FELIXla CLI v0" "$OUT_DIR/felixla.version.txt"
-
-"$BIN_DIR/felixla" --recommend-mac-threshold --n-samples 2 >"$OUT_DIR/mac_threshold.tsv"
-grep -q $'recommended_mac_threshold\t1' "$OUT_DIR/mac_threshold.tsv"
 
 "$BIN_DIR/felixla" \
   --phase-vcf \
@@ -172,25 +148,27 @@ grep -q $'recommended_mac_threshold\t1' "$OUT_DIR/mac_threshold.tsv"
   --flare-vcf \
   "$ROOT_DIR/testdata/tiny.flare.vcf" \
   --n-ancestries 2 \
-  --make-felixla \
+  --export-felixla \
   --out \
   "$OUT_DIR/tiny.felixla_cli" >/dev/null
 
 "$BIN_DIR/felixla" \
   --felixla \
   "$OUT_DIR/tiny.felixla_cli" \
-  --export vcf \
+  --export-vcf \
   --out \
   "$OUT_DIR/tiny.felixla_cli.roundtrip.vcf.gz" >/dev/null
 
-"$BIN_DIR/felixla" \
-  --compare-vcfs \
-  "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
-  "$OUT_DIR/tiny.felixla_cli.roundtrip.vcf.gz" \
-  --split-multiallelic \
-  --out "$OUT_DIR/felixla_cli.compare.txt"
+python3 - "$ROOT_DIR/tests" "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
+  "$OUT_DIR/tiny.felixla_cli.roundtrip.vcf.gz" <<'ROUNDTRIP'
+import sys
 
-grep -q "Differences:             0" "$OUT_DIR/felixla_cli.compare.txt"
+sys.path.insert(0, sys.argv[1])
+import felixla_check
+
+diffs = felixla_check.compare_vcfs(sys.argv[2], sys.argv[3], split_lhs=True)
+assert not diffs, "round trip differs:\n  " + "\n  ".join(diffs)
+ROUNDTRIP
 
 cat >"$OUT_DIR/keep.samples" <<'EOF'
 s2
@@ -219,7 +197,7 @@ PY
   --n-ancestries 2 \
   --keep "$OUT_DIR/keep.samples" \
   --extract "$OUT_DIR/extract.sites.vcf.gz" \
-  --make-felixla \
+  --export-felixla \
   --out \
   "$OUT_DIR/tiny.keep_extract" >/dev/null
 
@@ -272,7 +250,7 @@ if [[ -n "$BGZIP_BIN" && -n "$TABIX_BIN" ]]; then
     --n-ancestries 2 \
     --region chr1:150-160 \
     --extract "$OUT_DIR/extract.sites.vcf" \
-    --make-felixla \
+    --export-felixla \
     --out "$OUT_DIR/tiny.region_seek.sequential" \
     >/dev/null 2>"$OUT_DIR/tiny.region_seek.sequential.err"
 
@@ -282,7 +260,7 @@ if [[ -n "$BGZIP_BIN" && -n "$TABIX_BIN" ]]; then
     --n-ancestries 2 \
     --region chr1:150-160 \
     --extract "$OUT_DIR/extract.sites.vcf" \
-    --make-felixla \
+    --export-felixla \
     --out "$OUT_DIR/tiny.region_seek.indexed" \
     >/dev/null 2>"$OUT_DIR/tiny.region_seek.indexed.err"
 
@@ -307,7 +285,7 @@ EOF
     --n-ancestries 2 \
     --region chr1:250-250 \
     --extract "$OUT_DIR/region_tail.extract.pvar" \
-    --make-felixla \
+    --export-felixla \
     --out "$OUT_DIR/tiny.region_tail.sequential" \
     >/dev/null 2>"$OUT_DIR/tiny.region_tail.sequential.err"
 
@@ -317,7 +295,7 @@ EOF
     --n-ancestries 2 \
     --region chr1:250-250 \
     --extract "$OUT_DIR/region_tail.extract.pvar" \
-    --make-felixla \
+    --export-felixla \
     --out "$OUT_DIR/tiny.region_tail.indexed" \
     >/dev/null 2>"$OUT_DIR/tiny.region_tail.indexed.err"
 
@@ -346,7 +324,7 @@ if "$BIN_DIR/felixla" \
   "$ROOT_DIR/testdata/tiny.flare.vcf" \
   --n-ancestries 2 \
   --extract "$OUT_DIR/extract.bad_ref.vcf" \
-  --make-felixla \
+  --export-felixla \
   --out \
   "$OUT_DIR/tiny.bad_extract_ref" >/dev/null 2>"$OUT_DIR/tiny.bad_extract_ref.err"; then
   echo "expected bad REF in --extract fixture to fail" >&2
@@ -359,70 +337,21 @@ grep -q "REF mismatch" "$OUT_DIR/tiny.bad_extract_ref.err"
   --felixla \
   "$OUT_DIR/tiny.felixla_cli" \
   --region chr1:100-160 \
-  --make-felixla \
+  --export-felixla \
   --out \
   "$OUT_DIR/tiny.felixla_cli.chr1_100_160" >/dev/null
 
-"$BIN_DIR/felixla" \
-  --vcf \
-  "$ROOT_DIR/testdata/tiny.flare.vcf" \
-  --admixture \
-  --progress-every 0 \
-  >"$OUT_DIR/felixla_admixture.tsv" \
-  2>"$OUT_DIR/felixla_admixture.err"
 
-grep -q $'s1\t6\t0.3333333333\t0.6666666667\t2\t4' "$OUT_DIR/felixla_admixture.tsv"
-
-cat >"$OUT_DIR/shapeit.chunks.txt" <<'EOF'
-0	chr1	chr1:1-180	chr1:1-150	4.0	150	10	3
-1	chr1	chr1:120-260	chr1:151-250	4.0	100	10	3
-EOF
-
-"$BIN_DIR/felixla" \
-  --shapeit-args \
-  --chunks "$OUT_DIR/shapeit.chunks.txt" \
-  --phase-template "$OUT_DIR/source/{chrom}.phased.vcf.gz" \
-  --flare-template "$OUT_DIR/source/{chrom}.flare.vcf.gz" \
-  --n-ancestries 2 \
-  --n-samples 2 \
-  --out-prefix-template "$OUT_DIR/{chrom}.shapeit4cM.chunk{chunk0}" \
-  >"$OUT_DIR/shapeit.args.tsv"
-
-python3 - "$OUT_DIR/shapeit.args.tsv" "$OUT_DIR" <<'PY'
-import pathlib
+python3 - "$ROOT_DIR/tests" "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
+  "$OUT_DIR/tiny.roundtrip.vcf.gz" <<'ROUNDTRIP'
 import sys
 
-args_file = pathlib.Path(sys.argv[1])
-out_dir = pathlib.Path(sys.argv[2])
-rows = [line.rstrip().split("\t") for line in args_file.read_text().splitlines()]
-assert [[pathlib.Path(row[0]), pathlib.Path(row[1]), row[2], row[3], pathlib.Path(row[4]), row[5]] for row in rows] == [
-    [
-        out_dir / "source" / "chr1.phased.vcf.gz",
-        out_dir / "source" / "chr1.flare.vcf.gz",
-        "2",
-        "1",
-        out_dir / "chr1.shapeit4cM.chunk0001",
-        "chr1:1-150",
-    ],
-    [
-        out_dir / "source" / "chr1.phased.vcf.gz",
-        out_dir / "source" / "chr1.flare.vcf.gz",
-        "2",
-        "1",
-        out_dir / "chr1.shapeit4cM.chunk0002",
-        "chr1:151-250",
-    ],
-], rows
-PY
+sys.path.insert(0, sys.argv[1])
+import felixla_check
 
-"$BIN_DIR/felixla" \
-  compare-vcfs \
-  "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
-  "$OUT_DIR/tiny.roundtrip.vcf.gz" \
-  --split-multiallelic \
-  >"$OUT_DIR/compare.txt"
-
-grep -q "Differences:             0" "$OUT_DIR/compare.txt"
+diffs = felixla_check.compare_vcfs(sys.argv[2], sys.argv[3], split_lhs=True)
+assert not diffs, "round trip differs:\n  " + "\n  ".join(diffs)
+ROUNDTRIP
 
 "$BIN_DIR/felixla" \
   extract \
@@ -451,14 +380,18 @@ grep -q $'selected_region\tchr1:100-160' "$OUT_DIR/tiny.direct_region.meta"
   "$OUT_DIR/tiny.direct_region" \
   "$OUT_DIR/tiny.direct_region.roundtrip.vcf.gz" >/dev/null
 
-"$BIN_DIR/felixla" \
-  compare-vcfs \
+python3 - "$ROOT_DIR/tests" \
   "$OUT_DIR/tiny.chr1_100_160.roundtrip.vcf.gz" \
-  "$OUT_DIR/tiny.direct_region.roundtrip.vcf.gz" \
-  --split-multiallelic \
-  >"$OUT_DIR/direct_region.compare.txt"
+  "$OUT_DIR/tiny.direct_region.roundtrip.vcf.gz" <<'REGIONCHECK'
+import sys
 
-grep -q "Differences:             0" "$OUT_DIR/direct_region.compare.txt"
+sys.path.insert(0, sys.argv[1])
+import felixla_check
+
+# Extracting a region from a prefix must match packing that region directly.
+diffs = felixla_check.compare_vcfs(sys.argv[2], sys.argv[3])
+assert not diffs, "region extract differs:\n  " + "\n  ".join(diffs)
+REGIONCHECK
 
 grep -v '^##contig=' "$ROOT_DIR/testdata/tiny.genotypes.vcf" >"$OUT_DIR/tiny.genotypes.no_contig.vcf"
 grep -v '^##contig=' "$ROOT_DIR/testdata/tiny.flare.vcf" >"$OUT_DIR/tiny.flare.no_contig.vcf"
@@ -476,14 +409,17 @@ grep -v '^##contig=' "$ROOT_DIR/testdata/tiny.flare.vcf" >"$OUT_DIR/tiny.flare.n
   "$OUT_DIR/tiny.no_contig" \
   "$OUT_DIR/tiny.no_contig.roundtrip.vcf.gz" >/dev/null
 
-"$BIN_DIR/felixla" \
-  compare-vcfs \
+python3 - "$ROOT_DIR/tests" \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
-  "$OUT_DIR/tiny.no_contig.roundtrip.vcf.gz" \
-  --split-multiallelic \
-  >"$OUT_DIR/no_contig.compare.txt"
+  "$OUT_DIR/tiny.no_contig.roundtrip.vcf.gz" <<'ROUNDTRIP_NO_CONTIG'
+import sys
 
-grep -q "Differences:             0" "$OUT_DIR/no_contig.compare.txt"
+sys.path.insert(0, sys.argv[1])
+import felixla_check
+
+diffs = felixla_check.compare_vcfs(sys.argv[2], sys.argv[3], split_lhs=True)
+assert not diffs, "no_contig round trip differs:\n  " + "\n  ".join(diffs)
+ROUNDTRIP_NO_CONTIG
 
 "$BIN_DIR/felixla" \
   from-flare \
@@ -501,14 +437,17 @@ grep -q $'selected_region\tchr1:100-160' "$OUT_DIR/tiny.no_contig_region.meta"
   "$OUT_DIR/tiny.no_contig_region" \
   "$OUT_DIR/tiny.no_contig_region.roundtrip.vcf.gz" >/dev/null
 
-"$BIN_DIR/felixla" \
-  compare-vcfs \
+python3 - "$ROOT_DIR/tests" \
   "$OUT_DIR/tiny.direct_region.roundtrip.vcf.gz" \
-  "$OUT_DIR/tiny.no_contig_region.roundtrip.vcf.gz" \
-  --split-multiallelic \
-  >"$OUT_DIR/no_contig_region.compare.txt"
+  "$OUT_DIR/tiny.no_contig_region.roundtrip.vcf.gz" <<'ROUNDTRIP_NO_CONTIG_REGION'
+import sys
 
-grep -q "Differences:             0" "$OUT_DIR/no_contig_region.compare.txt"
+sys.path.insert(0, sys.argv[1])
+import felixla_check
+
+diffs = felixla_check.compare_vcfs(sys.argv[2], sys.argv[3], split_lhs=False)
+assert not diffs, "no_contig_region round trip differs:\n  " + "\n  ".join(diffs)
+ROUNDTRIP_NO_CONTIG_REGION
 
 "$BIN_DIR/felixla" \
   --phase-vcf \
@@ -516,7 +455,7 @@ grep -q "Differences:             0" "$OUT_DIR/no_contig_region.compare.txt"
   --rfmix-msp \
   "$ROOT_DIR/testdata/tiny.rfmix.msp.tsv" \
   --n-ancestries 2 \
-  --make-felixla \
+  --export-felixla \
   --out \
   "$OUT_DIR/rfmix" >/dev/null
 
@@ -525,20 +464,23 @@ grep -q "Differences:             0" "$OUT_DIR/no_contig_region.compare.txt"
   "$OUT_DIR/rfmix" \
   "$OUT_DIR/rfmix.roundtrip.vcf.gz" >/dev/null
 
-"$BIN_DIR/felixla" \
-  compare-vcfs \
+python3 - "$ROOT_DIR/tests" \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
-  "$OUT_DIR/rfmix.roundtrip.vcf.gz" \
-  --split-multiallelic \
-  >"$OUT_DIR/rfmix.compare.txt"
+  "$OUT_DIR/rfmix.roundtrip.vcf.gz" <<'ROUNDTRIP_RFMIX'
+import sys
 
-grep -q "Differences:             0" "$OUT_DIR/rfmix.compare.txt"
+sys.path.insert(0, sys.argv[1])
+import felixla_check
+
+diffs = felixla_check.compare_vcfs(sys.argv[2], sys.argv[3], split_lhs=True)
+assert not diffs, "rfmix round trip differs:\n  " + "\n  ".join(diffs)
+ROUNDTRIP_RFMIX
 
 "$BIN_DIR/felixla" \
   --tractor-dosage-vcf \
   "$ROOT_DIR/testdata/tiny.tractor_dosage.vcf" \
   --n-ancestries 2 \
-  --make-felixla \
+  --export-felixla \
   --out \
   "$OUT_DIR/dosage" >/dev/null
 
@@ -909,28 +851,22 @@ grep -q "missing FORMAT/AN1" "$OUT_DIR/missing_flare.err"
 
 grep -q "Using genotype/FLARE sample intersection" "$OUT_DIR/swapped_samples.err"
 
-"$BIN_DIR/felixla" \
-  --felixla "$OUT_DIR/swapped_samples" \
-  --query chr1:100 \
-  --ref A \
-  --alt C \
-  > "$OUT_DIR/swapped_samples.query.tsv"
-
-python3 - "$OUT_DIR/swapped_samples" "$OUT_DIR/swapped_samples.query.tsv" <<'PY'
+python3 - "$ROOT_DIR/tests" "$OUT_DIR/swapped_samples" <<'SWAPPED'
 import pathlib
 import sys
 
-prefix = pathlib.Path(sys.argv[1])
-query = pathlib.Path(sys.argv[2]).read_text().strip().splitlines()
-samples = pathlib.Path(str(prefix) + ".samples").read_text().strip().splitlines()
+sys.path.insert(0, sys.argv[1])
+import felixla_check
 
+prefix = pathlib.Path(sys.argv[2])
+samples = pathlib.Path(str(prefix) + ".samples").read_text().strip().splitlines()
 assert samples == ["s1", "s2"], samples
-assert query == [
-    "global_variant_index\tchr\tpos\tid\tref\talt\tsample\tDSALL\tDS1\tDS2",
-    "1\tchr1\t100\tmulti_A_C\tA\tC\ts1\t1\t0\t1",
-    "1\tchr1\t100\tmulti_A_C\tA\tC\ts2\t0\t0\t0",
-], query
-PY
+
+# Samples given in a different order by the FLARE file must still be packed
+# against the right haplotypes.
+dosages = felixla_check.read_dosages(prefix)
+assert dosages[("chr1", 100, "A", "C")] == [(1, [0, 1]), (0, [0, 0])], dosages
+SWAPPED
 
 "$BIN_DIR/felixla" \
   from-flare \

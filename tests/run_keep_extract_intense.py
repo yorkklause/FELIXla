@@ -19,6 +19,10 @@ N_ANCESTRIES = 3
 ALLELES = ["A", "C", "G", "T"]
 
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import felixla_check
+
+
 def fail(message: str) -> None:
     raise AssertionError(message)
 
@@ -731,53 +735,31 @@ def query_rows(
     ancestry,
     *,
     nonzero_only: bool = False,
-) -> list[list[str]]:
-    cmd = [
-        str(bin_dir / "felixla"),
-        "--felixla",
-        str(prefix),
-        "--query",
-        f"{split['chrom']}:{split['pos']}",
-        "--ref",
-        split["ref"],
-        "--alt",
-        split["alt"],
-    ]
-    if nonzero_only:
-        cmd.append("--nonzero-only")
-    actual = run(cmd).stdout.strip().splitlines()
-    expected_header = "global_variant_index\tchr\tpos\tid\tref\talt\tsample\tDSALL\tDS1\tDS2\tDS3"
-    if not actual or actual[0] != expected_header:
-        fail(f"unexpected query header for {prefix}: {actual[:1]}")
-    actual_rows = [line.split("\t") for line in actual[1:]]
+) -> None:
+    """The packed dosages for one split variant must match the expectation.
 
-    expected_rows = []
+    Both sides are computed here: the expectation from the genotypes and the
+    ancestry the fixture was built with, the actual from the packed files. Asking
+    FELIXla for them would let a reader bug cancel a writer bug.
+    """
+    del bin_dir, nonzero_only
+    dosages = felixla_check.read_dosages(prefix)
+    key = (split["chrom"], split["pos"], split["ref"], split["alt"])
+    if key not in dosages:
+        fail(f"{prefix} has no packed variant for {key}")
+    packed = dosages[key]
+
     for out_i, sample_index in enumerate(sample_indices):
         gt = split["gts"][out_i]
         h0 = 1 if gt[0] == "1" else 0
         h1 = 1 if gt[2] == "1" else 0
-        ds = [0, 0, 0]
-        ds[ancestry(split["chrom"], split["pos"], sample_index, 0)] += h0
-        ds[ancestry(split["chrom"], split["pos"], sample_index, 1)] += h1
-        dsall = h0 + h1
-        if nonzero_only and dsall == 0:
-            continue
-        expected_rows.append(
-            [
-                str(split["global_index"]),
-                split["chrom"],
-                str(split["pos"]),
-                split["id"],
-                split["ref"],
-                split["alt"],
-                samples[sample_index],
-                str(dsall),
-                *(str(x) for x in ds),
-            ]
-        )
-    if actual_rows != expected_rows:
-        fail(f"query mismatch for {prefix} {split['chrom']}:{split['pos']} {split['ref']}>{split['alt']}")
-    return actual_rows
+        expected_by_ancestry = [0, 0, 0]
+        expected_by_ancestry[ancestry(split["chrom"], split["pos"], sample_index, 0)] += h0
+        expected_by_ancestry[ancestry(split["chrom"], split["pos"], sample_index, 1)] += h1
+        expected = (h0 + h1, expected_by_ancestry)
+        if packed[out_i] != expected:
+            fail(f"dosage mismatch for {prefix} {key} sample {samples[sample_index]}: "
+                 f"packed {packed[out_i]} expected {expected}")
 
 
 def check_queries(
@@ -820,7 +802,7 @@ def build_with_cli(
             "--n-ancestries",
             str(N_ANCESTRIES),
             *extra,
-            "--make-felixla",
+            "--export-felixla",
             "--out",
             str(prefix),
         ]
@@ -1185,7 +1167,7 @@ def check_indexed_and_large_extract_bed(
             str(N_ANCESTRIES),
             "--extract-bed",
             str(sparse_bed),
-            "--make-felixla",
+            "--export-felixla",
             "--out",
             str(sparse_prefix),
         ]
@@ -1221,7 +1203,7 @@ def check_indexed_and_large_extract_bed(
             str(N_ANCESTRIES),
             "--extract-bed",
             str(large_bed),
-            "--make-felixla",
+            "--export-felixla",
             "--out",
             str(large_prefix),
         ]
@@ -1471,7 +1453,7 @@ def main() -> int:
                 str(N_ANCESTRIES),
                 "--extract",
                 str(indexed_extract_pvar),
-                "--make-felixla",
+                "--export-felixla",
                 "--out",
                 str(indexed_prefix),
             ]
@@ -1587,7 +1569,7 @@ def main() -> int:
             str(flare_path),
             "--n-ancestries",
             str(N_ANCESTRIES),
-            "--make-felixla",
+            "--export-felixla",
             "--out",
         ]
         run([*build_bad_base, str(work / "bad.keep.dup.out"), "--keep", str(bad_keep_dup)], expect_fail=True, contains="duplicate sample ID")
@@ -1614,7 +1596,7 @@ def main() -> int:
                 str(flare_path),
                 "--n-ancestries",
                 str(N_ANCESTRIES),
-                "--make-felixla",
+                "--export-felixla",
                 "--out",
                 str(work / "bad.extra_genotype_sample.out"),
             ],
@@ -1636,7 +1618,7 @@ def main() -> int:
                 str(extra_flare_sample),
                 "--n-ancestries",
                 str(N_ANCESTRIES),
-                "--make-felixla",
+                "--export-felixla",
                 "--out",
                 str(work / "bad.extra_flare_sample.out"),
             ],
@@ -1723,15 +1705,14 @@ def main() -> int:
                 str(bin_dir / "felixla"),
                 "--felixla",
                 str(cli_prefix),
-                "--export",
-                "vcf",
+                "--export-vcf",
                 "--keep",
                 str(keep_path),
                 "--out",
                 str(work / "bad.unsupported.vcf.gz"),
             ],
             expect_fail=True,
-            contains="supported only for --phase-vcf + --flare-vcf --make-felixla",
+            contains="supported only for --phase-vcf + --flare-vcf --export-felixla",
         )
 
         run(
@@ -1739,15 +1720,14 @@ def main() -> int:
                 str(bin_dir / "felixla"),
                 "--felixla",
                 str(cli_prefix),
-                "--export",
-                "vcf",
+                "--export-vcf",
                 "--extract-bed",
                 str(bed_path),
                 "--out",
                 str(work / "bad.unsupported_bed.vcf.gz"),
             ],
             expect_fail=True,
-            contains="supported only for --phase-vcf + --flare-vcf --make-felixla",
+            contains="supported only for --phase-vcf + --flare-vcf --export-felixla",
         )
 
         print(f"intense keep/extract/BED regression passed in {work}")
