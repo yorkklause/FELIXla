@@ -96,10 +96,9 @@ The preferred entry point is the PLINK-style `felixla` command:
 felixla \
   --phase-vcf PHASED_VCF \
   --flare-vcf FLARE_VCF \
-  --n-ancestries N_ANCESTRIES \
-  --make-felixla \
+  --export-felixla \
   --out OUT_PREFIX \
-  [ --mac-threshold MAC_THRESHOLD ] \
+  [ --n-ancestries N_ANCESTRIES ] \
   [ --region CHR:START-END ] \
   [ --keep SAMPLE_LIST ] \
   [ --extract SITE_LIST ] \
@@ -124,22 +123,32 @@ felixla \
   encoded as `0..N_ANCESTRIES-1`. Sample IDs are matched by ID; FELIXla keeps
   the genotype/FLARE intersection in genotype VCF order.
 
-- N_ANCESTRIES (required): Number of local ancestry labels. The packed format
-  stores ancestry codes in 5 bits, so at most 32 labels are supported.
+- N_ANCESTRIES (optional): Number of local ancestry labels. The packed format
+  stores ancestry codes in 5 bits, so at most 32 labels are supported. It is
+  normally omitted: FELIXla takes the count from the header of whichever input
+  defines it -- FLARE's `##ANCESTRY` lines, RFMix's `#Subpopulation
+  order/codes:` line, or the `DS#`/`ANC#` `FORMAT` declarations of a TRACTOR
+  dosage VCF -- and refuses the run if a value given here disagrees. Taking it
+  from the data instead would be wrong: a region that happens to carry no
+  haplotype of some ancestry would come out with a smaller count than its
+  neighbours, and the two prefixes could then not be concatenated. When an
+  input names its ancestries, the names are kept in `<prefix>.meta` and label
+  the columns of the ancestry exports.
 
 - OUT_PREFIX (required): Prefix of the FELIXla output files.
 
-- MAC_THRESHOLD (optional): Sparse/dense minor allele count threshold. Variants
-  with `MAC <= MAC_THRESHOLD` are stored as sparse carrier lists; variants above
-  the threshold are stored as dense bit vectors. Default is `auto`, which uses
-  `ceil(n_samples / 32)` from the retained sample count.
+  The sparse/dense storage threshold is not a command-line option. Variants
+  whose ALT count is at or below `ceil(n_samples / 32)` are stored as sparse
+  carrier lists and the rest as dense bit vectors, which is the crossover at
+  which a carrier list stops being smaller than a bit vector.
 
 - `--mac` / `--maf` / `--anc-mac` / `--anc-maf` (optional): Drop variants with
   too little variation to be worth carrying. All four are stated on the
   **minor** allele count or frequency, `min(alt, total - alt)`, so an allele
   carried by every haplotype is filtered as readily as one carried by none.
-  Note this differs from `--mac-threshold`, which is a storage decision made on
-  the raw ALT count, not a filter.
+  Note this differs from the sparse/dense storage threshold, which is a
+  layout decision made on the raw ALT count, not a filter: a variant below it
+  is stored differently, not dropped.
 
   `--mac` and `--maf` count across all ancestries, as PLINK's do. `--anc-mac`
   and `--anc-maf` apply the threshold to each ancestry separately and keep the
@@ -334,7 +343,7 @@ vcf_tbi_chunks \
   --chunk-mb 10 \
   --out genotype.chunks.tsv \
   --command-template \
-    'felixla --phase-vcf {phase_vcf_q} --flare-vcf flare.vcf.gz --n-ancestries 3 --region {region_q} --make-felixla --out out/{chrom}.chunk{chrom_chunk0}' \
+    'felixla --phase-vcf {phase_vcf_q} --flare-vcf flare.vcf.gz --region {region_q} --export-felixla --out out/{chrom}.chunk{chrom_chunk0}' \
   --commands-out genotype.commands.txt
 ```
 
@@ -346,12 +355,12 @@ POSIX-shell-quoted forms.
 ## Concatenating FELIXla Chunks
 
 After region jobs finish, concatenate complete FELIXla prefixes in genomic
-order with the PLINK-style `--pmerge-list` interface:
+order with the PLINK-style `--merge-list` interface:
 
 ```bash
 felixla \
-  --pmerge-list chr1.prefixes.txt \
-  --make-felixla \
+  --merge-list chr1.prefixes.txt \
+  --export-felixla \
   --out chr1.merged
 ```
 
@@ -367,6 +376,12 @@ Blank lines and lines beginning with `#` are ignored. A trailing `.meta` is
 also accepted. Paths are interpreted relative to the working directory. The
 equivalent compatibility command is
 `felixla concat chr1.prefixes.txt chr1.merged`.
+
+Ancestry names carry through the merge, and two chunks that name the same code
+differently are refused before any merging starts: a prefix whose code `3`
+means AFR in one half and EUR in the other would be silently wrong in every
+export that reads it. A chunk that names none of its ancestries merges freely,
+since its codes still line up.
 
 To extract a different BED from each input and merge the retained records in
 genomic coordinate order, use two tab-delimited columns on every data row:
@@ -490,25 +505,46 @@ the cgroup events and the job runner logs to distinguish a memory limit from an
 external cancellation. Partial prefixes from those commands must not be
 concatenated.
 
-`--export vcf` always writes BGZF with a tabix index beside it: a full-cohort
+`--export-vcf` always writes BGZF with a tabix index beside it: a full-cohort
 export is far too large to be worth keeping uncompressed. An `--out` ending in
 `.vcf` is corrected to `.vcf.gz` with a note on stderr, and any other `--out`
 gains the `.vcf.gz` suffix, so the two files written are always
 `<out>.vcf.gz` and `<out>.vcf.gz.tbi`.
 
-The same binary also dispatches to compatibility subcommands:
+### The whole command line
+
+Every FELIXla run names one input, one output, and optionally some filters:
 
 ```
-felixla --phase-vcf PHASED_VCF --rfmix-msp MSP_FILE --n-ancestries N --make-felixla --out OUT_PREFIX
-felixla --tractor-dosage-vcf DOSAGE_VCF --n-ancestries N --make-felixla --out OUT_PREFIX
-felixla --felixla PREFIX --export vcf --out OUTPUT_VCF_GZ
-felixla --felixla PREFIX --query CHR:POS --ref REF --alt ALT [ --nonzero-only ]
-felixla --felixla PREFIX --region CHR:START-END --make-felixla --out OUT_PREFIX
-felixla --vcf TRACTOR_VCF --admixture --out ADMIXTURE_TSV
-felixla --compare-vcfs EXPECTED_VCF OBSERVED_VCF [ --split-multiallelic ]
-felixla --pmerge-list PREFIX_LIST --make-felixla --out OUT_PREFIX
-felixla --recommend-mac-threshold --n-samples N_SAMPLES
+Input:    --phase-vcf --flare-vcf     phased genotypes plus FLARE ancestry
+          --phase-vcf --rfmix-msp     phased genotypes plus an RFMix MSP file
+          --tractor-dosage-vcf        a TRACTOR dosage VCF
+          --felixla                   an existing packed prefix
+          --merge-list                a file of prefixes to concatenate
+
+Output:   --out                       the output prefix, always required
+          --export-felixla            a packed prefix
+          --export-vcf                split-biallelic phased VCF.gz plus .tbi
+          --export-lai                local ancestry intervals, <out>.lai.gz
+          --export-global-admixture   per-sample ancestry proportions
+          --export-local-admixture    per-region ancestry proportions
+
+Filters:  --keep --extract --exclude --extract-bed --exclude-bed
+          --chr --region --mac --maf --anc-mac --anc-maf
+
+Other:    --n-ancestries --threads --version --help
 ```
+
+The filters apply while packing, which is the only point at which FELIXla
+reads the source records, so they are accepted with `--phase-vcf` plus
+`--flare-vcf` and refused elsewhere rather than silently ignored. To subset an
+existing prefix, extract the region into a new one with `--felixla --region
+--export-felixla` and export from that.
+
+Not every combination is meaningful, and the ones that are not are refused by
+name: an export that reads a packed prefix says so, a removed flag names what
+replaced it, and a sex chromosome is refused with the reason rather than
+packed wrongly.
 
 For compatibility with older command lines, the original command names are
 accepted as `felixla` subcommands, for example
@@ -531,7 +567,9 @@ finish and must not be concatenated.
 
 The metadata holds `format_version`, `n_samples`, `n_haps`, `n_words`,
 `n_ancestries`, `rare_threshold`, the four variant and ancestry-block counts,
-and `selected_region`. Every one of those is read by something:
+`selected_region`, and one `ancestry_name_N` row per ancestry the input named,
+numbered from one to match the ancestry exports. Every one of those is read by
+something:
 `format_version`, `n_samples`, `n_haps`, `n_words` and `n_ancestries` are
 required by FELIXassoc, and concat additionally reads `rare_threshold`, the
 counts, and `selected_region`, which tells it the coordinate span the prefix
@@ -567,31 +605,77 @@ A FELIXla packed prefix writes the following files:
 
 - `<prefix>.samples`: retained sample IDs, one sample per line.
 
-- `<prefix>.meta`: format metadata, input provenance, sample count, ancestry
-  count, word count, rare threshold, final common/rare/block counts, and
-  optional region/filter/concatenation provenance.
+- `<prefix>.meta`: format metadata, sample count, ancestry count and names,
+  word count, rare threshold, final common/rare/block counts, and the selected
+  region where one was given.
 
 The split variant marker streams record `chr`, `pos`, split-biallelic `id`,
 `ref`, `alt`, ALT allele index, global variant index, and MAC. Marker streams
 and indexes are little-endian binary files with 8-byte magic headers.
 
-A direct dosage query writes one row per matched split-biallelic variant and
-sample:
+### Ancestry exports
+
+Three read-only views summarize a packed prefix's ancestry blocks. All three
+take `--felixla PREFIX` and add their own suffix to `--out`, so `--out run`,
+`--out run.lai` and `--out run.lai.gz` all write `run.lai.gz`.
+
+**`--export-lai`** writes `<out>.lai.gz`, a BGZF-compressed table with one row
+per ancestry block and one column per haplotype:
 
 ```text
-global_variant_index    chr    pos    id    ref    alt    sample    DSALL    DS1 ... DSk
+##ANC1 = AFR
+##ANC2 = EUR
+#CHR	START	END	s0001_1	s0001_2	s0002_1	s0002_2
+chr1	1	48210	1	2	1	1
+chr1	48211	93004	1	2	2	1
 ```
 
-`DS1` corresponds to ancestry code `0`, `DS2` to ancestry code `1`, and so on.
-For common variants, `felixla` computes `DSk` by intersecting the dense ALT bit
-vector with the ancestry `k` haplotype mask. For rare variants, it uses the
-sparse carrier list directly.
+The `##` lines name the ancestries, taking the names from the input header
+where it gave them and falling back to `ANC1`, `ANC2`, ... where it did not.
+Each sample contributes two columns, `_1` and `_2`, in the order the
+haplotypes are packed. `START` and `END` are 1-based and inclusive, and the
+blocks are sorted, non-overlapping, and cover every variant in the prefix.
+
+**Ancestry codes in this file are 1-based**, so `1` is the ancestry the `##`
+header calls `ANC1`. This differs from the codes inside the packed files and
+from FLARE's own `AN1`/`AN2`, which both number from zero. The offset is
+deliberate: `0` is reserved for a haplotype no caller labelled, so a future
+format that admits missing ancestry can use it without any existing column
+changing meaning.
+
+**`--export-global-admixture`** writes `<out>.global.admixture.tsv`, one row
+per sample:
+
+```text
+#ID	AFR	EUR
+s0001	0.312500	0.687500
+s0002	0.687500	0.312500
+```
+
+Proportions are weighted by base pairs rather than by blocks, so a region a
+caller happened to split finely is not thereby counted more heavily, and each
+row sums to one. The denominator is the span the prefix's ancestry blocks
+actually cover, which for a region or contig subset is that subset, not the
+genome: proportions from two prefixes are comparable only over the same span.
+
+**`--export-local-admixture`** writes `<out>.local.admixture.tsv`, one row per
+ancestry block, holding each ancestry's share of the cohort's haplotypes
+there:
+
+```text
+#CHR	START	END	AFR	EUR
+chr1	1	48210	0.750000	0.250000
+chr1	48211	93004	0.500000	0.500000
+```
+
+The rows use the same blocks and the same coordinates as the LAI file, so the
+two line up row for row.
 
 ## Example
 
 The following commands build the binary, create a FELIXla prefix from the tiny
-phased genotype and FLARE local ancestry fixtures, query one ancestry-specific
-dosage vector, and export the packed data back to split-biallelic VCF:
+phased genotype and FLARE local ancestry fixtures, and export the packed data
+back to split-biallelic VCF and as a local ancestry table:
 
 ```
 make
@@ -599,20 +683,18 @@ make
 bin/felixla \
   --phase-vcf testdata/tiny.genotypes.vcf \
   --flare-vcf testdata/tiny.flare.vcf \
-  --n-ancestries 2 \
-  --make-felixla \
+  --export-felixla \
   --out example/tiny
 
 bin/felixla \
   --felixla example/tiny \
-  --query chr1:160 \
-  --ref A \
-  --alt T
+  --export-vcf \
+  --out example/tiny.roundtrip
 
 bin/felixla \
   --felixla example/tiny \
-  --export vcf \
-  --out example/tiny.roundtrip.vcf.gz
+  --export-lai \
+  --out example/tiny
 ```
 
 Sample and site filtering can be applied at conversion time:
@@ -621,10 +703,9 @@ Sample and site filtering can be applied at conversion time:
 bin/felixla \
   --phase-vcf genotype.phased.vcf.gz \
   --flare-vcf flare.anc.vcf.gz \
-  --n-ancestries 5 \
   --keep samples.keep \
   --extract sites.pvar \
-  --make-felixla \
+  --export-felixla \
   --out hybrid/chr22.subset
 ```
 
@@ -634,9 +715,8 @@ Select many BED intervals at conversion time:
 bin/felixla \
   --phase-vcf genotype.phased.vcf.gz \
   --flare-vcf flare.anc.vcf.gz \
-  --n-ancestries 5 \
   --extract-bed targets.bed \
-  --make-felixla \
+  --export-felixla \
   --out hybrid/targets
 ```
 
@@ -646,27 +726,10 @@ The same command can be run through Docker by binding the working directory:
 docker run --rm -v "$PWD":/data -w /data ghcr.io/yorkklause/felixla:latest \
   --phase-vcf genotype.phased.vcf.gz \
   --flare-vcf flare.anc.vcf.gz \
-  --n-ancestries 5 \
   --keep samples.keep \
   --extract sites.pvar \
-  --make-felixla \
+  --export-felixla \
   --out hybrid/chr22.subset
-```
-
-The SHAPEIT/GLIMPSE chunk mode can generate converter argument rows for
-chromosome-scale jobs:
-
-```
-bin/felixla \
-  --shapeit-args \
-  --chunks-dir resources/shapeit5_chunks/b38_4cM \
-  --chrom-style chr \
-  --phase-template 'phase/{chrom}.phased.vcf.gz' \
-  --flare-template 'flare/{chrom}.flare.vcf.gz' \
-  --n-ancestries 5 \
-  --n-samples 100000 \
-  --out-prefix-template 'hybrid/{chrom}.shapeit4cM.chunk{chunk0}' \
-  > flare_subset.shapeit4cm.args.tsv
 ```
 
 ## Testing
@@ -687,7 +750,7 @@ make test-intense
 FLARE inputs, compares the PLINK-style command against the compatibility
 subcommand path, verifies `--keep`, `--extract`, `--extract-bed`, indexed
 chromosome-span scanning, BED boundary and ancestry-gap behavior, all-filter
-intersections, `--region`, concatenation, and `felixla --query` against known
+intersections, `--region`, concatenation, and packed dosages against known
 truth, and checks every concat component plus malformed filter inputs for
 fail-closed behavior. The BED suite also verifies 20,001 disjoint intervals and
 byte-identical non-metadata output when BED covers the complete input.
@@ -701,6 +764,18 @@ column widths, two-digit ancestry labels, the three `FORMAT` layouts, sample
 counts either side of a 32-column word, sample subsets, and multiallelic
 records. Setting `FELIXLA_SCALAR_PATHS=1` is also the way to confirm that a
 suspected packing difference comes from the wide paths rather than the input.
+
+`test-intense` finally checks the three ancestry exports against three separate
+oracles: the LAI rows against the ancestry masks decoded independently from
+`.ancblock.bin`, the LAI rows at every genotype position against the FLARE
+input that produced them, and both admixture tables against a fresh exact
+aggregation of the LAI file. Nothing in that chain asks FELIXla to grade its
+own output.
+
+The readers the suites check against live in `tests/felixla_check.py`, which
+parses the packed files, the LAI file and the admixture tables in Python with
+no help from the binary. Keeping the oracle a separate implementation is the
+point: a reader bug can no longer cancel out a writer bug.
 
 ## Build Notes
 

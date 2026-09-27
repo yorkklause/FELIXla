@@ -952,4 +952,55 @@ assert records == [
 ], records
 PY
 
+
+# The three ancestry views of the prefix, against values worked out by hand
+# from testdata/tiny.flare.vcf: s1 is AFR|EUR then EUR|EUR, s2 is EUR|AFR then
+# AFR|AFR, over blocks of 250 and 150 bases.
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/tiny" --export-lai --out "$OUT_DIR/tiny"
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/tiny" --export-global-admixture --out "$OUT_DIR/tiny"
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/tiny" --export-local-admixture --out "$OUT_DIR/tiny"
+
+python3 - "$ROOT_DIR/tests" "$OUT_DIR/tiny" <<'ANCESTRY_EXPORTS'
+import pathlib
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import felixla_check
+
+prefix = pathlib.Path(sys.argv[2])
+
+names, columns, rows = felixla_check.read_lai(str(prefix) + ".lai.gz")
+assert names == [("ANC1", "AFR"), ("ANC2", "EUR")], names
+assert columns == ["s1_1", "s1_2", "s2_1", "s2_2"], columns
+# Codes are one-based, leaving zero for a haplotype no caller labelled.
+assert rows == [
+    ("chr1", 1, 250, [1, 2, 2, 1]),
+    ("chr2", 1, 150, [2, 2, 1, 1]),
+], rows
+
+header, table = felixla_check.read_tsv(str(prefix) + ".global.admixture.tsv")
+assert header == ["#ID", "AFR", "EUR"], header
+# s1 is AFR over 250 of its 800 haplotype bases, EUR over the other 550.
+assert table == [
+    ["s1", "0.312500", "0.687500"],
+    ["s2", "0.687500", "0.312500"],
+], table
+
+header, table = felixla_check.read_tsv(str(prefix) + ".local.admixture.tsv")
+assert header == ["#CHR", "START", "END", "AFR", "EUR"], header
+assert table == [
+    ["chr1", "1", "250", "0.500000", "0.500000"],
+    ["chr2", "1", "150", "0.500000", "0.500000"],
+], table
+
+# Every --out spelling of the same file lands in the same place, so a run is
+# never left looking for its output under a name nothing wrote.
+ANCESTRY_EXPORTS
+
+for spelling in "$OUT_DIR/alias.lai" "$OUT_DIR/alias.gz" "$OUT_DIR/alias"; do
+  "$BIN_DIR/felixla" --felixla "$OUT_DIR/tiny" --export-lai --out "$spelling" 2>/dev/null
+  test -f "$OUT_DIR/alias.lai.gz"
+  rm -f "$OUT_DIR/alias.lai.gz"
+done
+
 echo "tiny smoke test passed"

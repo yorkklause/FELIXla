@@ -117,6 +117,38 @@ def read_ancestry_blocks(prefix, n_ancestries, n_words):
     return blocks
 
 
+def read_lai(path):
+    """(ancestry names, haplotype column names, [(chrom, start, end, codes)])."""
+    names, columns, rows = [], [], []
+    with gzip.open(path, "rt") as handle:
+        for line in handle:
+            line = line.rstrip("\n")
+            if line.startswith("##"):
+                key, _, value = line[2:].partition(" = ")
+                names.append((key, value))
+            elif line.startswith("#"):
+                columns = line.split("\t")[3:]
+            else:
+                fields = line.split("\t")
+                rows.append((fields[0], int(fields[1]), int(fields[2]),
+                             [int(v) for v in fields[3:]]))
+    return names, columns, rows
+
+
+def read_tsv(path):
+    """(header fields, [row fields]) for the admixture tables."""
+    rows = []
+    header = None
+    with pathlib.Path(path).open() as handle:
+        for line in handle:
+            fields = line.rstrip("\n").split("\t")
+            if header is None:
+                header = fields
+            else:
+                rows.append(fields)
+    return header, rows
+
+
 def read_meta(prefix):
     meta = {}
     with pathlib.Path(str(prefix) + ".meta").open() as handle:

@@ -450,6 +450,7 @@ static void write_sidecars(
     const std::string& samples_path,
     const std::string& meta_path,
     const std::string& subpopulation_codes,
+    const std::vector<std::string>& ancestry_names,
     int n_samples,
     uint64_t n_haps,
     int n_words,
@@ -475,6 +476,12 @@ static void write_sidecars(
             if (c == '\t') c = ' ';
         }
         std::fprintf(meta_fp, "rfmix_subpopulation_order_codes\t%s\n", sanitized_codes.c_str());
+    }
+    // One row per named ancestry, numbered from one to match the exported LAI
+    // file, where zero is reserved for a missing label.
+    for (size_t i = 0; i < ancestry_names.size(); ++i) {
+        if (ancestry_names[i].empty()) continue;
+        std::fprintf(meta_fp, "ancestry_name_%zu\t%s\n", i + 1, ancestry_names[i].c_str());
     }
     std::fclose(meta_fp);
 }
@@ -893,6 +900,27 @@ static int resolve_msp_chrom_to_geno_rid(
     return -1;
 }
 
+// "#Subpopulation order/codes: AFR=0 EUR=1" names every ancestry, which the
+// packed prefix keeps so an ancestry export can label its columns. Indexed by
+// the code, so a file that numbers them out of order still lands correctly.
+static std::vector<std::string> ancestry_names_from_codes(const std::string& line, int n_ancestries) {
+    std::vector<std::string> names(n_ancestries > 0 ? static_cast<size_t>(n_ancestries) : 0);
+    size_t colon = line.find(':');
+    if (colon == std::string::npos) return names;
+
+    for (const std::string& field : split_whitespace(line.substr(colon + 1))) {
+        size_t eq = field.rfind('=');
+        if (eq == std::string::npos || eq == 0 || eq + 1 >= field.size()) continue;
+
+        char* end = nullptr;
+        long code = std::strtol(field.c_str() + eq + 1, &end, 10);
+        if (!end || *end != '\0') continue;
+        if (code < 0 || code >= static_cast<long>(names.size())) continue;
+        names[static_cast<size_t>(code)] = field.substr(0, eq);
+    }
+    return names;
+}
+
 static int infer_n_ancestries_from_codes(const std::string& line) {
     size_t colon = line.find(':');
     if (colon == std::string::npos) return 0;
@@ -1265,6 +1293,7 @@ int main(int argc, char** argv) {
         samples_path,
         meta_path,
         msp_reader.subpopulation_codes(),
+        ancestry_names_from_codes(msp_reader.subpopulation_codes(), n_ancestries),
         n_samples,
         n_haps,
         n_words,

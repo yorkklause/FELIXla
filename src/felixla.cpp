@@ -18,6 +18,7 @@ int felixla_dosage_main(int argc, char** argv);
 int felixla_to_vcf_main(int argc, char** argv);
 int felixla_extract_main(int argc, char** argv);
 int felixla_concat_main(int argc, char** argv);
+int felixla_ancestry_export_main(int argc, char** argv);
 
 namespace {
 
@@ -127,6 +128,38 @@ std::string vcf_export_path(const std::string& out) {
         return corrected;
     }
     return out + ".vcf.gz";
+}
+
+bool ends_with(const std::string& value, const std::string& suffix) {
+    return value.size() >= suffix.size() &&
+           value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+// The ancestry views each have exactly one representation, so --out names the
+// prefix and the suffix is ours to add: .lai.gz is always BGZF, the admixture
+// tables are always plain TSV. A name that already reaches partway there --
+// run.lai for a file that will be compressed -- is completed rather than
+// appended to, so --out run.lai and --out run land on the same file.
+std::string suffixed_export_path(const std::string& out, const std::string& suffix,
+                                 const char* what) {
+    if (ends_with(out, suffix)) return out;
+
+    std::string stem = out;
+    for (size_t dot = suffix.find('.', 1); dot != std::string::npos;
+         dot = suffix.find('.', dot + 1)) {
+        std::string partial = suffix.substr(0, dot);
+        if (ends_with(out, partial)) stem = out.substr(0, out.size() - partial.size());
+    }
+    if (stem == out && (ends_with(out, ".gz") || ends_with(out, ".tsv"))) {
+        stem = out.substr(0, out.size() - (ends_with(out, ".gz") ? 3 : 4));
+    }
+
+    std::string corrected = stem + suffix;
+    if (corrected != out + suffix) {
+        std::cerr << "FELIXla: " << what << " writes " << suffix << "; writing "
+                  << corrected << " rather than " << out << ".\n";
+    }
+    return corrected;
 }
 
 struct PlinkArgs {
@@ -357,12 +390,33 @@ int run_plink_style(int argc, char** argv) {
         die("--export-vcf, --export-lai and the admixture exports read a "
             "packed prefix; give --felixla");
     }
+    // Subsetting happens while packing, so a filter here would have to be
+    // silently ignored; extract the region into its own prefix first.
+    if (!args.region.empty()) {
+        die("--region is not supported for this export; extract the region "
+            "with --felixla --region --export-felixla first");
+    }
     if (args.export_vcf) {
         return run_tool(felixla_to_vcf_main, {
             "tractor_hybrid_to_vcf", args.felixla_prefix,
             vcf_export_path(args.out_path)});
     }
-    die("that export is not implemented yet");
+    if (args.export_lai) {
+        return run_tool(felixla_ancestry_export_main, {
+            "felixla_ancestry_export", "lai", args.felixla_prefix,
+            suffixed_export_path(args.out_path, ".lai.gz", "--export-lai"),
+            args.threads.empty() ? "1" : args.threads});
+    }
+    if (args.export_global_admixture) {
+        return run_tool(felixla_ancestry_export_main, {
+            "felixla_ancestry_export", "global-admixture", args.felixla_prefix,
+            suffixed_export_path(args.out_path, ".global.admixture.tsv",
+                                 "--export-global-admixture")});
+    }
+    return run_tool(felixla_ancestry_export_main, {
+        "felixla_ancestry_export", "local-admixture", args.felixla_prefix,
+        suffixed_export_path(args.out_path, ".local.admixture.tsv",
+                             "--export-local-admixture")});
 }
 
 std::vector<std::string> command_args(const std::string& command, int argc, char** argv) {

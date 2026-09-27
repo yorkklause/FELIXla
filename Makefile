@@ -21,6 +21,7 @@ DOSAGE_SRC := src/tractor_dosage_vcf_to_hybrid.cpp
 RFMIX_MSP_SRC := src/rfmix_msp_to_tractor_hybrid.cpp
 EXTRACT_SRC := src/tractor_hybrid_extract_region.cpp
 CONCAT_SRC := src/felixla_concat.cpp
+ANC_EXPORT_SRC := src/felixla_ancestry_export.cpp
 VCF_TBI_CHUNKS_SRC := src/vcf_tbi_chunks.cpp
 
 TOOL_OBJS := \
@@ -29,7 +30,8 @@ TOOL_OBJS := \
 	$(OBJ_DIR)/tractor_dosage_vcf_to_hybrid.o \
 	$(OBJ_DIR)/rfmix_msp_to_tractor_hybrid.o \
 	$(OBJ_DIR)/tractor_hybrid_extract_region.o \
-	$(OBJ_DIR)/felixla_concat.o
+	$(OBJ_DIR)/felixla_concat.o \
+	$(OBJ_DIR)/felixla_ancestry_export.o
 
 STATIC_TOOL_OBJS := \
 	$(STATIC_OBJ_DIR)/flare_subset_to_tractor_hybrid.o \
@@ -37,7 +39,8 @@ STATIC_TOOL_OBJS := \
 	$(STATIC_OBJ_DIR)/tractor_dosage_vcf_to_hybrid.o \
 	$(STATIC_OBJ_DIR)/rfmix_msp_to_tractor_hybrid.o \
 	$(STATIC_OBJ_DIR)/tractor_hybrid_extract_region.o \
-	$(STATIC_OBJ_DIR)/felixla_concat.o
+	$(STATIC_OBJ_DIR)/felixla_concat.o \
+	$(STATIC_OBJ_DIR)/felixla_ancestry_export.o
 
 LEGACY_TOOL_NAMES := \
 	flare_subset_to_tractor_hybrid \
@@ -199,6 +202,10 @@ $(OBJ_DIR)/felixla_concat.o: $(CONCAT_SRC)
 	mkdir -p $(OBJ_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Dmain=felixla_concat_main -c $< -o $@
 
+$(OBJ_DIR)/felixla_ancestry_export.o: $(ANC_EXPORT_SRC)
+	mkdir -p $(OBJ_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
 $(STATIC_OBJ_DIR)/flare_subset_to_tractor_hybrid.o: $(PACK_SRC)
 	mkdir -p $(STATIC_OBJ_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Dmain=felixla_pack_main -c $< -o $@
@@ -223,6 +230,10 @@ $(STATIC_OBJ_DIR)/felixla_concat.o: $(CONCAT_SRC)
 	mkdir -p $(STATIC_OBJ_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Dmain=felixla_concat_main -c $< -o $@
 
+$(STATIC_OBJ_DIR)/felixla_ancestry_export.o: $(ANC_EXPORT_SRC)
+	mkdir -p $(STATIC_OBJ_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
 test: all
 	BIN_DIR="$(abspath $(BIN_DIR))" bash tests/run_tiny.sh
 
@@ -230,6 +241,7 @@ test-intense: all
 	python3 tests/run_keep_extract_intense.py --bin-dir "$(abspath $(BIN_DIR))"
 	python3 tests/run_concat_intense.py --bin-dir "$(abspath $(BIN_DIR))"
 	python3 tests/run_scalar_equivalence.py --bin-dir "$(abspath $(BIN_DIR))"
+	python3 tests/run_ancestry_export_intense.py --bin-dir "$(abspath $(BIN_DIR))"
 
 benchmark-pack: all
 	python3 tests/run_pack_benchmark.py --felixla "$(abspath $(FELIX_TARGET))"

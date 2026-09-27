@@ -144,6 +144,9 @@ struct Meta {
     uint64_t n_words = 0;
     uint64_t n_ancestries = 0;
     uint64_t rare_threshold = 0;
+    // Indexed by the 0-based ancestry code, empty where the source input did
+    // not name that ancestry. Metadata rows number them from one.
+    std::vector<std::string> ancestry_names;
     std::optional<Region> region;
     std::optional<DeclaredCounts> counts;
 };
@@ -196,6 +199,12 @@ Meta read_meta(const std::string& path) {
     meta.n_ancestries = parse_u64(values["n_ancestries"], "n_ancestries", path);
     meta.rare_threshold = parse_u64(values["rare_threshold"], "rare_threshold", path);
     meta.region = effective_region;
+
+    meta.ancestry_names.assign(static_cast<size_t>(meta.n_ancestries), std::string());
+    for (uint64_t i = 0; i < meta.n_ancestries; ++i) {
+        auto it = values.find("ancestry_name_" + std::to_string(i + 1));
+        if (it != values.end()) meta.ancestry_names[static_cast<size_t>(i)] = it->second;
+    }
 
     if (meta.format_version != 1) fail("unsupported format_version in " + path);
     if (meta.n_samples == 0) fail("n_samples must be positive in " + path);
@@ -666,6 +675,17 @@ void require_same_meta(const InputInfo& first, const InputInfo& current) {
         a.n_ancestries != b.n_ancestries || a.rare_threshold != b.rare_threshold) {
         fail("incompatible FELIXla metadata between " + first.prefix + " and " + current.prefix +
              " (format/sample/haplotype/word/ancestry/MAC-threshold fields must match)");
+    }
+    // Ancestry code 3 meaning AFR in one chunk and EUR in another would merge
+    // into a prefix whose codes mean nothing, so disagreeing names are fatal
+    // rather than dropped. A chunk that names none of its ancestries is
+    // accepted, since the codes still line up.
+    for (size_t i = 0; i < a.ancestry_names.size() && i < b.ancestry_names.size(); ++i) {
+        if (a.ancestry_names[i].empty() || b.ancestry_names[i].empty()) continue;
+        if (a.ancestry_names[i] != b.ancestry_names[i]) {
+            fail("ancestry " + std::to_string(i + 1) + " is named " + a.ancestry_names[i] +
+                 " in " + first.prefix + " but " + b.ancestry_names[i] + " in " + current.prefix);
+        }
     }
 }
 
@@ -2241,6 +2261,10 @@ void write_meta_file(
     out << "n_words\t" << meta.n_words << '\n';
     out << "n_ancestries\t" << meta.n_ancestries << '\n';
     out << "rare_threshold\t" << meta.rare_threshold << '\n';
+    for (size_t i = 0; i < meta.ancestry_names.size(); ++i) {
+        if (meta.ancestry_names[i].empty()) continue;
+        out << "ancestry_name_" << (i + 1) << '\t' << meta.ancestry_names[i] << '\n';
+    }
     out << "global_variants\t" << state.global_variants << '\n';
     out << "common_variants\t" << state.common_variants << '\n';
     out << "rare_variants\t" << state.rare_variants << '\n';
@@ -2604,9 +2628,22 @@ int run_concat(const std::string& list_path, const std::string& out_prefix) {
     }
 
     write_samples_file(temp_prefix + ".samples", samples);
+    // require_same_meta has already established that no two inputs name the
+    // same ancestry differently, so a chunk that names one the first chunk
+    // left blank can fill it in rather than the name being lost.
+    Meta merged_meta = inputs.front().meta;
+    for (const InputInfo& input : inputs) {
+        for (size_t i = 0; i < merged_meta.ancestry_names.size() &&
+                           i < input.meta.ancestry_names.size(); ++i) {
+            if (merged_meta.ancestry_names[i].empty()) {
+                merged_meta.ancestry_names[i] = input.meta.ancestry_names[i];
+            }
+        }
+    }
+
     write_meta_file(
         temp_prefix + ".meta",
-        inputs.front().meta,
+        merged_meta,
         list_path,
         inputs,
         state,
