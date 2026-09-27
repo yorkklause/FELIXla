@@ -161,6 +161,7 @@ struct ExtractCoordinateMatch {
 
 struct ExtractSites {
     bool active = false;
+    const char* flag = "--extract";
     std::string path;
     std::unordered_set<std::string> contigs;
     std::vector<ExtractPosition> positions;
@@ -870,7 +871,7 @@ static uint32_t append_extract_allele(
 ) {
     size_t offset = sites.allele_arena.size();
     if (offset + length + 1 > std::numeric_limits<uint32_t>::max()) {
-        die("--extract allele text exceeds 4 GiB: %s", sites.path.c_str());
+        die("%s allele text exceeds 4 GiB: %s", sites.flag, sites.path.c_str());
     }
     sites.allele_arena.insert(sites.allele_arena.end(), data, data + length);
     sites.allele_arena.push_back('\0');
@@ -879,15 +880,18 @@ static uint32_t append_extract_allele(
 
 static ExtractSites load_extract_sites(
     const std::string& path,
-    const Region& region
+    const Region& region,
+    const char* flag = "--extract"
 ) {
     ExtractSites sites;
     if (path.empty()) return sites;
 
     sites.active = true;
     sites.path = path;
+    sites.flag = flag;
 
-    TextLineReader reader(path, "--extract site list");
+    std::string reader_label = std::string(flag) + " site list";
+    TextLineReader reader(path, reader_label.c_str());
 
     const char* line = nullptr;
     size_t line_length = 0;
@@ -907,8 +911,8 @@ static ExtractSites load_extract_sites(
             }
         }
         if (!complete) {
-            die("--extract expects PVAR/VCF columns CHROM POS ID REF ALT at %s:%llu",
-                path.c_str(), static_cast<unsigned long long>(line_no));
+            die("%s expects PVAR/VCF columns CHROM POS ID REF ALT at %s:%llu",
+                flag, path.c_str(), static_cast<unsigned long long>(line_no));
         }
         if (text_field_equals(fields[0], "CHROM") ||
             text_field_equals(fields[0], "#CHROM")) {
@@ -917,11 +921,11 @@ static ExtractSites load_extract_sites(
 
         int64_t pos = parse_extract_position_field(fields[1]);
         if (fields[3].length == 0 || text_field_equals(fields[3], ".")) {
-            die("--extract requires known REF at %s:%llu", path.c_str(),
+            die("%s requires known REF at %s:%llu", flag, path.c_str(),
                 static_cast<unsigned long long>(line_no));
         }
         if (fields[4].length == 0 || text_field_equals(fields[4], ".")) {
-            die("--extract requires known ALT at %s:%llu", path.c_str(),
+            die("%s requires known ALT at %s:%llu", flag, path.c_str(),
                 static_cast<unsigned long long>(line_no));
         }
         ++sites.source_position_count;
@@ -960,7 +964,8 @@ static ExtractSites load_extract_sites(
         for (uint32_t i = 1; i < position.n_alts; ++i) {
             if (std::strcmp(arena + alt_begin[i - 1], arena + alt_begin[i]) == 0) {
                 die(
-                    "duplicate allele in --extract list at %s:%llu: %s:%lld %s>%s",
+                    "duplicate allele in %s list at %s:%llu: %s:%lld %s>%s",
+                    flag,
                     path.c_str(),
                     static_cast<unsigned long long>(line_no),
                     sites.chr_of(position).c_str(),
@@ -976,7 +981,7 @@ static ExtractSites load_extract_sites(
     }
 
     if (sites.source_position_count == 0) {
-        die("--extract site list is empty: %s", path.c_str());
+        die("%s site list is empty: %s", flag, path.c_str());
     }
 
     return sites;
@@ -1403,6 +1408,7 @@ static void write_sidecars(
     const char* selected_region,
     const char* keep_path,
     const char* extract_path,
+    const char* exclude_path,
     const BedIntervals& bed
 ) {
     FILE* samples_fp = open_output_or_die(samples_path, "w");
@@ -1451,6 +1457,9 @@ static void write_sidecars(
     }
     if (extract_path) {
         std::fprintf(meta_fp, "extract_sites\t%s\n", extract_path);
+    }
+    if (exclude_path) {
+        std::fprintf(meta_fp, "exclude_sites\t%s\n", exclude_path);
     }
     if (bed.active) {
         std::fprintf(meta_fp, "extract_bed\t%s\n", bed.path.c_str());
@@ -3268,7 +3277,8 @@ static void merge_extract_alts(
             ++source_i;
         } else {
             die(
-                "duplicate allele in --extract list at %s:%llu: %s:%lld %s>%s",
+                "duplicate allele in %s list at %s:%llu: %s:%lld %s>%s",
+                sites.flag,
                 sites.path.c_str(),
                 static_cast<unsigned long long>(source.line_no),
                 sites.chr_of(source).c_str(),
@@ -3333,7 +3343,8 @@ static void prepare_extract_positions(ExtractSites& extract_sites, bcf_hdr_t* gh
         if (std::strcmp(extract_sites.ref_of(destination),
                         extract_sites.ref_of(source)) != 0) {
             die(
-                "conflicting REF values in --extract list at %s:%llu for %s:%lld: %s vs %s",
+                "conflicting REF values in %s list at %s:%llu for %s:%lld: %s vs %s",
+                extract_sites.flag,
                 extract_sites.path.c_str(),
                 static_cast<unsigned long long>(source.line_no),
                 extract_sites.chr_of(source).c_str(),
@@ -3348,7 +3359,8 @@ static void prepare_extract_positions(ExtractSites& extract_sites, bcf_hdr_t* gh
 
     std::fprintf(
         stderr,
-        "Prepared --extract site list: %llu position(s), %llu split allele(s), %s input order; using linear merge.\n",
+        "Prepared %s site list: %llu position(s), %llu split allele(s), %s input order; using linear merge.\n",
+        extract_sites.flag,
         static_cast<unsigned long long>(extract_sites.positions.size()),
         static_cast<unsigned long long>(extract_sites.allele_count),
         already_sorted ? "preserved" : "sorted"
@@ -4209,6 +4221,7 @@ int main(int argc, char** argv) {
     Region region;
     std::string keep_path;
     std::string extract_path;
+    std::string exclude_path;
     std::string extract_bed_path;
     int decompress_threads = 1;
     for (int argi = 6; argi < argc; ++argi) {
@@ -4226,6 +4239,9 @@ int main(int argc, char** argv) {
         } else if (arg == "--extract") {
             if (argi + 1 >= argc) die("--extract requires a value");
             extract_path = argv[++argi];
+        } else if (arg == "--exclude") {
+            if (argi + 1 >= argc) die("--exclude requires a value");
+            exclude_path = argv[++argi];
         } else if (arg == "--extract-bed") {
             if (argi + 1 >= argc) die("--extract-bed requires a value");
             extract_bed_path = argv[++argi];
@@ -4295,6 +4311,19 @@ int main(int argc, char** argv) {
     report_stage(out_prefix, "loading variant filters");
     BedIntervals bed = load_bed_intervals(extract_bed_path, region);
     ExtractSites extract_sites = load_extract_sites(extract_path, region);
+    // An exclusion list is not narrowed by --region: a site outside the region
+    // is already absent from the output, so intersecting would only lose the
+    // record of what was asked for.
+    ExtractSites exclude_sites =
+        load_extract_sites(exclude_path, Region{}, "--exclude");
+    if (exclude_sites.active) {
+        std::fprintf(
+            stderr,
+            "Loaded --exclude site list: dropping up to %llu split allele(s) from %llu source position(s).\n",
+            static_cast<unsigned long long>(exclude_sites.allele_count),
+            static_cast<unsigned long long>(exclude_sites.source_position_count)
+        );
+    }
     if (extract_sites.active) {
         if (region.active) {
             std::fprintf(
@@ -4343,6 +4372,7 @@ int main(int argc, char** argv) {
         }
     }
     prepare_extract_positions(extract_sites, ghdr);
+    prepare_extract_positions(exclude_sites, ghdr);
     prepare_bed_intervals(bed, ghdr);
     intersect_extract_positions_with_bed(extract_sites, bed);
 
@@ -4718,6 +4748,7 @@ int main(int argc, char** argv) {
         region.active ? region.label.c_str() : nullptr,
         keep_path.empty() ? nullptr : keep_path.c_str(),
         extract_path.empty() ? nullptr : extract_path.c_str(),
+        exclude_path.empty() ? nullptr : exclude_path.c_str(),
         bed
     );
     report_stage(out_prefix, "finished writing sample and metadata sidecars");
@@ -4735,6 +4766,8 @@ int main(int argc, char** argv) {
     std::unordered_set<std::string> warned_missing_flare_contigs;
     const std::vector<ExtractPosition>& ordered_extract_positions = extract_sites.positions;
     size_t extract_cursor = 0;
+    size_t exclude_cursor = 0;
+    uint64_t excluded_allele_count = 0;
     ExtractCoordinateMatch extract_coordinate_match;
     size_t bed_cursor = 0;
     size_t active_bed_interval_index = std::numeric_limits<size_t>::max();
@@ -5202,6 +5235,37 @@ int main(int argc, char** argv) {
         if (!extract_sites.active) {
             selected_alts.assign(static_cast<size_t>(g_n_allele), 1);
             selected_alts[0] = 0;
+        }
+
+        // Exclusion is allele-level and runs after selection, so --extract and
+        // --exclude compose the way PLINK's do: selected, then dropped. An
+        // entry that matches no record is silently inert, as in PLINK.
+        if (exclude_sites.active) {
+            const ExtractPosition* excluded = match_next_extract_position(
+                exclude_sites.positions,
+                exclude_cursor,
+                g_rid,
+                g_pos
+            );
+            if (excluded && ref && *ref && std::strcmp(ref, ".") != 0) {
+                bool any_left = false;
+                for (int alt_idx = 1; alt_idx < g_n_allele; ++alt_idx) {
+                    if (!selected_alts[static_cast<size_t>(alt_idx)]) continue;
+                    if (normalized_extract_allele_matches(
+                            exclude_sites, *excluded, g_pos, ref,
+                            g_allele(alt_idx))) {
+                        selected_alts[static_cast<size_t>(alt_idx)] = 0;
+                        ++excluded_allele_count;
+                    } else {
+                        any_left = true;
+                    }
+                }
+                if (!any_left) {
+                    progress.maybe_report(
+                        global_variant_index, common_index, rare_index);
+                    continue;
+                }
+            }
         }
 
         if (fast_genotype_text) {
