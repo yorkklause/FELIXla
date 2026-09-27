@@ -235,10 +235,13 @@ import sys
 
 prefix = pathlib.Path(sys.argv[1])
 meta = pathlib.Path(str(prefix) + ".meta").read_text()
+log = pathlib.Path(str(prefix) + ".log").read_text()
 samples = pathlib.Path(str(prefix) + ".samples").read_text().strip().splitlines()
 assert "n_samples\t1" in meta, meta
-assert "keep_samples\t" in meta, meta
-assert "extract_sites\t" in meta, meta
+# The filters applied are run facts, so they are recorded in the log.
+assert "\nkeep " in log, log
+assert "\nextract " in log, log
+assert log.rstrip().splitlines()[-1].startswith("completed "), log
 assert samples == ["s2"], samples
 
 with gzip.open(str(prefix) + ".roundtrip.vcf.gz", "rt") as fh:
@@ -839,9 +842,11 @@ import pathlib
 import sys
 
 prefix = pathlib.Path(sys.argv[1])
-meta = pathlib.Path(str(prefix) + ".meta").read_text()
+log = pathlib.Path(str(prefix) + ".log").read_text()
 samples = pathlib.Path(str(prefix) + ".samples").read_text().strip().splitlines()
-assert "source_tractor_dosage_vcf" in meta, meta
+assert "\ntractor-dosage-vcf " in log, log
+assert "\ndosage-source-note " in log, log
+assert log.rstrip().splitlines()[-1].startswith("completed "), log
 assert samples == ["s1", "s2"], samples
 with gzip.open(str(prefix) + ".roundtrip.vcf.gz", "rt") as fh:
     rows = [line.rstrip().split("\t") for line in fh if not line.startswith("#")]
@@ -858,9 +863,12 @@ import sys
 
 prefix = pathlib.Path(sys.argv[1])
 meta = pathlib.Path(str(prefix) + ".meta").read_text()
+log = pathlib.Path(str(prefix) + ".log").read_text()
 samples = pathlib.Path(str(prefix) + ".samples").read_text().strip().splitlines()
-assert "source_rfmix_msp" in meta, meta
-assert "rfmix_msp_interval_note" in meta, meta
+assert "\nrfmix-msp " in log, log
+assert "\nrfmix-msp-interval-note " in log, log
+assert log.rstrip().splitlines()[-1].startswith("completed "), log
+# The subpopulation order stays in .meta: it is what an ancestry index means.
 assert "rfmix_subpopulation_order_codes" in meta, meta
 assert samples == ["s1", "s2"], samples
 PY

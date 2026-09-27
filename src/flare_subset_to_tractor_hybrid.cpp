@@ -30,10 +30,7 @@
 
 #include <unistd.h>
 
-#include "felixla_version.h"
-
-// Defined by the front end in felixla.cpp.
-extern std::string g_felixla_invocation;
+#include "felixla_log.h"
 
 #if defined(__x86_64__) || defined(__i386__)
 #define FELIXLA_X86_SIMD 1
@@ -227,25 +224,7 @@ static void attach_input_thread_pool(htsFile* fp) {
     }
 }
 
-static std::string join_command_line(int argc, char** argv) {
-    std::string joined;
-    for (int i = 0; i < argc; ++i) {
-        if (i > 0) joined.push_back(' ');
-        joined += argv[i];
-    }
-    return joined;
-}
-
-static std::string utc_timestamp_now() {
-    std::time_t now = std::time(nullptr);
-    std::tm utc{};
-    if (!gmtime_r(&now, &utc)) return std::string();
-    char buffer[32];
-    if (!std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &utc)) {
-        return std::string();
-    }
-    return std::string(buffer);
-}
+using felixla::log_line;
 
 static void report_stage(const char* out_prefix, const char* stage) {
     if (g_progress_line_open) {
@@ -262,20 +241,6 @@ static void report_stage(const char* out_prefix, const char* stage) {
     std::fflush(stderr);
 }
 
-// Human-readable run record beside the prefix. Provenance lives here rather
-// than in .meta, which stays the machine-read description of the data itself.
-static FILE* g_log_fp = nullptr;
-
-static void log_line(const char* fmt, ...) {
-    if (!g_log_fp) return;
-    va_list args;
-    va_start(args, fmt);
-    std::vfprintf(g_log_fp, fmt, args);
-    va_end(args);
-    std::fputc('\n', g_log_fp);
-    std::fflush(g_log_fp);
-}
-
 [[noreturn]] static void die(const char* fmt, ...) {
     if (g_progress_line_open) {
         std::fputc('\n', stderr);
@@ -287,15 +252,10 @@ static void log_line(const char* fmt, ...) {
     std::vfprintf(stderr, fmt, args);
     std::fputc('\n', stderr);
     va_end(args);
-    if (g_log_fp) {
-        va_list log_args;
-        va_start(log_args, fmt);
-        std::fputs("ERROR: ", g_log_fp);
-        std::vfprintf(g_log_fp, fmt, log_args);
-        std::fputc('\n', g_log_fp);
-        va_end(log_args);
-        std::fflush(g_log_fp);
-    }
+    va_list log_args;
+    va_start(log_args, fmt);
+    felixla::log_fatal(fmt, log_args);
+    va_end(log_args);
     std::exit(1);
 }
 
@@ -4457,22 +4417,11 @@ int main(int argc, char** argv) {
         die("n_ancestries must be in [1, 32]");
     }
 
-    std::string log_path = std::string(out_prefix) + ".log";
-    g_log_fp = std::fopen(log_path.c_str(), "w");
-    if (!g_log_fp) {
-        die("cannot open log file %s: %s", log_path.c_str(), std::strerror(errno));
+    if (!felixla::log_open(out_prefix, argc, argv)) {
+        die("cannot open log file %s.log: %s", out_prefix, std::strerror(errno));
     }
-    log_line("FELIXla %s", FELIXLA_VERSION);
-    {
-        std::string started = utc_timestamp_now();
-        if (!started.empty()) log_line("started %s", started.c_str());
-    }
-    log_line("command %s",
-        g_felixla_invocation.empty() ? join_command_line(argc, argv).c_str()
-                                     : g_felixla_invocation.c_str());
     log_line("genotype %s", geno_vcf);
     log_line("flare %s", flare_vcf);
-    log_line("out %s", out_prefix);
     log_line("n_ancestries %d", n_ancestries);
     if (decompress_threads > 1) log_line("threads %d", decompress_threads);
     if (region.active) log_line("region %s", region.label.c_str());
@@ -5700,14 +5649,7 @@ int main(int argc, char** argv) {
         log_line("excluded_alleles %llu",
             static_cast<unsigned long long>(excluded_allele_count));
     }
-    {
-        std::string finished = utc_timestamp_now();
-        log_line("completed %s", finished.empty() ? "" : finished.c_str());
-    }
-    if (g_log_fp) {
-        std::fclose(g_log_fp);
-        g_log_fp = nullptr;
-    }
+    felixla::log_finish();
 
     report_stage(out_prefix, "conversion complete");
     std::fprintf(stderr, "Finished.\n");

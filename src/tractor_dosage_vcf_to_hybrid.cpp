@@ -22,6 +22,8 @@
 
 #include <unistd.h>
 
+#include "felixla_log.h"
+
 namespace {
 
 struct RareCarrierPacked {
@@ -60,6 +62,10 @@ static constexpr int kProgressSecondsInterval = 2;
     std::vfprintf(stderr, fmt, args);
     std::fputc('\n', stderr);
     va_end(args);
+    va_list log_args;
+    va_start(log_args, fmt);
+    felixla::log_fatal(fmt, log_args);
+    va_end(log_args);
     std::exit(1);
 }
 
@@ -423,7 +429,6 @@ static void write_sidecars(
     bcf_hdr_t* hdr,
     const std::string& samples_path,
     const std::string& meta_path,
-    const char* dosage_vcf,
     int n_samples,
     uint64_t n_haps,
     int n_words,
@@ -443,11 +448,6 @@ static void write_sidecars(
     std::fprintf(meta_fp, "n_words\t%d\n", n_words);
     std::fprintf(meta_fp, "n_ancestries\t%d\n", n_ancestries);
     std::fprintf(meta_fp, "rare_threshold\t%d\n", rare_threshold);
-    std::fprintf(meta_fp, "source_tractor_dosage_vcf\t%s\n", dosage_vcf);
-    std::fprintf(
-        meta_fp,
-        "dosage_source_note\tcanonical haplotypes reconstructed from hardcall DS#/ANC# counts\n"
-    );
     std::fclose(meta_fp);
 }
 
@@ -802,6 +802,15 @@ int main(int argc, char** argv) {
     int rare_threshold = parse_rare_threshold_arg(argv[3]);
     const char* out_prefix = argv[4];
 
+    if (!felixla::log_open(out_prefix, argc, argv)) {
+        die("cannot open log file %s.log: %s", out_prefix, std::strerror(errno));
+    }
+    felixla::log_line("tractor-dosage-vcf %s", dosage_vcf);
+    felixla::log_line("n_ancestries %d", n_ancestries);
+    felixla::log_line(
+        "dosage-source-note canonical haplotypes reconstructed from hardcall "
+        "DS#/ANC# counts");
+
     if (n_ancestries <= 0 || n_ancestries > 32) {
         die("n_ancestries must be in [1, 32]");
     }
@@ -878,7 +887,6 @@ int main(int argc, char** argv) {
         hdr,
         samples_path,
         meta_path,
-        dosage_vcf,
         n_samples,
         n_haps,
         n_words,
@@ -1131,6 +1139,12 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "Common variants:       %llu\n", static_cast<unsigned long long>(common_index));
     std::fprintf(stderr, "Rare variants:         %llu\n", static_cast<unsigned long long>(rare_index));
     std::fprintf(stderr, "Ancestry blocks:       %u\n", n_blocks_written);
+
+    felixla::log_line("global_variants %u", global_variant_index);
+    felixla::log_line("common_variants %llu", static_cast<unsigned long long>(common_index));
+    felixla::log_line("rare_variants %llu", static_cast<unsigned long long>(rare_index));
+    felixla::log_line("ancestry_blocks %u", n_blocks_written);
+    felixla::log_finish();
 
     return 0;
 }

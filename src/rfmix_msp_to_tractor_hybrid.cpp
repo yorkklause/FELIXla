@@ -22,6 +22,8 @@
 
 #include <unistd.h>
 
+#include "felixla_log.h"
+
 namespace {
 
 struct RareCarrierPacked {
@@ -69,6 +71,10 @@ static constexpr int kProgressSecondsInterval = 2;
     std::vfprintf(stderr, fmt, args);
     std::fputc('\n', stderr);
     va_end(args);
+    va_list log_args;
+    va_start(log_args, fmt);
+    felixla::log_fatal(fmt, log_args);
+    va_end(log_args);
     std::exit(1);
 }
 
@@ -443,8 +449,6 @@ static void write_sidecars(
     bcf_hdr_t* ghdr,
     const std::string& samples_path,
     const std::string& meta_path,
-    const char* geno_vcf,
-    const char* msp_path,
     const std::string& subpopulation_codes,
     int n_samples,
     uint64_t n_haps,
@@ -465,12 +469,6 @@ static void write_sidecars(
     std::fprintf(meta_fp, "n_words\t%d\n", n_words);
     std::fprintf(meta_fp, "n_ancestries\t%d\n", n_ancestries);
     std::fprintf(meta_fp, "rare_threshold\t%d\n", rare_threshold);
-    std::fprintf(meta_fp, "source_genotype\t%s\n", geno_vcf);
-    std::fprintf(meta_fp, "source_rfmix_msp\t%s\n", msp_path);
-    std::fprintf(
-        meta_fp,
-        "rfmix_msp_interval_note\tfirst interval includes spos; later shared epos/spos boundaries belong to the previous interval\n"
-    );
     if (!subpopulation_codes.empty()) {
         std::string sanitized_codes = subpopulation_codes;
         for (char& c : sanitized_codes) {
@@ -1168,6 +1166,16 @@ int main(int argc, char** argv) {
     int rare_threshold = parse_rare_threshold_arg(argv[4]);
     const char* out_prefix = argv[5];
 
+    if (!felixla::log_open(out_prefix, argc, argv)) {
+        die("cannot open log file %s.log: %s", out_prefix, std::strerror(errno));
+    }
+    felixla::log_line("genotype %s", geno_vcf);
+    felixla::log_line("rfmix-msp %s", msp_path);
+    felixla::log_line("n_ancestries %d", n_ancestries);
+    felixla::log_line(
+        "rfmix-msp-interval-note first interval includes spos; later shared "
+        "epos/spos boundaries belong to the previous interval");
+
     if (n_ancestries <= 0 || n_ancestries > 32) {
         die("n_ancestries must be in [1, 32]");
     }
@@ -1246,8 +1254,6 @@ int main(int argc, char** argv) {
         ghdr,
         samples_path,
         meta_path,
-        geno_vcf,
-        msp_path,
         msp_reader.subpopulation_codes(),
         n_samples,
         n_haps,
@@ -1516,6 +1522,13 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "Rare variants:         %llu\n", static_cast<unsigned long long>(rare_index));
     std::fprintf(stderr, "Ancestry blocks:       %u\n", n_blocks_written);
     std::fprintf(stderr, "MSP rows consumed:     %llu\n", static_cast<unsigned long long>(msp_rows_consumed));
+
+    felixla::log_line("global_variants %u", global_variant_index);
+    felixla::log_line("common_variants %llu", static_cast<unsigned long long>(common_index));
+    felixla::log_line("rare_variants %llu", static_cast<unsigned long long>(rare_index));
+    felixla::log_line("ancestry_blocks %u", n_blocks_written);
+    felixla::log_line("msp_rows_consumed %llu", static_cast<unsigned long long>(msp_rows_consumed));
+    felixla::log_finish();
 
     return 0;
 }
