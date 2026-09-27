@@ -1003,4 +1003,46 @@ for spelling in "$OUT_DIR/alias.lai" "$OUT_DIR/alias.gz" "$OUT_DIR/alias"; do
   rm -f "$OUT_DIR/alias.lai.gz"
 done
 
+
+# --threads reaches only the two paths that can use it. Anywhere else it used
+# to be accepted and ignored, which reads as a tuning knob that does not work.
+"$BIN_DIR/felixla" --phase-vcf "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
+  --flare-vcf "$ROOT_DIR/testdata/tiny.flare.vcf" \
+  --export-felixla --out "$OUT_DIR/threaded" --threads 2 >/dev/null
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/threaded" --export-lai \
+  --out "$OUT_DIR/threaded" --threads 2 >/dev/null 2>&1
+
+printf '%s\n' "$OUT_DIR/threaded" >"$OUT_DIR/threaded.list"
+for inert in \
+  "--felixla $OUT_DIR/threaded --export-vcf --out $OUT_DIR/nothreads" \
+  "--felixla $OUT_DIR/threaded --export-global-admixture --out $OUT_DIR/nothreads" \
+  "--felixla $OUT_DIR/threaded --region chr1:1-1000 --export-felixla --out $OUT_DIR/nothreads" \
+  "--merge-list $OUT_DIR/threaded.list --export-felixla --out $OUT_DIR/nothreads" \
+  "--phase-vcf $ROOT_DIR/testdata/tiny.genotypes.vcf --rfmix-msp $ROOT_DIR/testdata/tiny.rfmix.msp.tsv --export-felixla --out $OUT_DIR/nothreads" \
+  "--tractor-dosage-vcf $ROOT_DIR/testdata/tiny.tractor_dosage.vcf --export-felixla --out $OUT_DIR/nothreads"
+do
+  # shellcheck disable=SC2086
+  if "$BIN_DIR/felixla" $inert --threads 2 >/dev/null 2>"$OUT_DIR/threads.err"; then
+    echo "--threads was accepted where it does nothing: $inert" >&2
+    exit 1
+  fi
+  grep -q -- "--threads applies to" "$OUT_DIR/threads.err"
+done
+
+# The compatibility subcommands are no longer advertised in --help, but the
+# command lines people already have must keep working.
+"$BIN_DIR/felixla" --help >"$OUT_DIR/help.txt"
+if grep -qi "compatibility" "$OUT_DIR/help.txt"; then
+  echo "--help still advertises the compatibility subcommands" >&2
+  exit 1
+fi
+"$BIN_DIR/felixla" from-flare \
+  "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
+  "$ROOT_DIR/testdata/tiny.flare.vcf" \
+  2 auto "$OUT_DIR/compat" >/dev/null
+"$BIN_DIR/felixla" to-vcf "$OUT_DIR/compat" "$OUT_DIR/compat.vcf.gz" >/dev/null
+"$BIN_DIR/felixla" extract "$OUT_DIR/compat" chr1:1-1000 "$OUT_DIR/compat_region" >/dev/null
+printf '%s\n' "$OUT_DIR/compat" >"$OUT_DIR/compat.list"
+"$BIN_DIR/felixla" concat "$OUT_DIR/compat.list" "$OUT_DIR/compat_merged" >/dev/null
+
 echo "tiny smoke test passed"

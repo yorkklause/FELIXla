@@ -465,9 +465,11 @@ and `--export-felixla`.
   and leave it at `1` when you already saturate the machine with concurrent
   region jobs.
 
-  `--threads` is read by the FLARE conversion, where decompression dominates,
-  and by `--export-lai`, where it drives BGZF compression instead. The RFMix
-  and dosage conversions and the other exports are single-threaded.
+  Only two paths have anything to hand threads to: the FLARE conversion, where
+  BGZF decompression is most of the work, and `--export-lai`, where BGZF
+  compression is. The RFMix and dosage conversions, the region extract, the
+  merge, and the other exports are single-threaded, and give `--threads` back
+  as an error rather than accepting a tuning knob that would do nothing.
 
 - **`--version`**, **`--help`** -- print the version or the flag summary and
   exit.

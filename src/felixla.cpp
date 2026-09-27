@@ -73,16 +73,9 @@ Filters:
 
 Other:
   --n-ancestries INT            Optional; otherwise taken from the input header.
-  --threads INT                 BGZF decompression threads. Default: 1.
+  --threads INT                 BGZF threads for --flare-vcf packing and
+                                --export-lai. Default: 1.
   --version, --help
-
-Compatibility mode:
-  felixla from-flare ...        Old flare_subset_to_tractor_hybrid arguments.
-  felixla from-rfmix ...        Old rfmix_msp_to_tractor_hybrid arguments.
-  felixla from-tractor-dosage ...
-  felixla to-vcf ...
-  felixla extract ...
-  felixla concat prefix_list.txt out_prefix
 )";
 }
 
@@ -322,6 +315,17 @@ int run_plink_style(int argc, char** argv) {
     if (has_filter && !from_flare) {
         die("the sample and variant filters are supported only for "
             "--phase-vcf + --flare-vcf --export-felixla");
+    }
+
+    // Only two paths have anything to hand threads to: the FLARE conversion,
+    // where BGZF decompression is most of the work, and the LAI export, where
+    // BGZF compression is. Everywhere else the flag would be accepted and do
+    // nothing, which reads as a tuning knob that does not work.
+    bool threads_apply = (from_flare && args.export_felixla) || args.export_lai;
+    if (!args.threads.empty() && !threads_apply) {
+        die("--threads applies to --phase-vcf + --flare-vcf --export-felixla "
+            "and to --export-lai; the other conversions and exports are "
+            "single-threaded");
     }
 
     if (args.export_felixla) {
