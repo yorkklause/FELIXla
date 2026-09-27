@@ -82,6 +82,8 @@ Common output and parameter flags:
   --chr LIST                    Contigs to convert, comma-separated; ranges like 1-22 allowed.
   --extract-bed FILE            BED intervals; standard 0-based half-open coordinates.
   --exclude-bed FILE            BED intervals to drop; same coordinate convention.
+  --mac INT / --maf FLOAT       Minimum minor allele count/frequency across ancestries.
+  --anc-mac INT / --anc-maf F   Same, required of at least one ancestry on its own.
   --threads INT                 BGZF decompression threads for --make-felixla. Default: 1.
   --region CHR:START-END        Region for conversion/extraction.
   --chr CHR --from-bp N --to-bp N
@@ -463,6 +465,7 @@ struct PlinkArgs {
     std::string exclude_path;
     std::string extract_bed_path;
     std::string exclude_bed_path;
+    std::string mac, maf, anc_mac, anc_maf;
     std::string threads;
     std::string max_diffs;
     std::string pattern;
@@ -553,6 +556,14 @@ PlinkArgs parse_plink_args(int argc, char** argv) {
             args.extract_bed_path = require_value(i, argc, argv, arg);
         } else if (arg == "--exclude-bed") {
             args.exclude_bed_path = require_value(i, argc, argv, arg);
+        } else if (arg == "--mac") {
+            args.mac = require_value(i, argc, argv, arg);
+        } else if (arg == "--maf") {
+            args.maf = require_value(i, argc, argv, arg);
+        } else if (arg == "--anc-mac") {
+            args.anc_mac = require_value(i, argc, argv, arg);
+        } else if (arg == "--anc-maf") {
+            args.anc_maf = require_value(i, argc, argv, arg);
         } else if (arg == "--threads") {
             args.threads = require_value(i, argc, argv, arg);
         } else if (arg == "--region") {
@@ -619,7 +630,8 @@ int run_plink_style(int argc, char** argv) {
     if (!args.keep_path.empty() || !args.extract_path.empty() ||
         !args.exclude_path.empty() ||
         !args.extract_bed_path.empty() || !args.exclude_bed_path.empty() ||
-        !args.threads.empty()) {
+        !args.mac.empty() || !args.maf.empty() || !args.anc_mac.empty() ||
+        !args.anc_maf.empty() || !args.threads.empty()) {
         if (!args.make_felixla ||
             args.query_action ||
             args.admixture_action ||
@@ -787,6 +799,15 @@ int run_plink_style(int argc, char** argv) {
             if (!args.exclude_bed_path.empty()) {
                 pack_args.push_back("--exclude-bed");
                 pack_args.push_back(args.exclude_bed_path);
+            }
+            for (const auto& threshold : {
+                     std::make_pair("--mac", args.mac),
+                     std::make_pair("--maf", args.maf),
+                     std::make_pair("--anc-mac", args.anc_mac),
+                     std::make_pair("--anc-maf", args.anc_maf)}) {
+                if (threshold.second.empty()) continue;
+                pack_args.push_back(threshold.first);
+                pack_args.push_back(threshold.second);
             }
             if (!args.threads.empty()) {
                 pack_args.push_back("--threads");

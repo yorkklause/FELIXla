@@ -53,6 +53,10 @@ struct AltCarrierBuilder {
 struct AncestryState {
     std::vector<std::vector<uint64_t>> masks;
     std::vector<int8_t> hap_ancestry;
+    // Maintained as ancestries change rather than recounted per variant, since
+    // the allele-frequency filters need it as a denominator.
+    std::vector<uint32_t> anc_hap_count;
+    uint64_t assigned_haps = 0;
 };
 
 struct OpenAncestryBlock {
@@ -1570,6 +1574,8 @@ static void reset_ancestry_state(
         mask.assign(static_cast<size_t>(n_words), 0);
     }
     state.hap_ancestry.assign(n_haps, -1);
+    state.anc_hap_count.assign(static_cast<size_t>(n_ancestries), 0);
+    state.assigned_haps = 0;
 }
 
 static void apply_ancestry_changes(
@@ -1589,8 +1595,14 @@ static void apply_ancestry_changes(
             die("internal FLARE ancestry delta out of range");
         }
         int8_t previous = state.hap_ancestry[change.hap_id];
-        if (previous >= 0) clear_bit(state.masks[previous], change.hap_id);
+        if (previous >= 0) {
+            clear_bit(state.masks[previous], change.hap_id);
+            --state.anc_hap_count[static_cast<size_t>(previous)];
+        } else {
+            ++state.assigned_haps;
+        }
         set_bit(state.masks[change.ancestry], change.hap_id);
+        ++state.anc_hap_count[static_cast<size_t>(change.ancestry)];
         state.hap_ancestry[change.hap_id] = change.ancestry;
     }
 }
@@ -1772,6 +1784,68 @@ static inline void add_biallelic_haplotype(
         }
         builder.sparse_haps.clear();
         set_bit(builder.dense_bits, hap_id);
+    }
+}
+
+// A variant is worth keeping when some test of it is not degenerate, which is
+// what the minor count measures: an allele carried by every haplotype has as
+// little information as one carried by none. Note this is the minor count,
+// while --mac-threshold is a storage decision made on the raw ALT count.
+struct FrequencyFilter {
+    bool active = false;
+    uint64_t min_mac = 0;
+    double min_maf = 0.0;
+    uint64_t min_anc_mac = 0;
+    double min_anc_maf = 0.0;
+    bool anc_active = false;
+};
+
+static uint64_t minor_count(uint64_t alt, uint64_t total) {
+    uint64_t other = total > alt ? total - alt : 0;
+    return alt < other ? alt : other;
+}
+
+static bool passes_total_threshold(
+    const FrequencyFilter& filter,
+    uint64_t alt,
+    uint64_t total
+) {
+    if (total == 0) return false;
+    uint64_t minor = minor_count(alt, total);
+    if (minor < filter.min_mac) return false;
+    if (filter.min_maf > 0.0) {
+        double frequency = static_cast<double>(minor) / static_cast<double>(total);
+        if (frequency < filter.min_maf) return false;
+    }
+    return true;
+}
+
+// Per-ancestry ALT counts: free for a sparse variant, since each carrier
+// already carries its ancestry, and one masked popcount per ancestry otherwise.
+static void count_alt_by_ancestry(
+    const AltCarrierBuilder& builder,
+    const AncestryState& state,
+    int n_ancestries,
+    int n_words,
+    std::vector<uint64_t>& counts
+) {
+    counts.assign(static_cast<size_t>(n_ancestries), 0);
+    if (builder.dense_bits.empty()) {
+        for (uint32_t hap_id : builder.sparse_haps) {
+            int8_t ancestry = state.hap_ancestry[hap_id];
+            if (ancestry >= 0) ++counts[static_cast<size_t>(ancestry)];
+        }
+        return;
+    }
+    for (int k = 0; k < n_ancestries; ++k) {
+        const std::vector<uint64_t>& mask = state.masks[static_cast<size_t>(k)];
+        uint64_t total = 0;
+        for (int w = 0; w < n_words; ++w) {
+            total += static_cast<uint64_t>(
+                __builtin_popcountll(builder.dense_bits[static_cast<size_t>(w)] &
+                                     mask[static_cast<size_t>(w)]));
+        }
+        counts[static_cast<size_t>(k)] = total;
     }
 }
 
@@ -4463,6 +4537,7 @@ int main(int argc, char** argv) {
     std::string extract_bed_path;
     std::string exclude_bed_path;
     ContigSelection contigs;
+    FrequencyFilter frequency_filter;
     int decompress_threads = 1;
     for (int argi = 6; argi < argc; ++argi) {
         std::string arg = argv[argi];
@@ -4493,6 +4568,31 @@ int main(int argc, char** argv) {
         } else if (arg == "--exclude-bed") {
             if (argi + 1 >= argc) die("--exclude-bed requires a value");
             exclude_bed_path = argv[++argi];
+        } else if (arg == "--mac" || arg == "--anc-mac") {
+            if (argi + 1 >= argc) die("%s requires a value", arg.c_str());
+            int64_t value = parse_i64_string(argv[++argi], arg.c_str());
+            if (value < 0) die("%s must not be negative", arg.c_str());
+            frequency_filter.active = true;
+            if (arg == "--mac") {
+                frequency_filter.min_mac = static_cast<uint64_t>(value);
+            } else {
+                frequency_filter.anc_active = true;
+                frequency_filter.min_anc_mac = static_cast<uint64_t>(value);
+            }
+        } else if (arg == "--maf" || arg == "--anc-maf") {
+            if (argi + 1 >= argc) die("%s requires a value", arg.c_str());
+            char* end = nullptr;
+            double value = std::strtod(argv[++argi], &end);
+            if (!end || *end != '\0' || !(value >= 0.0) || value > 0.5) {
+                die("%s must be a frequency in [0, 0.5]", arg.c_str());
+            }
+            frequency_filter.active = true;
+            if (arg == "--maf") {
+                frequency_filter.min_maf = value;
+            } else {
+                frequency_filter.anc_active = true;
+                frequency_filter.min_anc_maf = value;
+            }
         } else if (!arg.empty() && arg[0] == '-') {
             die("unknown option: %s", arg.c_str());
         } else {
@@ -4521,6 +4621,17 @@ int main(int argc, char** argv) {
         log_line("extract-bed-coordinates 0-based-half-open");
     }
     if (!exclude_bed_path.empty()) log_line("exclude-bed %s", exclude_bed_path.c_str());
+    if (frequency_filter.min_mac > 0) {
+        log_line("mac %llu", static_cast<unsigned long long>(frequency_filter.min_mac));
+    }
+    if (frequency_filter.min_maf > 0.0) log_line("maf %g", frequency_filter.min_maf);
+    if (frequency_filter.min_anc_mac > 0) {
+        log_line("anc-mac %llu",
+            static_cast<unsigned long long>(frequency_filter.min_anc_mac));
+    }
+    if (frequency_filter.min_anc_maf > 0.0) {
+        log_line("anc-maf %g", frequency_filter.min_anc_maf);
+    }
     if (contigs.active) {
         std::string tokens;
         for (size_t i = 0; i < contigs.tokens.size(); ++i) {
@@ -5047,6 +5158,8 @@ int main(int argc, char** argv) {
     size_t extract_cursor = 0;
     size_t exclude_cursor = 0;
     uint64_t excluded_allele_count = 0;
+    uint64_t frequency_filtered_alleles = 0;
+    std::vector<uint64_t> alt_by_ancestry;
     ExtractCoordinateMatch extract_coordinate_match;
     size_t bed_cursor = 0;
     size_t active_bed_interval_index = std::numeric_limits<size_t>::max();
@@ -5589,6 +5702,38 @@ int main(int argc, char** argv) {
 
             const AltCarrierBuilder& builder = builders_by_alt[static_cast<size_t>(alt_idx)];
             uint32_t mac = builder.mac;
+
+            if (frequency_filter.active) {
+                bool keep = passes_total_threshold(
+                    frequency_filter, mac, block.state.assigned_haps);
+                if (keep && frequency_filter.anc_active) {
+                    count_alt_by_ancestry(
+                        builder, block.state, n_ancestries, n_words,
+                        alt_by_ancestry);
+                    // Any one ancestry carrying enough variation is enough:
+                    // that ancestry's own test is what stays informative.
+                    keep = false;
+                    for (int k = 0; k < n_ancestries && !keep; ++k) {
+                        uint64_t total = block.state.anc_hap_count[
+                            static_cast<size_t>(k)];
+                        if (total == 0) continue;
+                        uint64_t minor = minor_count(
+                            alt_by_ancestry[static_cast<size_t>(k)], total);
+                        if (minor < frequency_filter.min_anc_mac) continue;
+                        if (frequency_filter.min_anc_maf > 0.0) {
+                            double frequency = static_cast<double>(minor) /
+                                               static_cast<double>(total);
+                            if (frequency < frequency_filter.min_anc_maf) continue;
+                        }
+                        keep = true;
+                    }
+                }
+                if (!keep) {
+                    ++frequency_filtered_alleles;
+                    continue;
+                }
+            }
+
             std::string split_id = make_split_id(raw_id, g_chr, g_pos, ref, alt);
 
             if (mac <= static_cast<uint32_t>(rare_threshold)) {
@@ -5740,6 +5885,10 @@ int main(int argc, char** argv) {
     if (excluded_allele_count > 0) {
         log_line("excluded_alleles %llu",
             static_cast<unsigned long long>(excluded_allele_count));
+    }
+    if (frequency_filter.active) {
+        log_line("frequency_filtered_alleles %llu",
+            static_cast<unsigned long long>(frequency_filtered_alleles));
     }
     felixla::log_finish();
 

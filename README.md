@@ -107,6 +107,7 @@ felixla \
   [ --chr CONTIGS ] \
   [ --extract-bed BED_INTERVALS ] \
   [ --exclude-bed BED_INTERVALS ] \
+  [ --mac INT ] [ --maf FLOAT ] [ --anc-mac INT ] [ --anc-maf FLOAT ] \
   [ --threads N_THREADS ]
 ```
 
@@ -132,6 +133,23 @@ felixla \
   with `MAC <= MAC_THRESHOLD` are stored as sparse carrier lists; variants above
   the threshold are stored as dense bit vectors. Default is `auto`, which uses
   `ceil(n_samples / 32)` from the retained sample count.
+
+- `--mac` / `--maf` / `--anc-mac` / `--anc-maf` (optional): Drop variants with
+  too little variation to be worth carrying. All four are stated on the
+  **minor** allele count or frequency, `min(alt, total - alt)`, so an allele
+  carried by every haplotype is filtered as readily as one carried by none.
+  Note this differs from `--mac-threshold`, which is a storage decision made on
+  the raw ALT count, not a filter.
+
+  `--mac` and `--maf` count across all ancestries, as PLINK's do. `--anc-mac`
+  and `--anc-maf` apply the threshold to each ancestry separately and keep the
+  variant when **at least one** ancestry meets it on its own, each ancestry's
+  frequency being taken over the haplotypes assigned to it. The two answer
+  different questions: an allele spread thinly over several ancestries can
+  clear `--mac` while no single ancestry carries enough of it for that
+  ancestry's own test to be informative, and `--anc-mac` is what removes it.
+  Combining them applies both. Dropped alleles consume no variant ordinal, and
+  the count removed is reported in the log.
 
 - CHR:START-END (optional): 1-based inclusive region to convert. A variant
   belongs to the region when `START <= POS <= END`.
