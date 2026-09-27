@@ -103,6 +103,7 @@ felixla \
   [ --region CHR:START-END ] \
   [ --keep SAMPLE_LIST ] \
   [ --extract SITE_LIST ] \
+  [ --exclude SITE_LIST ] \
   [ --extract-bed BED_INTERVALS ] \
   [ --threads N_THREADS ]
 ```
@@ -150,6 +151,19 @@ felixla \
   chromosome, seeks to those bounded intervals, and then linearly scans inside
   them before exact allele-level filtering. Without an index, FELIXla falls
   back to a streaming scan and prints a warning.
+
+- `--exclude` SITE_LIST (optional): The same PVAR/VCF format and the same
+  allele matching as `--extract`, naming alleles to drop rather than keep. It
+  is applied after selection, so `--extract` and `--exclude` compose as they do
+  in PLINK. Matching is allele-level: a multiallelic record keeps whatever ALTs
+  the list does not name, and the record is dropped only when nothing remains.
+  An entry matching no record in the input is silently inert. Unlike
+  `--extract`, the list is not narrowed by `--region`, since a site outside the
+  region is absent from the output regardless.
+
+  Note that neither `--extract` nor `--exclude` uses the `ID` column: matching
+  is on `CHROM`, `POS` and the normalized `REF`/`ALT`. A PLINK-style file of
+  bare variant IDs is therefore rejected rather than silently misread.
 
 - BED_INTERVALS (optional): A BED or gzip-compressed BED file. FELIXla reads
   the first three columns and ignores later columns, `track`/`browser` rows,
@@ -430,12 +444,18 @@ the cgroup events and the job runner logs to distinguish a memory limit from an
 external cancellation. Partial prefixes from those commands must not be
 concatenated.
 
+`--export vcf` always writes BGZF with a tabix index beside it: a full-cohort
+export is far too large to be worth keeping uncompressed. An `--out` ending in
+`.vcf` is corrected to `.vcf.gz` with a note on stderr, and any other `--out`
+gains the `.vcf.gz` suffix, so the two files written are always
+`<out>.vcf.gz` and `<out>.vcf.gz.tbi`.
+
 The same binary also dispatches to compatibility subcommands:
 
 ```
 felixla --phase-vcf PHASED_VCF --rfmix-msp MSP_FILE --n-ancestries N --make-felixla --out OUT_PREFIX
 felixla --tractor-dosage-vcf DOSAGE_VCF --n-ancestries N --make-felixla --out OUT_PREFIX
-felixla --felixla PREFIX --export vcf --out OUTPUT_VCF
+felixla --felixla PREFIX --export vcf --out OUTPUT_VCF_GZ
 felixla --felixla PREFIX --query CHR:POS --ref REF --alt ALT [ --nonzero-only ]
 felixla --felixla PREFIX --region CHR:START-END --make-felixla --out OUT_PREFIX
 felixla --vcf TRACTOR_VCF --admixture --out ADMIXTURE_TSV

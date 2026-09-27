@@ -157,10 +157,18 @@ int run_tool_stdout(const std::string& out_path, ToolMain tool, std::vector<std:
     return rc;
 }
 
+// Export is always BGZF with a tabix index beside it, so a plain .vcf name
+// would describe the file wrongly. A full-cohort export is far too large to be
+// worth writing uncompressed, so the name is corrected rather than honoured.
 std::string vcf_export_path(const std::string& out) {
-    if (out.size() >= 4 && out.compare(out.size() - 4, 4, ".vcf") == 0) return out;
     if (out.size() >= 7 && out.compare(out.size() - 7, 7, ".vcf.gz") == 0) return out;
     if (out.size() >= 8 && out.compare(out.size() - 8, 8, ".vcf.bgz") == 0) return out;
+    if (out.size() >= 4 && out.compare(out.size() - 4, 4, ".vcf") == 0) {
+        std::string corrected = out + ".gz";
+        std::cerr << "FELIXla: --export vcf writes BGZF with a tabix index; "
+                  << "writing " << corrected << " rather than " << out << ".\n";
+        return corrected;
+    }
     return out + ".vcf.gz";
 }
 
