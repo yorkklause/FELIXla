@@ -122,6 +122,13 @@ HTSLIB_LIBS := -lhts
 endif
 HTSLIB_STATIC_LIBS ?= $(if $(PKG_HTSLIB_STATIC_LIBS),$(PKG_HTSLIB_STATIC_LIBS),$(BREW_HTSLIB_STATIC_LIBS))
 
+# Recorded in every prefix's .meta, so a packed prefix names the tree that
+# produced it. A build from uncommitted work is reported as -dirty.
+FELIXLA_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null)
+ifneq ($(strip $(FELIXLA_VERSION)),)
+CPPFLAGS += -DFELIXLA_VERSION='"$(FELIXLA_VERSION)"'
+endif
+
 # No -march here on purpose. The hot VCF scanning loops select their AVX2
 # implementation at run time, so a baseline build keeps that speed while
 # staying runnable on any x86-64 node -- which -march=native does not, when the

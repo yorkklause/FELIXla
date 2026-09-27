@@ -930,7 +930,15 @@ int run_compat_command(int argc, char** argv) {
 
 }  // namespace
 
+// The PLINK-style front end rewrites its flags into each tool's positional
+// form, so a tool that wants to record how it was invoked needs the original.
+std::string g_felixla_invocation;
+
 int main(int argc, char** argv) {
+    for (int i = 0; i < argc; ++i) {
+        if (i > 0) g_felixla_invocation.push_back(' ');
+        g_felixla_invocation += argv[i];
+    }
     if (argc == 1) {
         usage(std::cerr);
         return 2;

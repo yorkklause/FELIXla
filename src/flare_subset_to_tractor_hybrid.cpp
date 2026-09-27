@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <ctime>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -27,6 +28,11 @@
 #include <vector>
 
 #include <unistd.h>
+
+#include "felixla_version.h"
+
+// Defined by the front end in felixla.cpp.
+extern std::string g_felixla_invocation;
 
 #if defined(__x86_64__) || defined(__i386__)
 #define FELIXLA_X86_SIMD 1
@@ -217,6 +223,44 @@ static void attach_input_thread_pool(htsFile* fp) {
     if (fp && g_input_thread_pool.pool) {
         hts_set_opt(fp, HTS_OPT_THREAD_POOL, &g_input_thread_pool);
     }
+}
+
+// A .meta row is key-tab-value-newline, and a reader that finds a row without
+// a tab rejects the whole prefix, so a value carrying either character has to
+// be escaped rather than written raw.
+static std::string escape_meta_value(const std::string& value) {
+    std::string escaped;
+    escaped.reserve(value.size());
+    for (char c : value) {
+        switch (c) {
+            case '\\': escaped += "\\\\"; break;
+            case '\t': escaped += "\\t"; break;
+            case '\n': escaped += "\\n"; break;
+            case '\r': escaped += "\\r"; break;
+            default: escaped.push_back(c); break;
+        }
+    }
+    return escaped;
+}
+
+static std::string join_command_line(int argc, char** argv) {
+    std::string joined;
+    for (int i = 0; i < argc; ++i) {
+        if (i > 0) joined.push_back(' ');
+        joined += argv[i];
+    }
+    return joined;
+}
+
+static std::string utc_timestamp_now() {
+    std::time_t now = std::time(nullptr);
+    std::tm utc{};
+    if (!gmtime_r(&now, &utc)) return std::string();
+    char buffer[32];
+    if (!std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &utc)) {
+        return std::string();
+    }
+    return std::string(buffer);
 }
 
 static void report_stage(const char* out_prefix, const char* stage) {
@@ -1409,7 +1453,8 @@ static void write_sidecars(
     const char* keep_path,
     const char* extract_path,
     const char* exclude_path,
-    const BedIntervals& bed
+    const BedIntervals& bed,
+    const std::string& command_line
 ) {
     FILE* samples_fp = open_output_or_die(samples_path, "w");
     constexpr size_t kSampleWriteBufferBytes = 1024 * 1024;
@@ -1441,6 +1486,12 @@ static void write_sidecars(
 
     FILE* meta_fp = open_output_or_die(meta_path, "w");
     std::fprintf(meta_fp, "format_version\t1\n");
+    std::string created_utc = utc_timestamp_now();
+    if (!created_utc.empty()) {
+        std::fprintf(meta_fp, "created_utc\t%s\n", created_utc.c_str());
+    }
+    std::fprintf(meta_fp, "command_line\t%s\n",
+        escape_meta_value(command_line).c_str());
     std::fprintf(meta_fp, "n_samples\t%llu\n",
         static_cast<unsigned long long>(sample_ids.size()));
     std::fprintf(meta_fp, "n_haps\t%llu\n", static_cast<unsigned long long>(n_haps));
@@ -4749,7 +4800,9 @@ int main(int argc, char** argv) {
         keep_path.empty() ? nullptr : keep_path.c_str(),
         extract_path.empty() ? nullptr : extract_path.c_str(),
         exclude_path.empty() ? nullptr : exclude_path.c_str(),
-        bed
+        bed,
+        g_felixla_invocation.empty() ? join_command_line(argc, argv)
+                                     : g_felixla_invocation
     );
     report_stage(out_prefix, "finished writing sample and metadata sidecars");
 
@@ -5448,6 +5501,10 @@ int main(int argc, char** argv) {
     std::fprintf(final_meta_fp, "rare_variants\t%llu\n",
         static_cast<unsigned long long>(rare_index));
     std::fprintf(final_meta_fp, "ancestry_blocks\t%u\n", n_blocks_written);
+    // Written last on purpose: a prefix carrying felixla_version is one whose
+    // conversion ran to completion, which is what tells a killed job's partial
+    // output apart from a genuinely older prefix that predates the field.
+    std::fprintf(final_meta_fp, "felixla_version\t%s\n", FELIXLA_VERSION);
     std::fclose(final_meta_fp);
 
     progress.finish(global_variant_index, common_index, rare_index);
