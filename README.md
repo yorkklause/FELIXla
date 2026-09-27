@@ -104,13 +104,17 @@ felixla \
   [ --keep SAMPLE_LIST ] \
   [ --extract SITE_LIST ] \
   [ --exclude SITE_LIST ] \
-  [ --chr CONTIGS | --not-chr CONTIGS | --autosome ] \
+  [ --chr CONTIGS ] \
   [ --extract-bed BED_INTERVALS ] \
   [ --threads N_THREADS ]
 ```
 
 - PHASED_VCF (required): Full path and filename of a phased diploid genotype
-  VCF/BCF. Genotypes must be phased, diploid, and non-missing. Multi-allelic
+  VCF/BCF. Genotypes must be phased, diploid, and non-missing. The sex
+  chromosomes are not supported: the packed format gives every sample exactly
+  two haplotypes, so haploid genotypes cannot be represented, and a record on
+  `X` or `Y` is refused with that explanation. Select the autosomes
+  explicitly, for example `--chr 1-22`. Multi-allelic
   records are split logically by ALT allele.
 
 - FLARE_VCF (required): Full path and filename of a FLARE local ancestry
@@ -166,13 +170,12 @@ felixla \
   is on `CHROM`, `POS` and the normalized `REF`/`ALT`. A PLINK-style file of
   bare variant IDs is therefore rejected rather than silently misread.
 
-- `--chr` / `--not-chr` / `--autosome` (optional): Select whole contigs to
-  convert. CONTIGS is comma-separated and accepts numeric ranges, so
-  `--chr 1-22,X` and `--chr chr1,chr2` both work; `--autosome` is exactly
-  `--chr 1-22`. Each name is matched against the genotype VCF header as
-  written, then with a `chr` prefix added, then removed, so the same command
-  works on either naming convention. A name matching no contig in the header
-  is a warning, not an error. The three flags are mutually exclusive.
+- `--chr` CONTIGS (optional): Select whole contigs to convert.
+  Comma-separated, with numeric ranges allowed, so `--chr 1-22` and
+  `--chr chr1,chr2` both work. Each name is matched against the genotype VCF
+  header as written, then with a `chr` prefix added, then removed, so the same
+  command works on either naming convention. A name matching no contig in the
+  header is a warning, not an error.
 
   Selecting whole contigs composes with the interval filters: with
   `--extract-bed`, intervals on unselected contigs are dropped; without it,
@@ -486,6 +489,15 @@ accepted as `felixla` subcommands, for example
 executables.
 
 ## Output
+
+Every conversion also writes `<prefix>.log`: the FELIXla version that ran, the
+command as invoked, the inputs and every filter applied, the variant and
+ancestry-block counts, and a closing `completed` line. A fatal error is
+appended there too, so a failed run leaves its own explanation. A log that
+does not end in `completed` is a run that did not finish, and its prefix must
+not be concatenated. `<prefix>.meta` stays the machine-read description of the
+packed data itself.
+
 
 A FELIXla packed prefix writes the following files:
 

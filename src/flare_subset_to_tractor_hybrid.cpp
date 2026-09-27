@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cerrno>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -201,6 +202,7 @@ struct BedInterval {
 
 struct BedIntervals {
     bool active = false;
+    bool from_file = false;   // false when --chr synthesized the intervals
     std::string path;
     std::vector<BedInterval> intervals;
     uint64_t source_interval_count = 0;
@@ -223,24 +225,6 @@ static void attach_input_thread_pool(htsFile* fp) {
     if (fp && g_input_thread_pool.pool) {
         hts_set_opt(fp, HTS_OPT_THREAD_POOL, &g_input_thread_pool);
     }
-}
-
-// A .meta row is key-tab-value-newline, and a reader that finds a row without
-// a tab rejects the whole prefix, so a value carrying either character has to
-// be escaped rather than written raw.
-static std::string escape_meta_value(const std::string& value) {
-    std::string escaped;
-    escaped.reserve(value.size());
-    for (char c : value) {
-        switch (c) {
-            case '\\': escaped += "\\\\"; break;
-            case '\t': escaped += "\\t"; break;
-            case '\n': escaped += "\\n"; break;
-            case '\r': escaped += "\\r"; break;
-            default: escaped.push_back(c); break;
-        }
-    }
-    return escaped;
 }
 
 static std::string join_command_line(int argc, char** argv) {
@@ -278,6 +262,20 @@ static void report_stage(const char* out_prefix, const char* stage) {
     std::fflush(stderr);
 }
 
+// Human-readable run record beside the prefix. Provenance lives here rather
+// than in .meta, which stays the machine-read description of the data itself.
+static FILE* g_log_fp = nullptr;
+
+static void log_line(const char* fmt, ...) {
+    if (!g_log_fp) return;
+    va_list args;
+    va_start(args, fmt);
+    std::vfprintf(g_log_fp, fmt, args);
+    va_end(args);
+    std::fputc('\n', g_log_fp);
+    std::fflush(g_log_fp);
+}
+
 [[noreturn]] static void die(const char* fmt, ...) {
     if (g_progress_line_open) {
         std::fputc('\n', stderr);
@@ -289,6 +287,15 @@ static void report_stage(const char* out_prefix, const char* stage) {
     std::vfprintf(stderr, fmt, args);
     std::fputc('\n', stderr);
     va_end(args);
+    if (g_log_fp) {
+        va_list log_args;
+        va_start(log_args, fmt);
+        std::fputs("ERROR: ", g_log_fp);
+        std::vfprintf(g_log_fp, fmt, log_args);
+        std::fputc('\n', g_log_fp);
+        va_end(log_args);
+        std::fflush(g_log_fp);
+    }
     std::exit(1);
 }
 
@@ -808,6 +815,7 @@ static BedIntervals load_bed_intervals(
     if (path.empty()) return bed;
 
     bed.active = true;
+    bed.from_file = true;
     bed.path = path;
     TextLineReader reader(path, "--extract-bed interval list");
 
@@ -1452,10 +1460,7 @@ static void write_sidecars(
     const char* selected_region,
     const char* keep_path,
     const char* extract_path,
-    const char* exclude_path,
-    const char* contig_filter,
-    const BedIntervals& bed,
-    const std::string& command_line
+    const BedIntervals& bed
 ) {
     FILE* samples_fp = open_output_or_die(samples_path, "w");
     constexpr size_t kSampleWriteBufferBytes = 1024 * 1024;
@@ -1487,12 +1492,6 @@ static void write_sidecars(
 
     FILE* meta_fp = open_output_or_die(meta_path, "w");
     std::fprintf(meta_fp, "format_version\t1\n");
-    std::string created_utc = utc_timestamp_now();
-    if (!created_utc.empty()) {
-        std::fprintf(meta_fp, "created_utc\t%s\n", created_utc.c_str());
-    }
-    std::fprintf(meta_fp, "command_line\t%s\n",
-        escape_meta_value(command_line).c_str());
     std::fprintf(meta_fp, "n_samples\t%llu\n",
         static_cast<unsigned long long>(sample_ids.size()));
     std::fprintf(meta_fp, "n_haps\t%llu\n", static_cast<unsigned long long>(n_haps));
@@ -1510,13 +1509,7 @@ static void write_sidecars(
     if (extract_path) {
         std::fprintf(meta_fp, "extract_sites\t%s\n", extract_path);
     }
-    if (exclude_path) {
-        std::fprintf(meta_fp, "exclude_sites\t%s\n", exclude_path);
-    }
-    if (contig_filter && *contig_filter) {
-        std::fprintf(meta_fp, "contig_filter\t%s\n", contig_filter);
-    }
-    if (bed.active) {
+    if (bed.active && bed.from_file) {
         std::fprintf(meta_fp, "extract_bed\t%s\n", bed.path.c_str());
         std::fprintf(meta_fp, "extract_bed_coordinates\t0-based-half-open\n");
         std::fprintf(meta_fp, "extract_bed_source_intervals\t%llu\n",
@@ -3429,7 +3422,6 @@ static void prepare_extract_positions(ExtractSites& extract_sites, bcf_hdr_t* gh
 // unchanged.
 struct ContigSelection {
     bool active = false;
-    bool negated = false;
     std::vector<std::string> tokens;
     std::string label;
 };
@@ -3509,15 +3501,8 @@ static void apply_contig_selection(
         named.insert(rid);
     }
 
-    std::vector<int> selected;
-    if (selection.negated) {
-        for (int rid = 0; rid < ghdr->n[BCF_DT_CTG]; ++rid) {
-            if (named.count(rid) == 0) selected.push_back(rid);
-        }
-    } else {
-        selected.assign(named.begin(), named.end());
-        std::sort(selected.begin(), selected.end());
-    }
+    std::vector<int> selected(named.begin(), named.end());
+    std::sort(selected.begin(), selected.end());
 
     if (region.active) {
         bool region_kept = std::find(selected.begin(), selected.end(),
@@ -3552,6 +3537,7 @@ static void apply_contig_selection(
     }
 
     bed.active = true;
+    bed.from_file = false;
     bed.path = selection.label;
     bed.intervals.clear();
     for (int rid : selected) {
@@ -3570,6 +3556,31 @@ static void apply_contig_selection(
         "Applied %s: converting %llu whole contig(s).\n",
         selection.label.c_str(),
         static_cast<unsigned long long>(bed.intervals.size())
+    );
+}
+
+// Sex chromosomes are haploid outside the pseudoautosomal regions, and the
+// packed format gives every sample exactly two haplotypes, so a male X would
+// have to be represented as something it is not. Local ancestry on the sex
+// chromosomes is unsettled besides. Refusing the contig outright beats
+// surfacing this later as a confusing "expected diploid GT" on one record.
+static bool is_sex_contig(const char* chr) {
+    if (!chr) return false;
+    const char* name = chr;
+    if (std::strncmp(name, "chr", 3) == 0 || std::strncmp(name, "CHR", 3) == 0) {
+        name += 3;
+    }
+    return (name[0] == 'X' || name[0] == 'x' || name[0] == 'Y' || name[0] == 'y') &&
+           name[1] == '\0';
+}
+
+static void reject_sex_contig(const char* chr) {
+    if (!is_sex_contig(chr)) return;
+    die(
+        "contig %s is not supported: the packed format stores two haplotypes "
+        "per sample, so haploid sex-chromosome genotypes cannot be represented. "
+        "Select the autosomes explicitly, for example --chr 1-22",
+        chr
     );
 }
 
@@ -4449,20 +4460,11 @@ int main(int argc, char** argv) {
         } else if (arg == "--exclude") {
             if (argi + 1 >= argc) die("--exclude requires a value");
             exclude_path = argv[++argi];
-        } else if (arg == "--chr" || arg == "--not-chr") {
-            if (argi + 1 >= argc) die("%s requires a value", arg.c_str());
-            if (contigs.active) die("--chr/--not-chr/--autosome are exclusive");
+        } else if (arg == "--chr") {
+            if (argi + 1 >= argc) die("--chr requires a value");
             contigs.active = true;
-            contigs.negated = arg == "--not-chr";
             contigs.label = arg;
             append_contig_tokens(contigs, argv[++argi]);
-        } else if (arg == "--autosome") {
-            if (contigs.active) die("--chr/--not-chr/--autosome are exclusive");
-            contigs.active = true;
-            contigs.label = arg;
-            for (int c = 1; c <= 22; ++c) {
-                contigs.tokens.push_back(std::to_string(c));
-            }
         } else if (arg == "--extract-bed") {
             if (argi + 1 >= argc) die("--extract-bed requires a value");
             extract_bed_path = argv[++argi];
@@ -4476,6 +4478,38 @@ int main(int argc, char** argv) {
 
     if (n_ancestries <= 0 || n_ancestries > 32) {
         die("n_ancestries must be in [1, 32]");
+    }
+
+    std::string log_path = std::string(out_prefix) + ".log";
+    g_log_fp = std::fopen(log_path.c_str(), "w");
+    if (!g_log_fp) {
+        die("cannot open log file %s: %s", log_path.c_str(), std::strerror(errno));
+    }
+    log_line("FELIXla %s", FELIXLA_VERSION);
+    {
+        std::string started = utc_timestamp_now();
+        if (!started.empty()) log_line("started %s", started.c_str());
+    }
+    log_line("command %s",
+        g_felixla_invocation.empty() ? join_command_line(argc, argv).c_str()
+                                     : g_felixla_invocation.c_str());
+    log_line("genotype %s", geno_vcf);
+    log_line("flare %s", flare_vcf);
+    log_line("out %s", out_prefix);
+    log_line("n_ancestries %d", n_ancestries);
+    if (decompress_threads > 1) log_line("threads %d", decompress_threads);
+    if (region.active) log_line("region %s", region.label.c_str());
+    if (!keep_path.empty()) log_line("keep %s", keep_path.c_str());
+    if (!extract_path.empty()) log_line("extract %s", extract_path.c_str());
+    if (!exclude_path.empty()) log_line("exclude %s", exclude_path.c_str());
+    if (!extract_bed_path.empty()) log_line("extract-bed %s", extract_bed_path.c_str());
+    if (contigs.active) {
+        std::string tokens;
+        for (size_t i = 0; i < contigs.tokens.size(); ++i) {
+            if (i) tokens.push_back(',');
+            tokens += contigs.tokens[i];
+        }
+        log_line("chr %s", tokens.c_str());
     }
 
     report_stage(out_prefix, "opening input files and reading headers");
@@ -4596,14 +4630,6 @@ int main(int argc, char** argv) {
     prepare_extract_positions(exclude_sites, ghdr);
     prepare_bed_intervals(bed, ghdr);
     apply_contig_selection(contigs, bed, region, ghdr);
-    std::string contig_filter_label;
-    if (contigs.active) {
-        contig_filter_label = contigs.label;
-        for (size_t i = 0; i < contigs.tokens.size(); ++i) {
-            contig_filter_label += i == 0 ? ' ' : ',';
-            contig_filter_label += contigs.tokens[i];
-        }
-    }
     intersect_extract_positions_with_bed(extract_sites, bed);
 
     if (extract_sites.active) {
@@ -4978,11 +5004,7 @@ int main(int argc, char** argv) {
         region.active ? region.label.c_str() : nullptr,
         keep_path.empty() ? nullptr : keep_path.c_str(),
         extract_path.empty() ? nullptr : extract_path.c_str(),
-        exclude_path.empty() ? nullptr : exclude_path.c_str(),
-        contig_filter_label.c_str(),
-        bed,
-        g_felixla_invocation.empty() ? join_command_line(argc, argv)
-                                     : g_felixla_invocation
+        bed
     );
     report_stage(out_prefix, "finished writing sample and metadata sidecars");
 
@@ -5464,6 +5486,8 @@ int main(int argc, char** argv) {
             continue;
         }
 
+        reject_sex_contig(g_chr);
+
         const char* raw_id = g_raw_id;
         if (!extract_sites.active) {
             selected_alts.assign(static_cast<size_t>(g_n_allele), 1);
@@ -5681,13 +5705,26 @@ int main(int argc, char** argv) {
     std::fprintf(final_meta_fp, "rare_variants\t%llu\n",
         static_cast<unsigned long long>(rare_index));
     std::fprintf(final_meta_fp, "ancestry_blocks\t%u\n", n_blocks_written);
-    // Written last on purpose: a prefix carrying felixla_version is one whose
-    // conversion ran to completion, which is what tells a killed job's partial
-    // output apart from a genuinely older prefix that predates the field.
-    std::fprintf(final_meta_fp, "felixla_version\t%s\n", FELIXLA_VERSION);
     std::fclose(final_meta_fp);
 
     progress.finish(global_variant_index, common_index, rare_index);
+
+    log_line("global_variants %u", global_variant_index);
+    log_line("common_variants %llu", static_cast<unsigned long long>(common_index));
+    log_line("rare_variants %llu", static_cast<unsigned long long>(rare_index));
+    log_line("ancestry_blocks %u", n_blocks_written);
+    if (excluded_allele_count > 0) {
+        log_line("excluded_alleles %llu",
+            static_cast<unsigned long long>(excluded_allele_count));
+    }
+    {
+        std::string finished = utc_timestamp_now();
+        log_line("completed %s", finished.empty() ? "" : finished.c_str());
+    }
+    if (g_log_fp) {
+        std::fclose(g_log_fp);
+        g_log_fp = nullptr;
+    }
 
     report_stage(out_prefix, "conversion complete");
     std::fprintf(stderr, "Finished.\n");
