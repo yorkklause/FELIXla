@@ -641,7 +641,7 @@ int run_plink_style(int argc, char** argv) {
             !args.export_format.empty() ||
             args.phase_vcf.empty() ||
             args.flare_vcf.empty()) {
-            die("--keep/--extract/--exclude/--extract-bed/--threads are currently supported only for --phase-vcf + --flare-vcf --make-felixla");
+            die("--keep/--extract/--exclude/--extract-bed/--exclude-bed/--mac/--maf/--anc-mac/--anc-maf/--threads are currently supported only for --phase-vcf + --flare-vcf --make-felixla");
         }
     }
 

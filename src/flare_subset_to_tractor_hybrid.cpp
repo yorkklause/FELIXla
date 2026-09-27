@@ -4570,8 +4570,15 @@ int main(int argc, char** argv) {
             exclude_bed_path = argv[++argi];
         } else if (arg == "--mac" || arg == "--anc-mac") {
             if (argi + 1 >= argc) die("%s requires a value", arg.c_str());
-            int64_t value = parse_i64_string(argv[++argi], arg.c_str());
-            if (value < 0) die("%s must not be negative", arg.c_str());
+            // Parsed here rather than through parse_i64_string, which demands
+            // a positive value: zero is a meaningful no-op for a threshold a
+            // caller computed.
+            const char* text = argv[++argi];
+            char* end = nullptr;
+            long long value = std::strtoll(text, &end, 10);
+            if (!end || *end != '\0' || value < 0) {
+                die("%s must be a non-negative integer: %s", arg.c_str(), text);
+            }
             frequency_filter.active = true;
             if (arg == "--mac") {
                 frequency_filter.min_mac = static_cast<uint64_t>(value);
