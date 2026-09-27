@@ -416,6 +416,58 @@ static KeepSamples load_keep_samples(const std::string& path) {
     return keep;
 }
 
+// FLARE records what each ancestry label means in its header:
+//   ##ANCESTRY=<ID=0,Name=AFR>
+// Nothing downstream can say what ancestry 1 is without it, and its line count
+// is also the authoritative ancestry count -- deriving that from the data
+// instead would be wrong for a region that happens to contain no carrier of
+// some ancestry, and every region job has to agree or the merge fails.
+struct AncestryNames {
+    std::vector<std::string> names;  // index = FLARE's 0-based label
+
+    bool empty() const { return names.empty(); }
+    size_t size() const { return names.size(); }
+    const std::string& operator[](size_t i) const { return names[i]; }
+};
+
+static AncestryNames read_flare_ancestry_names(bcf_hdr_t* ahdr) {
+    AncestryNames found;
+    std::vector<std::pair<int, std::string>> entries;
+    for (int i = 0; i < ahdr->nhrec; ++i) {
+        const bcf_hrec_t* hrec = ahdr->hrec[i];
+        if (!hrec->key || std::strcmp(hrec->key, "ANCESTRY") != 0) continue;
+        const char* id = nullptr;
+        const char* name = nullptr;
+        for (int k = 0; k < hrec->nkeys; ++k) {
+            if (std::strcmp(hrec->keys[k], "ID") == 0) id = hrec->vals[k];
+            else if (std::strcmp(hrec->keys[k], "Name") == 0) name = hrec->vals[k];
+        }
+        if (!id || !name) {
+            die("FLARE ##ANCESTRY header line lacks ID or Name");
+        }
+        // FLARE numbers ancestries from zero, so this cannot go through the
+        // shared parser, which requires a positive value.
+        char* id_end = nullptr;
+        long id_value = std::strtol(id, &id_end, 10);
+        if (!id_end || *id_end != '\0' || id_value < 0 || id_value > 31) {
+            die("FLARE ##ANCESTRY ID must be in [0, 31]: %s", id);
+        }
+        entries.emplace_back(static_cast<int>(id_value), name);
+    }
+    if (entries.empty()) return found;
+
+    std::sort(entries.begin(), entries.end());
+    found.names.resize(entries.size());
+    for (size_t i = 0; i < entries.size(); ++i) {
+        if (entries[i].first != static_cast<int>(i)) {
+            die("FLARE ##ANCESTRY IDs must be 0..%d with no gaps; saw %d",
+                static_cast<int>(entries.size()) - 1, entries[i].first);
+        }
+        found.names[i] = entries[i].second;
+    }
+    return found;
+}
+
 static bool sample_headers_identical(bcf_hdr_t* ghdr, bcf_hdr_t* ahdr) {
     int n_genotype = bcf_hdr_nsamples(ghdr);
     int n_flare = bcf_hdr_nsamples(ahdr);
@@ -1419,7 +1471,8 @@ static void write_sidecars(
     int n_words,
     int n_ancestries,
     int rare_threshold,
-    const char* selected_region
+    const char* selected_region,
+    const AncestryNames& ancestry_names
 ) {
     FILE* samples_fp = open_output_or_die(samples_path, "w");
     constexpr size_t kSampleWriteBufferBytes = 1024 * 1024;
@@ -1459,6 +1512,12 @@ static void write_sidecars(
     std::fprintf(meta_fp, "rare_threshold\t%d\n", rare_threshold);
     if (selected_region) {
         std::fprintf(meta_fp, "selected_region\t%s\n", selected_region);
+    }
+    // One row per ancestry, numbered from one to match the exported LAI file,
+    // where zero is reserved for a missing label.
+    for (size_t i = 0; i < ancestry_names.size(); ++i) {
+        std::fprintf(meta_fp, "ancestry_name_%zu\t%s\n", i + 1,
+            ancestry_names[i].c_str());
     }
     std::fclose(meta_fp);
 }
@@ -4497,20 +4556,17 @@ static void print_usage(const char* prog) {
     );
 }
 
+// The sparse/dense threshold is no longer a choice: ceil(n_samples / 32) is
+// where a carrier list stops being smaller than a bit vector, so there is
+// nothing to gain by moving it. The positional slot stays for the
+// compatibility command form, but a number in it now fails loudly rather than
+// being quietly overridden.
 static int parse_rare_threshold_arg(const char* text) {
     if (std::strcmp(text, "auto") == 0 || std::strcmp(text, "default") == 0) {
         return -1;
     }
-
-    char* end = nullptr;
-    long value = std::strtol(text, &end, 10);
-    if (end == text || *end != '\0') {
-        die("rare_threshold must be a non-negative integer or auto: %s", text);
-    }
-    if (value < 0 || value > std::numeric_limits<int>::max()) {
-        die("rare_threshold out of range: %s", text);
-    }
-    return static_cast<int>(value);
+    die("rare_threshold is always computed as ceil(n_samples / 32); pass auto "
+        "rather than %s", text);
 }
 
 static int default_rare_threshold_from_samples(int n_samples) {
@@ -4527,7 +4583,9 @@ int main(int argc, char** argv) {
 
     const char* geno_vcf = argv[1];
     const char* flare_vcf = argv[2];
-    int n_ancestries = std::atoi(argv[3]);
+    // Zero means "take it from the FLARE header", which is the
+    // authoritative source; the positional stays for the compatibility form.
+    int n_ancestries = std::strcmp(argv[3], "auto") == 0 ? 0 : std::atoi(argv[3]);
     int rare_threshold = parse_rare_threshold_arg(argv[4]);
     const char* out_prefix = argv[5];
     Region region;
@@ -4672,6 +4730,29 @@ int main(int argc, char** argv) {
 
     if (!ghdr || !ahdr) {
         die("cannot read input headers");
+    }
+
+    AncestryNames ancestry_names = read_flare_ancestry_names(ahdr);
+    if (!ancestry_names.empty()) {
+        if (n_ancestries > 0 &&
+            n_ancestries != static_cast<int>(ancestry_names.size())) {
+            die("FLARE header declares %d ancestries but n_ancestries is %d",
+                static_cast<int>(ancestry_names.size()), n_ancestries);
+        }
+        n_ancestries = static_cast<int>(ancestry_names.size());
+        std::string listed;
+        for (size_t i = 0; i < ancestry_names.size(); ++i) {
+            if (i) listed += ", ";
+            listed += "ANC" + std::to_string(i + 1) + "=" + ancestry_names[i];
+        }
+        log_line("ancestries %s", listed.c_str());
+    } else if (n_ancestries <= 0) {
+        die("FLARE VCF header has no ##ANCESTRY lines, so the ancestry count "
+            "cannot be determined; counting labels in the data would be wrong "
+            "for a region that contains no carrier of some ancestry");
+    }
+    if (n_ancestries <= 0 || n_ancestries > 32) {
+        die("ancestry count must be in [1, 32], got %d", n_ancestries);
     }
 
     const htsFormat* genotype_format = hts_get_format(gfp);
@@ -5146,7 +5227,8 @@ int main(int argc, char** argv) {
         n_words,
         n_ancestries,
         rare_threshold,
-        region.active ? region.label.c_str() : nullptr
+        region.active ? region.label.c_str() : nullptr,
+        ancestry_names
     );
     report_stage(out_prefix, "finished writing sample and metadata sidecars");
 

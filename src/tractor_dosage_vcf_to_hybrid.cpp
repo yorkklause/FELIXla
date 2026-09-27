@@ -769,20 +769,17 @@ static void print_usage(const char* prog) {
     );
 }
 
+// The sparse/dense threshold is no longer a choice: ceil(n_samples / 32) is
+// where a carrier list stops being smaller than a bit vector, so there is
+// nothing to gain by moving it. The positional slot stays for the
+// compatibility command form, but a number in it now fails loudly rather than
+// being quietly overridden.
 static int parse_rare_threshold_arg(const char* text) {
     if (std::strcmp(text, "auto") == 0 || std::strcmp(text, "default") == 0) {
         return -1;
     }
-
-    char* end = nullptr;
-    long value = std::strtol(text, &end, 10);
-    if (end == text || *end != '\0') {
-        die("rare_threshold must be a non-negative integer or auto: %s", text);
-    }
-    if (value < 0 || value > std::numeric_limits<int>::max()) {
-        die("rare_threshold out of range: %s", text);
-    }
-    return static_cast<int>(value);
+    die("rare_threshold is always computed as ceil(n_samples / 32); pass auto "
+        "rather than %s", text);
 }
 
 static int default_rare_threshold_from_samples(int n_samples) {
@@ -798,7 +795,7 @@ int main(int argc, char** argv) {
     }
 
     const char* dosage_vcf = argv[1];
-    int n_ancestries = std::atoi(argv[2]);
+    int n_ancestries = std::strcmp(argv[2], "auto") == 0 ? 0 : std::atoi(argv[2]);
     int rare_threshold = parse_rare_threshold_arg(argv[3]);
     const char* out_prefix = argv[4];
 
@@ -806,13 +803,12 @@ int main(int argc, char** argv) {
         die("cannot open log file %s.log: %s", out_prefix, std::strerror(errno));
     }
     felixla::log_line("tractor-dosage-vcf %s", dosage_vcf);
-    felixla::log_line("n_ancestries %d", n_ancestries);
     felixla::log_line(
         "dosage-source-note canonical haplotypes reconstructed from hardcall "
         "DS#/ANC# counts");
 
-    if (n_ancestries <= 0 || n_ancestries > 32) {
-        die("n_ancestries must be in [1, 32]");
+    if (n_ancestries > 32) {
+        die("ancestry count must be in [1, 32], got %d", n_ancestries);
     }
 
     htsFile* fp = bcf_open(dosage_vcf, "r");
@@ -823,6 +819,33 @@ int main(int argc, char** argv) {
     bcf_hdr_t* hdr = bcf_hdr_read(fp);
     if (!hdr) {
         die("cannot read input header");
+    }
+
+    // The DS#/ANC# FORMAT declarations are the authoritative ancestry count:
+    // counting labels in the data would be wrong for a file whose region
+    // happens to carry no dosage for some ancestry.
+    {
+        int declared = 0;
+        while (declared < 32) {
+            std::string ds = "DS" + std::to_string(declared + 1);
+            std::string anc = "ANC" + std::to_string(declared + 1);
+            if (bcf_hdr_id2int(hdr, BCF_DT_ID, ds.c_str()) < 0 ||
+                bcf_hdr_id2int(hdr, BCF_DT_ID, anc.c_str()) < 0) {
+                break;
+            }
+            ++declared;
+        }
+        if (declared > 0 && n_ancestries <= 0) {
+            n_ancestries = declared;
+        } else if (declared > 0 && declared != n_ancestries) {
+            die("dosage VCF header declares DS1..DS%d/ANC1..ANC%d but "
+                "n_ancestries is %d", declared, declared, n_ancestries);
+        }
+        if (n_ancestries <= 0) {
+            die("dosage VCF header declares no DS1/ANC1 FORMAT fields, so the "
+                "ancestry count cannot be determined");
+        }
+        felixla::log_line("n_ancestries %d", n_ancestries);
     }
 
     ProgressReporter progress("dosage VCF", dosage_vcf, "variants");

@@ -41,7 +41,7 @@ PY
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   "$ROOT_DIR/testdata/tiny.flare.vcf" \
   2 \
-  1 \
+  auto \
   "$OUT_DIR/tiny" >/dev/null
 
 "$BIN_DIR/felixla" \
@@ -440,7 +440,7 @@ grep -q "Differences:             0" "$OUT_DIR/compare.txt"
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   "$ROOT_DIR/testdata/tiny.flare.vcf" \
   2 \
-  1 \
+  auto \
   "$OUT_DIR/tiny.direct_region" \
   chr1:100-160 >/dev/null
 
@@ -468,7 +468,7 @@ grep -v '^##contig=' "$ROOT_DIR/testdata/tiny.flare.vcf" >"$OUT_DIR/tiny.flare.n
   "$OUT_DIR/tiny.genotypes.no_contig.vcf" \
   "$OUT_DIR/tiny.flare.no_contig.vcf" \
   2 \
-  1 \
+  auto \
   "$OUT_DIR/tiny.no_contig" >/dev/null
 
 "$BIN_DIR/felixla" \
@@ -490,7 +490,7 @@ grep -q "Differences:             0" "$OUT_DIR/no_contig.compare.txt"
   "$OUT_DIR/tiny.genotypes.no_contig.vcf" \
   "$OUT_DIR/tiny.flare.no_contig.vcf" \
   2 \
-  1 \
+  auto \
   "$OUT_DIR/tiny.no_contig_region" \
   chr1:100-160 >/dev/null
 
@@ -878,7 +878,7 @@ if "$BIN_DIR/felixla" \
   "$ROOT_DIR/testdata/tiny.missing_gt.vcf" \
   "$ROOT_DIR/testdata/tiny.flare.vcf" \
   2 \
-  1 \
+  auto \
   "$OUT_DIR/missing_gt" >/dev/null 2>"$OUT_DIR/missing_gt.err"; then
   echo "expected missing GT fixture to fail" >&2
   exit 1
@@ -891,7 +891,7 @@ if "$BIN_DIR/felixla" \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   "$ROOT_DIR/testdata/tiny.missing_flare.vcf" \
   2 \
-  1 \
+  auto \
   "$OUT_DIR/missing_flare" >/dev/null 2>"$OUT_DIR/missing_flare.err"; then
   echo "expected missing FLARE fixture to fail" >&2
   exit 1
@@ -904,7 +904,7 @@ grep -q "missing FORMAT/AN1" "$OUT_DIR/missing_flare.err"
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   "$ROOT_DIR/testdata/tiny.flare_swapped_samples.vcf" \
   2 \
-  1 \
+  auto \
   "$OUT_DIR/swapped_samples" >/dev/null 2>"$OUT_DIR/swapped_samples.err"
 
 grep -q "Using genotype/FLARE sample intersection" "$OUT_DIR/swapped_samples.err"
@@ -937,7 +937,7 @@ PY
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   "$ROOT_DIR/testdata/tiny.duplicate_flare.vcf" \
   2 \
-  1 \
+  auto \
   "$OUT_DIR/duplicate_flare" >/dev/null
 
 python3 - "$OUT_DIR/duplicate_flare" <<'PY'

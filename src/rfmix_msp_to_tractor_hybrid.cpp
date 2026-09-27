@@ -939,6 +939,8 @@ public:
         if (fp_) hts_close(fp_);
     }
 
+    int n_ancestries() const { return n_ancestries_; }
+
     const std::string& subpopulation_codes() const {
         return subpopulation_codes_;
     }
@@ -1035,7 +1037,12 @@ private:
             if (starts_with(line, "#Subpopulation order/codes:")) {
                 subpopulation_codes_ = trim_copy(line.substr(1));
                 int inferred = infer_n_ancestries_from_codes(line);
-                if (inferred > 0 && inferred != n_ancestries_) {
+                // The MSP header is the authoritative count: deriving it from
+                // the interval rows instead would be wrong wherever a region
+                // happens to contain no carrier of some ancestry.
+                if (inferred > 0 && n_ancestries_ <= 0) {
+                    n_ancestries_ = inferred;
+                } else if (inferred > 0 && inferred != n_ancestries_) {
                     die(
                         "MSP subpopulation code count implies %d ancestries, but n_ancestries is %d",
                         inferred,
@@ -1132,20 +1139,17 @@ static void print_usage(const char* prog) {
     );
 }
 
+// The sparse/dense threshold is no longer a choice: ceil(n_samples / 32) is
+// where a carrier list stops being smaller than a bit vector, so there is
+// nothing to gain by moving it. The positional slot stays for the
+// compatibility command form, but a number in it now fails loudly rather than
+// being quietly overridden.
 static int parse_rare_threshold_arg(const char* text) {
     if (std::strcmp(text, "auto") == 0 || std::strcmp(text, "default") == 0) {
         return -1;
     }
-
-    char* end = nullptr;
-    long value = std::strtol(text, &end, 10);
-    if (end == text || *end != '\0') {
-        die("rare_threshold must be a non-negative integer or auto: %s", text);
-    }
-    if (value < 0 || value > std::numeric_limits<int>::max()) {
-        die("rare_threshold out of range: %s", text);
-    }
-    return static_cast<int>(value);
+    die("rare_threshold is always computed as ceil(n_samples / 32); pass auto "
+        "rather than %s", text);
 }
 
 static int default_rare_threshold_from_samples(int n_samples) {
@@ -1162,7 +1166,7 @@ int main(int argc, char** argv) {
 
     const char* geno_vcf = argv[1];
     const char* msp_path = argv[2];
-    int n_ancestries = std::atoi(argv[3]);
+    int n_ancestries = std::strcmp(argv[3], "auto") == 0 ? 0 : std::atoi(argv[3]);
     int rare_threshold = parse_rare_threshold_arg(argv[4]);
     const char* out_prefix = argv[5];
 
@@ -1171,13 +1175,12 @@ int main(int argc, char** argv) {
     }
     felixla::log_line("genotype %s", geno_vcf);
     felixla::log_line("rfmix-msp %s", msp_path);
-    felixla::log_line("n_ancestries %d", n_ancestries);
     felixla::log_line(
         "rfmix-msp-interval-note first interval includes spos; later shared "
         "epos/spos boundaries belong to the previous interval");
 
-    if (n_ancestries <= 0 || n_ancestries > 32) {
-        die("n_ancestries must be in [1, 32]");
+    if (n_ancestries > 32) {
+        die("ancestry count must be in [1, 32], got %d", n_ancestries);
     }
 
     htsFile* gfp = bcf_open(geno_vcf, "r");
@@ -1214,6 +1217,13 @@ int main(int argc, char** argv) {
     int n_words = static_cast<int>((n_haps + 63ULL) / 64ULL);
 
     MspReader msp_reader(msp_path, ghdr, n_samples, n_ancestries, n_words);
+    // The MSP subpopulation line may have supplied the count.
+    n_ancestries = msp_reader.n_ancestries();
+    if (n_ancestries <= 0 || n_ancestries > 32) {
+        die("ancestry count must be in [1, 32]; the MSP file has no "
+            "\"#Subpopulation order/codes:\" line to take it from");
+    }
+    felixla::log_line("n_ancestries %d", n_ancestries);
 
     std::string common_bin = std::string(out_prefix) + ".common.geno.bin";
     std::string common_mks = std::string(out_prefix) + ".common.variant.mks";

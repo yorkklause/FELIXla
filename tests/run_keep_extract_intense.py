@@ -327,7 +327,7 @@ def build_spaced_indexed_vcf(bin_dir: pathlib.Path, work: pathlib.Path) -> pathl
             str(genotype),
             str(flare),
             "2",
-            "1",
+            "auto",
             str(prefix),
         ]
     )
