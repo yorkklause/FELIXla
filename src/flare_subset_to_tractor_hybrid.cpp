@@ -91,9 +91,17 @@ struct FlareDeltaDecoder {
     int identity_mapping = -1;  // -1 until the sample mapping is inspected
 };
 
+// --region is half-open [START, END): the first base is in, the last is not,
+// so consecutive regions tile without sharing a variant. `end` below is the
+// last base actually covered -- the interval closed -- because every
+// membership test, interval intersection and block clip downstream is written
+// that way, and converting once here keeps the convention in one place.
+// `label` is what the caller typed, and `query` is what htslib is given, which
+// reads chr:start-end as closed.
 struct Region {
     bool active = false;
     std::string label;
+    std::string query;
     std::string chr;
     int64_t start = 0;
     int64_t end = 0;
@@ -302,12 +310,17 @@ static Region parse_region_string(const std::string& region_text) {
     region.active = true;
     region.chr = region_text.substr(0, colon);
     region.start = parse_i64_string(region_text.substr(colon + 1, dash - colon - 1), "region start");
-    region.end = parse_i64_string(region_text.substr(dash + 1), "region end");
+    int64_t end_exclusive = parse_i64_string(region_text.substr(dash + 1), "region end");
     if (region.chr.empty()) die("region chromosome is empty");
-    if (region.start > region.end) {
-        die("invalid region coordinates: %s", region_text.c_str());
+    if (end_exclusive <= region.start) {
+        die("region END must be greater than START: regions are half-open "
+            "[START, END), so %s covers nothing", region_text.c_str());
     }
-    region.label = region.chr + ":" + std::to_string(region.start) + "-" + std::to_string(region.end);
+    region.end = end_exclusive - 1;
+    region.label = region.chr + ":" + std::to_string(region.start) + "-" +
+                   std::to_string(end_exclusive);
+    region.query = region.chr + ":" + std::to_string(region.start) + "-" +
+                   std::to_string(region.end);
     return region;
 }
 
@@ -1512,6 +1525,10 @@ static void write_sidecars(
     std::fprintf(meta_fp, "rare_threshold\t%d\n", rare_threshold);
     if (selected_region) {
         std::fprintf(meta_fp, "selected_region\t%s\n", selected_region);
+        // Recorded so a reader knows how to interpret the row. A prefix
+        // written before regions became half-open carries no such key, and is
+        // read as the closed interval it was.
+        std::fprintf(meta_fp, "region_convention\thalf-open\n");
     }
     // One row per ancestry, numbered from one to match the exported LAI file,
     // where zero is reserved for a missing label.
@@ -4993,7 +5010,7 @@ int main(int argc, char** argv) {
             &genotype_region_reader,
             fast_genotype_text,
             geno_vcf,
-            region.label,
+            region.query,
             "genotype VCF",
             nullptr,
             sample_selection.genotype_subset_active
@@ -5002,7 +5019,7 @@ int main(int argc, char** argv) {
         );
         if (have_genotype_region_reader) {
             progress_scope = region.label;
-            genotype_indexed_query = region.label;
+            genotype_indexed_query = region.query;
         }
         bool have_flare_region_reader = init_indexed_region_reader(
             &flare_region_reader,

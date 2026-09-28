@@ -410,8 +410,10 @@ def check_tbi_chunks(
                     str(chrom_chunk),
                     chrom,
                     str(start),
-                    str(end),
-                    f"{chrom}:{start}-{end}",
+                    # The manifest and the region column are half-open, so a
+                    # chunk's end is the next chunk's start.
+                    str(end + 1),
+                    f"{chrom}:{start}-{end + 1}",
                     str(contig_start),
                     str(contig_end),
                     str(len(variants)),
@@ -463,8 +465,8 @@ def check_tbi_chunks(
         "1",
         "chr2",
         "1",
-        "1000000",
-        "chr2:1-1000000",
+        "1000001",
+        "chr2:1-1000001",
         "1",
         "1000000",
         str(len(chr2_variants)),
@@ -493,8 +495,8 @@ def check_tbi_chunks(
     if detached_rows[0] != expected_header or len(detached_rows) != 3:
         fail(f"unexpected detached-index output: {detached_rows}")
     if [row[2:9] for row in detached_rows[1:]] != [
-        ["chr1", "1", "1000000", "chr1:1-1000000", "1", "1000000", str(len(by_chrom["chr1"]))],
-        ["chr2", "1", "1000000", "chr2:1-1000000", "1", "1000000", str(len(by_chrom["chr2"]))],
+        ["chr1", "1", "1000001", "chr1:1-1000001", "1", "1000000", str(len(by_chrom["chr1"]))],
+        ["chr2", "1", "1000001", "chr2:1-1000001", "1", "1000000", str(len(by_chrom["chr2"]))],
     ]:
         fail(f"detached index did not preserve chunk coverage: {detached_rows}")
 
@@ -525,8 +527,8 @@ def check_tbi_chunks(
                 str(chunk_index),
                 "chr7",
                 str(start),
-                str(end),
-                f"chr7:{start}-{end}",
+                str(end + 1),
+                f"chr7:{start}-{end + 1}",
                 "15000001",
                 "35000000",
                 "2",
@@ -1499,7 +1501,7 @@ def main() -> int:
             flare_path,
             region_prefix,
             "--region",
-            f"{region[0]}:{region[1]}-{region[2]}",
+            f"{region[0]}:{region[1]}-{region[2] + 1}",
             "--keep",
             str(keep_path),
             "--extract",
@@ -1524,7 +1526,7 @@ def main() -> int:
             flare_path,
             bed_intersection_prefix,
             "--region",
-            f"{bed_region[0]}:{bed_region[1]}-{bed_region[2]}",
+            f"{bed_region[0]}:{bed_region[1]}-{bed_region[2] + 1}",
             "--keep",
             str(keep_path),
             "--extract",
@@ -1553,7 +1555,7 @@ def main() -> int:
         # coordinate span the prefix covers. The interval accounting describes
         # the run, so it moved to the log.
         bed_intersection_meta = read_meta(bed_intersection_prefix)
-        assert bed_intersection_meta["selected_region"] == "chr1:100-600", bed_intersection_meta
+        assert bed_intersection_meta["selected_region"] == "chr1:100-601", bed_intersection_meta
         bed_intersection_log = read_log(bed_intersection_prefix)
         assert bed_intersection_log["extract-bed-source-intervals"] == "7", bed_intersection_log
         assert bed_intersection_log["extract-bed-merged-intervals"] == "2", bed_intersection_log

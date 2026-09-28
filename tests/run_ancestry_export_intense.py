@@ -208,7 +208,7 @@ def check_merge_keeps_names(felixla, work, problems):
     write_inputs(work, rng, samples, positions, len(names), names)
 
     chunks = []
-    for index, region in enumerate(("chr1:1-400", "chr1:401-1000")):
+    for index, region in enumerate(("chr1:1-401", "chr1:401-1001")):
         prefix = work / f"chunk{index}"
         subprocess.run(
             [str(felixla), "--phase-vcf", str(work / "genotypes.vcf"),

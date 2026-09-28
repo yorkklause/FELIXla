@@ -101,27 +101,27 @@ header = [
 rows = [line.split("\t") for line in manifest_path.read_text().splitlines()]
 assert rows[0] == header, rows[0]
 assert rows[1:] == [
-    ["1", "1", "chr1", "1", "20000", "chr1:1-20000", "1", "20000", "6"],
-    ["2", "1", "chr2", "1", "20000", "chr2:1-20000", "1", "20000", "3"],
+    ["1", "1", "chr1", "1", "20001", "chr1:1-20001", "1", "20000", "6"],
+    ["2", "1", "chr2", "1", "20001", "chr2:1-20001", "1", "20000", "3"],
 ], rows
 
 quoted_vcf = "'" + phase_vcf + "'"
 assert commands_path.read_text().splitlines() == [
-    f"felixla --phase-vcf {quoted_vcf} --region 'chr1:1-20000' --out chunks/chr1.chunk0001",
-    f"felixla --phase-vcf {quoted_vcf} --region 'chr2:1-20000' --out chunks/chr2.chunk0001",
+    f"felixla --phase-vcf {quoted_vcf} --region 'chr1:1-20001' --out chunks/chr1.chunk0001",
+    f"felixla --phase-vcf {quoted_vcf} --region 'chr2:1-20001' --out chunks/chr2.chunk0001",
 ]
 
 chr2_rows = [line.split("\t") for line in chr2_path.read_text().splitlines()]
 assert chr2_rows[0] == header, chr2_rows[0]
 assert chr2_rows[1:] == [
-    ["1", "1", "chr2", "1", "1000000", "chr2:1-1000000", "1", "1000000", "3"],
+    ["1", "1", "chr2", "1", "1000001", "chr2:1-1000001", "1", "1000000", "3"],
 ], chr2_rows
 
 detached_rows = [line.split("\t") for line in detached_path.read_text().splitlines()]
 assert detached_rows == [
     header,
-    ["1", "1", "chr1", "1", "1000000", "chr1:1-1000000", "1", "1000000", "6"],
-    ["2", "1", "chr2", "1", "1000000", "chr2:1-1000000", "1", "1000000", "3"],
+    ["1", "1", "chr1", "1", "1000001", "chr1:1-1000001", "1", "1000000", "6"],
+    ["2", "1", "chr2", "1", "1000001", "chr2:1-1000001", "1", "1000000", "3"],
 ], detached_rows
 PY
 
@@ -248,7 +248,7 @@ if [[ -n "$BGZIP_BIN" && -n "$TABIX_BIN" ]]; then
     --phase-vcf "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
     --flare-vcf "$ROOT_DIR/testdata/tiny.flare.region_seek.vcf" \
     --n-ancestries 2 \
-    --region chr1:150-160 \
+    --region chr1:150-161 \
     --extract "$OUT_DIR/extract.sites.vcf" \
     --export-felixla \
     --out "$OUT_DIR/tiny.region_seek.sequential" \
@@ -258,7 +258,7 @@ if [[ -n "$BGZIP_BIN" && -n "$TABIX_BIN" ]]; then
     --phase-vcf "$OUT_DIR/tiny.region_seek.genotypes.vcf.gz" \
     --flare-vcf "$OUT_DIR/tiny.region_seek.flare.vcf.gz" \
     --n-ancestries 2 \
-    --region chr1:150-160 \
+    --region chr1:150-161 \
     --extract "$OUT_DIR/extract.sites.vcf" \
     --export-felixla \
     --out "$OUT_DIR/tiny.region_seek.indexed" \
@@ -283,7 +283,7 @@ EOF
     --phase-vcf "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
     --flare-vcf "$ROOT_DIR/testdata/tiny.flare.region_seek.vcf" \
     --n-ancestries 2 \
-    --region chr1:250-250 \
+    --region chr1:250-251 \
     --extract "$OUT_DIR/region_tail.extract.pvar" \
     --export-felixla \
     --out "$OUT_DIR/tiny.region_tail.sequential" \
@@ -293,7 +293,7 @@ EOF
     --phase-vcf "$OUT_DIR/tiny.region_seek.genotypes.vcf.gz" \
     --flare-vcf "$OUT_DIR/tiny.region_seek.flare.vcf.gz" \
     --n-ancestries 2 \
-    --region chr1:250-250 \
+    --region chr1:250-251 \
     --extract "$OUT_DIR/region_tail.extract.pvar" \
     --export-felixla \
     --out "$OUT_DIR/tiny.region_tail.indexed" \
@@ -336,7 +336,7 @@ grep -q "REF mismatch" "$OUT_DIR/tiny.bad_extract_ref.err"
 "$BIN_DIR/felixla" \
   --felixla \
   "$OUT_DIR/tiny.felixla_cli" \
-  --region chr1:100-160 \
+  --region chr1:100-161 \
   --export-felixla \
   --out \
   "$OUT_DIR/tiny.felixla_cli.chr1_100_160" >/dev/null
@@ -356,7 +356,7 @@ ROUNDTRIP
 "$BIN_DIR/felixla" \
   extract \
   "$OUT_DIR/tiny" \
-  chr1:100-160 \
+  chr1:100-161 \
   "$OUT_DIR/tiny.chr1_100_160" >/dev/null
 
 "$BIN_DIR/felixla" \
@@ -371,9 +371,9 @@ ROUNDTRIP
   2 \
   auto \
   "$OUT_DIR/tiny.direct_region" \
-  chr1:100-160 >/dev/null
+  chr1:100-161 >/dev/null
 
-grep -q $'selected_region\tchr1:100-160' "$OUT_DIR/tiny.direct_region.meta"
+grep -q $'selected_region\tchr1:100-161' "$OUT_DIR/tiny.direct_region.meta"
 
 "$BIN_DIR/felixla" \
   to-vcf \
@@ -428,9 +428,9 @@ ROUNDTRIP_NO_CONTIG
   2 \
   auto \
   "$OUT_DIR/tiny.no_contig_region" \
-  chr1:100-160 >/dev/null
+  chr1:100-161 >/dev/null
 
-grep -q $'selected_region\tchr1:100-160' "$OUT_DIR/tiny.no_contig_region.meta"
+grep -q $'selected_region\tchr1:100-161' "$OUT_DIR/tiny.no_contig_region.meta"
 
 "$BIN_DIR/felixla" \
   to-vcf \
@@ -758,7 +758,7 @@ import sys
 
 prefix = pathlib.Path(sys.argv[1])
 meta = pathlib.Path(str(prefix) + ".meta").read_text()
-assert "extracted_region\tchr1:100-160" in meta, meta
+assert "extracted_region\tchr1:100-161" in meta, meta
 assert "source_hybrid_prefix" in meta, meta
 
 with gzip.open(str(prefix) + ".roundtrip.vcf.gz", "rt") as fh:
@@ -1167,14 +1167,30 @@ with gzip.open(sys.argv[1], "rt") as handle:
 REGION_PROBE
 }
 
-# Closed at both ends: the variants at 100 and 200 are both inside.
-test "$(positions_in_region chr1:100-200)" = "100,195,200"
-test "$(positions_in_region chr1:101-199)" = "195"
-test "$(positions_in_region chr1:195-195)" = "195"
-# The deletion sits at 195 and nowhere else, so neither neighbouring region
-# claims it and no region claims it twice.
+# Half-open [START, END): START is in, END is not. The variant at 200 is
+# outside chr1:100-200 and inside chr1:100-201, which is the whole point.
+test "$(positions_in_region chr1:100-201)" = "100,195,200"
+test "$(positions_in_region chr1:100-200)" = "100,195"
+test "$(positions_in_region chr1:101-200)" = "195"
+test "$(positions_in_region chr1:195-196)" = "195"
+
+# Consecutive regions tile: END of one is START of the next, and the variant
+# at 195 is claimed by exactly one of them.
+test "$(positions_in_region chr1:1-195)" = "100"
+test "$(positions_in_region chr1:195-300)" = "195,200,205"
+
+# The deletion spans 195-205 but sits at 195, so a region starting after 195
+# does not claim it however far it reaches.
 test "$(positions_in_region chr1:196-300)" = "200,205"
-test "$(positions_in_region chr1:1-194)" = "100"
+
+# END equal to START covers nothing, which is a mistake rather than an empty
+# run that looks like it worked.
+if "$BIN_DIR/felixla" --felixla "$OUT_DIR/boundary" --region chr1:195-195 \
+     --export-felixla --out "$OUT_DIR/empty_region" >/dev/null 2>"$OUT_DIR/empty_region.err"; then
+  echo "an empty half-open region was accepted" >&2
+  exit 1
+fi
+grep -q "covers nothing" "$OUT_DIR/empty_region.err"
 
 # --extract identifies a variant by CHROM/POS/REF/ALT. The ID column takes no
 # part, an allele-swapped entry is refused rather than silently missing, and a

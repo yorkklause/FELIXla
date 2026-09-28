@@ -111,7 +111,12 @@ struct Region {
     int64_t end = 0;
 };
 
-std::optional<Region> parse_region(const std::string& value, const std::string& path) {
+// A prefix written since regions became half-open says so in its metadata.
+// One written before does not, and its region row means the closed interval it
+// always meant -- reading it the new way would move its end a base and could
+// invent an overlap between two chunks that abut exactly.
+std::optional<Region> parse_region(const std::string& value, const std::string& path,
+                                   bool half_open) {
     size_t colon = value.find(':');
     size_t dash = value.find('-', colon == std::string::npos ? 0 : colon + 1);
     if (colon == std::string::npos || dash == std::string::npos || colon == 0 || dash <= colon + 1) {
@@ -125,8 +130,11 @@ std::optional<Region> parse_region(const std::string& value, const std::string& 
     if (start == 0 || start > end || end > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
         fail("invalid region in " + path + ": " + value);
     }
+    if (half_open && start == end) {
+        fail("invalid region in " + path + ": " + value + " covers nothing");
+    }
     region.start = static_cast<int64_t>(start);
-    region.end = static_cast<int64_t>(end);
+    region.end = static_cast<int64_t>(half_open ? end - 1 : end);
     return region;
 }
 
@@ -159,6 +167,7 @@ Meta read_meta(const std::string& path) {
     std::string line;
     size_t line_no = 0;
     std::optional<Region> effective_region;
+    std::string region_text;
     while (std::getline(in, line)) {
         ++line_no;
         if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -179,8 +188,13 @@ Meta read_meta(const std::string& path) {
         }
         values[key] = value;
         if (key == "selected_region" || key == "extracted_region") {
-            effective_region = parse_region(value, path);
+            region_text = value;
         }
+    }
+    if (!region_text.empty()) {
+        auto convention = values.find("region_convention");
+        bool half_open = convention != values.end() && convention->second == "half-open";
+        effective_region = parse_region(region_text, path, half_open);
     }
     if (!in.eof()) fail("failed reading " + path);
 

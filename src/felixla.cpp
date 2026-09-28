@@ -67,7 +67,7 @@ Filters:
   --extract-bed FILE            BED intervals to keep; 0-based half-open.
   --exclude-bed FILE            BED intervals to drop; same convention.
   --chr LIST                    Contigs to convert; ranges like 1-22 allowed.
-  --region CHR:START-END        Single region, 1-based inclusive.
+  --region CHR:START-END        Single region, 1-based half-open [START, END).
   --mac INT / --maf FLOAT       Minimum minor allele count/frequency overall.
   --anc-mac INT / --anc-maf F   Same, required of at least one ancestry alone.
 

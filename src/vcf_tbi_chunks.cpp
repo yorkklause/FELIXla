@@ -61,7 +61,10 @@ R"(Usage:
   vcf_tbi_chunks --phase-vcf FILE.vcf.gz --chunk-bp INT --out MANIFEST.tsv [options]
 
 Read a phased VCF tabix index, find the first and last fixed-size chunk that may
-contain indexed records, and generate non-overlapping 1-based inclusive regions.
+contain indexed records, and generate non-overlapping regions for felixla
+--region, which are 1-based and half-open: chr1:1-10000001 covers 1 through
+10000000, and the next chunk starts at 10000001. The start and end columns of
+the manifest carry the same half-open bounds as the region column.
 The VCF body is not opened or decompressed. Bounds are conservative at tabix/CSI
 bin granularity, so an edge chunk can be empty.
 
@@ -313,8 +316,11 @@ std::string shell_quote(const std::string& value) {
     return result;
 }
 
+// felixla --region is half-open, so the printed end is one past the last base
+// the chunk covers and consecutive chunks share no position.
 std::string region_for(const Chunk& chunk) {
-    return chunk.chrom + ":" + std::to_string(chunk.start) + "-" + std::to_string(chunk.end);
+    return chunk.chrom + ":" + std::to_string(chunk.start) + "-" +
+           std::to_string(chunk.end + 1);
 }
 
 std::string render_command(
@@ -456,7 +462,7 @@ void write_outputs(
             << chunk.chrom_chunk << '\t'
             << chunk.chrom << '\t'
             << chunk.start << '\t'
-            << chunk.end << '\t'
+            << (chunk.end + 1) << '\t'
             << region_for(chunk) << '\t'
             << chunk.contig_first_pos << '\t'
             << chunk.contig_last_pos << '\t';

@@ -144,24 +144,35 @@ written, without re-reading the source VCFs.
 Two conventions decide what a filter selects, and both are stated here rather
 than left to be inferred from behaviour.
 
-**Regions are 1-based and closed at both ends.** `--region chr1:100-200`
-selects `100 <= POS <= 200`: a variant at 100 is in, and so is one at 200.
-`--region chr1:195-195` selects exactly position 195. This is the convention
-`vcf_tbi_chunks` emits, so consecutive chunks are `chr1:1-10000000` and
-`chr1:10000001-20000000` and share no variant.
+**Regions are 1-based and half-open: `[START, END)`.** `--region
+chr1:100-200` selects `100 <= POS < 200`. The first base is in and the last is
+not, so a variant at 100 is kept and one at 200 is not; `--region
+chr1:100-201` is what keeps both.
 
-BED files use the other convention, because they are BED files:
-`--extract-bed` and `--exclude-bed` read 0-based half-open `[START, END)`, so
-`chr1 99 100` selects the record at VCF position 100. The two conventions sit
-side by side on purpose -- a BED written for another tool must not have to be
-rewritten -- and each is applied as its own format defines it.
+The point of the convention is that consecutive regions tile exactly:
+`chr1:1-10000001` and `chr1:10000001-20000001` cover every position between
+them once, with no arithmetic at the seam and no variant written twice. It is
+what `vcf_tbi_chunks` emits, in both its `region` column and its `start`/`end`
+columns, so a manifest feeds straight back into `--region`. `END` equal to
+`START` covers nothing and is refused rather than run as an empty job.
+
+BED files keep their own convention, because they are BED files: `--extract-bed`
+and `--exclude-bed` read 0-based half-open `[START, END)`, so `chr1 99 100`
+selects the record at VCF position 100. Both are half-open; they differ only in
+where counting starts, which is what each format defines.
+
+A prefix records the region it was built from in `<prefix>.meta`, together with
+`region_convention  half-open`. A prefix written before this convention existed
+carries no such row and its region is read the way it was written, so old
+chunks still concatenate correctly alongside new ones.
 
 **A variant belongs to a region by its POS alone.** Nothing else about a record
 is consulted: not its REF length, not `INFO/END`, not `SVLEN`. A deletion
 written as `chr1 195 . ACCCCCCCCCC A` spans 195 through 205, but it is placed
 at 195, so `--region chr1:196-300` does not select it even though it reaches
-well inside, and `--region chr1:1-194` does not select it either. A long indel
-is judged by where it starts, and belongs to exactly one region.
+well inside, and `--region chr1:1-195` does not select it either. A long indel
+is judged by where it starts, and belongs to exactly one region however far it
+reaches.
 
 This is what makes chunked conversion safe to reassemble: every variant lands
 in exactly one chunk, whatever its length, so concatenating the chunks neither
@@ -503,7 +514,7 @@ already packed.
   selection with a `--region` on an unselected contig is an error rather than
   a silently empty run.
 
-- **`--region CHR:START-END`** -- 1-based region, closed at both ends, as
+- **`--region CHR:START-END`** -- 1-based half-open region `[START, END)`, as
   [Coordinates and identity](#coordinates-and-identity) defines it. A variant
   belongs to the region when `START <= POS <= END`.
 
@@ -625,16 +636,17 @@ vcf_tbi_chunks \
   --out genotype.chunks.tsv
 ```
 
-Chunk regions use the same 1-based inclusive coordinates as `felixla
---region`. Boundaries are aligned to the requested chunk length and adjacent
-chunks begin at the previous end plus one:
+Chunk regions use the same 1-based half-open coordinates as `felixla
+--region`. Boundaries are aligned to the requested chunk length, and each
+chunk's end is the next chunk's start:
 
 ```text
-chr1:1-10000000
-chr1:10000001-20000000
+chr1:1-10000001
+chr1:10000001-20000001
 ```
 
-Thus there are no duplicated boundary variants. The first and last windows are
+Thus there are no duplicated boundary variants, and none are dropped between
+chunks either. The first and last windows are
 conservative index-derived bounds aligned to the requested chunk length. Tabix
 bins are coarser than individual positions, so an edge window can be empty;
 interior empty windows are also retained. This avoids any VCF data reads while
@@ -642,8 +654,8 @@ still guaranteeing that indexed records are covered. Use `--chunk-bp` when the
 desired length is not an integer number of decimal megabases.
 
 The manifest contains one row per task with global and per-contig chunk IDs,
-`CHROM`, inclusive start/end, region text, conservative index-derived contig
-bounds, and the indexed record count. `--chrom` may be repeated to select
+`CHROM`, half-open start/end matching the region text, conservative
+index-derived contig bounds, and the indexed record count. `--chrom` may be repeated to select
 contigs. The compatibility columns `contig_first_pos` and `contig_last_pos`
 therefore contain aligned index bounds, not exact VCF record positions.
 

@@ -31,6 +31,10 @@ struct Meta {
     std::vector<std::string> lines;
 };
 
+// --region is half-open [START, END): the first base is in, the last is not.
+// `end` here is the last base actually covered, the interval closed, because
+// the membership test and the block clip below are written that way; `label`
+// is the half-open text, which is what goes into the metadata.
 struct Region {
     std::string chr;
     int64_t start = 1;
@@ -507,6 +511,22 @@ static bool ancestry_blocks_cover_position(
     return false;
 }
 
+static Region make_region(const std::string& chr, int64_t start, int64_t end_exclusive,
+                          const std::string& source) {
+    if (chr.empty()) die("region chromosome is empty");
+    if (start <= 0) die("region START must be positive: %s", source.c_str());
+    if (end_exclusive <= start) {
+        die("region END must be greater than START: regions are half-open "
+            "[START, END), so %s covers nothing", source.c_str());
+    }
+    Region region;
+    region.chr = chr;
+    region.start = start;
+    region.end = end_exclusive - 1;
+    region.label = chr + ":" + std::to_string(start) + "-" + std::to_string(end_exclusive);
+    return region;
+}
+
 static Region parse_region_string(const std::string& region_text) {
     size_t colon = region_text.find(':');
     size_t dash = region_text.find('-', colon == std::string::npos ? 0 : colon + 1);
@@ -514,16 +534,12 @@ static Region parse_region_string(const std::string& region_text) {
         die("region must look like chr:start-end: %s", region_text.c_str());
     }
 
-    Region region;
-    region.chr = region_text.substr(0, colon);
-    region.start = parse_i64_string(region_text.substr(colon + 1, dash - colon - 1), "region start");
-    region.end = parse_i64_string(region_text.substr(dash + 1), "region end");
-    if (region.chr.empty()) die("region chromosome is empty");
-    if (region.start <= 0 || region.end <= 0 || region.start > region.end) {
-        die("invalid region coordinates: %s", region_text.c_str());
-    }
-    region.label = region.chr + ":" + std::to_string(region.start) + "-" + std::to_string(region.end);
-    return region;
+    return make_region(
+        region_text.substr(0, colon),
+        parse_i64_string(region_text.substr(colon + 1, dash - colon - 1), "region start"),
+        parse_i64_string(region_text.substr(dash + 1), "region end"),
+        region_text
+    );
 }
 
 static Meta read_meta(const std::string& path) {
@@ -591,7 +607,10 @@ static void write_meta(
         out << line << '\n';
     }
     out << "source_hybrid_prefix\t" << in_prefix << '\n';
-    if (!region.whole()) out << "extracted_region\t" << region.label << '\n';
+    if (!region.whole()) {
+        out << "extracted_region\t" << region.label << '\n';
+        out << "region_convention\thalf-open\n";
+    }
     out << "global_variants\t" << global_variants << '\n';
     out << "common_variants\t" << common_variants << '\n';
     out << "rare_variants\t" << rare_variants << '\n';
@@ -1071,16 +1090,12 @@ int main(int argc, char** argv) {
     if (positional.size() == 3) {
         region = parse_region_string(positional[1]);
     } else if (positional.size() == 5) {
-        region.chr = positional[1];
-        region.start = parse_i64_string(positional[2], "region start");
-        region.end = parse_i64_string(positional[3], "region end");
-        if (region.chr.empty()) die("region chromosome is empty");
-        if (region.start <= 0 || region.end <= 0 || region.start > region.end) {
-            die("invalid region coordinates: %s %s %s", positional[1].c_str(),
-                positional[2].c_str(), positional[3].c_str());
-        }
-        region.label = region.chr + ":" + std::to_string(region.start) + "-" +
-                       std::to_string(region.end);
+        region = make_region(
+            positional[1],
+            parse_i64_string(positional[2], "region start"),
+            parse_i64_string(positional[3], "region end"),
+            positional[1] + " " + positional[2] + " " + positional[3]
+        );
     } else {
         region.label = "whole prefix";
     }
