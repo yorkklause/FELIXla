@@ -24,6 +24,7 @@ GitHub repository and record the commit hash used in the analysis.
 
 ## Upgrading
 
+<!-- release-notes: v0.6.2 -->
 ### From v0.6.1
 
 **Filtering variants now filters the ancestry blocks with them.** A block that
@@ -53,6 +54,7 @@ Extracting from a prefix with many ancestry blocks is much faster: the
 per-variant block lookup was a linear scan over every block and is now a binary
 search. A 20,000-variant, 15,000-block extract went from 0.82s to 0.14s.
 
+<!-- release-notes: v0.6.1 -->
 ### From v0.6.0
 
 Three changes in v0.6.1 alter what an existing command line does. The version

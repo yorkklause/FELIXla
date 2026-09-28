@@ -110,10 +110,40 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          if ! gh release view "${tag}" >/dev/null 2>&1; then
-            gh release create "${tag}" \
-              --title "${tag}" \
-              --notes "FELIXla ${tag} Linux x86_64 static binaries: felixla and vcf_tbi_chunks."
+
+          # The release page carries the README's upgrade notes for this tag,
+          # so what a release breaks is visible where people download it and
+          # not only in the repository. A tag with no such section falls back
+          # to the default line rather than inheriting the previous release's
+          # notes, which would be worse than having none.
+          notes="$(mktemp)"
+          set +e
+          python3 .github/release-notes.py "${tag}" README.md >"${notes}"
+          notes_status=$?
+          set -e
+          if [ "${notes_status}" -eq 0 ] && [ -s "${notes}" ]; then
+            echo "Release notes taken from the README upgrade section for ${tag}."
+          elif [ "${notes_status}" -eq 3 ]; then
+            printf 'No behaviour changes recorded for this release.\n' >"${notes}"
+            echo "No README upgrade section for ${tag}; using the default note."
+          else
+            # Only 3 means "no section". Anything else -- a syntax error, a
+            # missing README, a python that will not run it -- is the script
+            # being broken, and publishing the default note would hide that
+            # behind a plausible-looking release.
+            echo "release-notes.py failed with status ${notes_status}" >&2
+            exit 1
+          fi
+          {
+            printf '\n---\n\n'
+            printf 'Linux x86_64 static binaries: `felixla` and `vcf_tbi_chunks`.\n'
+            printf 'Verify with the `.sha256` file beside each one.\n'
+          } >>"${notes}"
+
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release edit "${tag}" --notes-file "${notes}"
+          else
+            gh release create "${tag}" --title "${tag}" --notes-file "${notes}"
           fi
           gh release upload "${tag}" \
             dist/felixla-linux-x86_64-static \
