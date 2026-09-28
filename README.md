@@ -22,6 +22,44 @@ A manuscript describing FELIXla is in preparation. If you use this software in
 a published analysis before a formal citation is available, please cite this
 GitHub repository and record the commit hash used in the analysis.
 
+## Upgrading from v0.6.0
+
+Three changes in v0.6.1 alter what an existing command line does. The version
+number does not warn you, so they are listed here.
+
+**`--region` is now half-open, `[START, END)`.** `--region chr1:100-200`
+selected position 200 in v0.6.0 and does not in v0.6.1. Every existing region
+therefore selects one position fewer, and a prefix rebuilt with the same
+arguments differs from the one already on disk. Add one to the end of each
+region to keep the old selection: `chr1:100-201`.
+
+The point is that regions now tile: `chr1:1-10000001` and
+`chr1:10000001-20000001` cover everything between them exactly once, with no
+arithmetic at the seam. `vcf_tbi_chunks` emits the new form, so a manifest
+regenerated with v0.6.1 needs no adjustment. `END` equal to `START` covers
+nothing and is now refused rather than run as an empty job.
+
+Prefixes built by v0.6.0 remain readable: each records which convention its
+region was written in, and one without that record is read the way it was
+written, so old and new chunks still concatenate together.
+
+**`--n-ancestries` is gone.** The count comes from the input header -- FLARE's
+`##ANCESTRY` lines, RFMix's `#Subpopulation order/codes:` line, or a TRACTOR
+dosage VCF's `DS#`/`ANC#` declarations. Drop the flag from existing commands.
+An input whose header declares no ancestries was convertible in v0.6.0 by
+supplying the count and is not in v0.6.1; the refusal names the header line to
+add.
+
+**Only the autosomes are supported.** v0.6.0 refused `X` and `Y`; v0.6.1
+refuses every contig outside 1-22, including the mitochondrion, unplaced
+scaffolds and ALT contigs. A conversion that previously packed such a contig
+now stops with its name.
+
+Three additions need no migration: `--extract` and `--exclude` now also select
+out of an already packed prefix, a site list may spell a contig with or
+without the `chr` prefix, and a one-column line in a site list is read as a
+gnomAD-style `CHROM:POS:REF:ALT` variant ID.
+
 ## Getting Started
 
 FELIXla is distributed as a statically linked executable, so there is nothing
