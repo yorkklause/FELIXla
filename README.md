@@ -22,7 +22,38 @@ A manuscript describing FELIXla is in preparation. If you use this software in
 a published analysis before a formal citation is available, please cite this
 GitHub repository and record the commit hash used in the analysis.
 
-## Upgrading from v0.6.0
+## Upgrading
+
+### From v0.6.1
+
+**Filtering variants now filters the ancestry blocks with them.** A block that
+no retained variant falls in is dropped, where v0.6.1 kept every block whatever
+was filtered out of it. A prefix rebuilt from the same `--extract` or
+`--exclude` therefore has fewer ancestry blocks, and `--export-lai` and
+`--export-local-admixture` have correspondingly fewer rows.
+
+**This changes per-sample admixture proportions**, because they are weighted by
+the span the blocks cover and that span is now smaller. The difference is not
+cosmetic. Take a sample that is EUR at both ends of a chromosome and AFR
+across the middle, and extract only variants from the two ends:
+
+```text
+v0.6.1   s1   AFR 0.600000   EUR 0.400000
+v0.6.2   s1   AFR 0.000000   EUR 1.000000
+```
+
+v0.6.1 averaged in three blocks whose variants had all been filtered out.
+Proportions computed from an extracted prefix under v0.6.1 should be
+recomputed.
+
+`--export-global-admixture` also warns now when the blocks leave a hole inside
+a contig, which is what an extract leaves behind.
+
+Extracting from a prefix with many ancestry blocks is much faster: the
+per-variant block lookup was a linear scan over every block and is now a binary
+search. A 20,000-variant, 15,000-block extract went from 0.82s to 0.14s.
+
+### From v0.6.0
 
 Three changes in v0.6.1 alter what an existing command line does. The version
 number does not warn you, so they are listed here.
@@ -55,8 +86,8 @@ refuses every contig outside 1-22, including the mitochondrion, unplaced
 scaffolds and ALT contigs. A conversion that previously packed such a contig
 now stops with its name.
 
-Three additions need no migration: `--extract` and `--exclude` now also select
-out of an already packed prefix, a site list may spell a contig with or
+Three v0.6.1 additions need no migration: `--extract` and `--exclude` also
+select out of an already packed prefix, a site list may spell a contig with or
 without the `chr` prefix, and a one-column line in a site list is read as a
 gnomAD-style `CHROM:POS:REF:ALT` variant ID.
 
