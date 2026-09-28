@@ -139,6 +139,63 @@ felixla --felixla hybrid/chr22 --extract sites.pvar \
 writes the same prefix that packing with `--extract sites.pvar` would have
 written, without re-reading the source VCFs.
 
+### Coordinates and identity
+
+Two conventions decide what a filter selects, and both are stated here rather
+than left to be inferred from behaviour.
+
+**Regions are 1-based and closed at both ends.** `--region chr1:100-200`
+selects `100 <= POS <= 200`: a variant at 100 is in, and so is one at 200.
+`--region chr1:195-195` selects exactly position 195. This is the convention
+`vcf_tbi_chunks` emits, so consecutive chunks are `chr1:1-10000000` and
+`chr1:10000001-20000000` and share no variant.
+
+BED files use the other convention, because they are BED files:
+`--extract-bed` and `--exclude-bed` read 0-based half-open `[START, END)`, so
+`chr1 99 100` selects the record at VCF position 100. The two conventions sit
+side by side on purpose -- a BED written for another tool must not have to be
+rewritten -- and each is applied as its own format defines it.
+
+**A variant belongs to a region by its POS alone.** Nothing else about a record
+is consulted: not its REF length, not `INFO/END`, not `SVLEN`. A deletion
+written as `chr1 195 . ACCCCCCCCCC A` spans 195 through 205, but it is placed
+at 195, so `--region chr1:196-300` does not select it even though it reaches
+well inside, and `--region chr1:1-194` does not select it either. A long indel
+is judged by where it starts, and belongs to exactly one region.
+
+This is what makes chunked conversion safe to reassemble: every variant lands
+in exactly one chunk, whatever its length, so concatenating the chunks neither
+loses it nor writes it twice.
+
+**`--extract` and `--exclude` identify a variant by `CHROM`, `POS`, `REF` and
+`ALT` -- four columns, never one string.** The consequences are worth spelling
+out:
+
+- The `ID` column is read and ignored. A list may carry rs IDs, dots, or
+  anything else there; none of it participates in matching. A file of bare
+  variant IDs with no coordinates is rejected outright, since there is no
+  column layout under which it could be matched.
+
+- `REF` and `ALT` are not interchangeable. A list naming `T>A` where the
+  prefix holds `A>T` is a REF mismatch, and for `--extract` that is fatal
+  rather than a silent miss: an allele-swapped list almost always means the
+  list was built against a different reference, and quietly selecting nothing
+  would hide that.
+
+- `CHROM` must match the input's spelling exactly. `1` does not match a
+  `chr1` prefix. Note that `--chr` and `--region` *are* prefix-tolerant, so
+  the same token can be accepted by one flag and ignored by another; see
+  the caveat below.
+
+- Only the padding of an allele pair is negotiable. `ATT>AT` and `AT>A` at the
+  same position are the same allele and match each other, because shared
+  leading and trailing bases are stripped from both sides before comparison.
+
+The `ID` FELIXla *writes* for a split-biallelic variant is the source ID with
+the allele appended, `rs123_A_T`, so that the two rows a multiallelic record
+splits into do not share an identifier. It is a label carried through to the
+exported VCF, not an identity FELIXla matches on.
+
 ### Input
 
 - **`--phase-vcf PATH`** -- a phased diploid genotype VCF/BCF, given together
@@ -361,7 +418,9 @@ already packed.
 - **`--extract FILE`** -- a PLINK2 `.pvar`-like file or VCF-like file used like
   PLINK `--extract`. FELIXla reads the first variant columns `CHROM POS ID REF
   ALT`; VCF `QUAL`, `FILTER`, `INFO`, `FORMAT`, and sample columns are ignored.
-  The `ID` column is ignored. Matching uses the source `CHROM` and `POS`, then
+  The `ID` column is ignored; see
+  [Coordinates and identity](#coordinates-and-identity) for what does identify
+  a variant. Matching uses the source `CHROM` and `POS`, then
   compares each split `REF`/`ALT` after removing shared trailing and leading
   padding while retaining at least one base per allele. This permits equivalent
   padded multiallelic representations such as extract `ATT>AT` and genotype
@@ -444,7 +503,8 @@ already packed.
   selection with a `--region` on an unselected contig is an error rather than
   a silently empty run.
 
-- **`--region CHR:START-END`** -- 1-based inclusive region to convert. A variant
+- **`--region CHR:START-END`** -- 1-based region, closed at both ends, as
+  [Coordinates and identity](#coordinates-and-identity) defines it. A variant
   belongs to the region when `START <= POS <= END`.
 
 - **`--mac INT`**, **`--maf FLOAT`**, **`--anc-mac INT`**, **`--anc-maf F`**

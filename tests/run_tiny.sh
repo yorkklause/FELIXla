@@ -1120,4 +1120,127 @@ grep -q "REF mismatch" "$OUT_DIR/badref.err"
   --export-felixla --out "$OUT_DIR/badref_drop" >/dev/null
 cmp -s "$OUT_DIR/tiny.common.variant.mks" "$OUT_DIR/badref_drop.common.variant.mks"
 
+
+# The two conventions the README pins down: a region closed at both ends, and
+# a variant placed in it by POS alone. The deletion at 195 spans 195-205, so a
+# rule that consulted REF length would put it in more than one region.
+cat >"$OUT_DIR/boundary.vcf" <<'BOUNDARY_GENO'
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=100000>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	s1	s2
+chr1	100	rs1	A	T	.	PASS	.	GT	0|1	1|0
+chr1	195	rs2	ACCCCCCCCCC	A	.	PASS	.	GT	0|1	1|0
+chr1	200	rs3	G	C	.	PASS	.	GT	1|0	0|1
+chr1	205	rs4	T	G	.	PASS	.	GT	0|1	1|0
+BOUNDARY_GENO
+
+cat >"$OUT_DIR/boundary.flare.vcf" <<'BOUNDARY_FLARE'
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=100000>
+##FORMAT=<ID=AN1,Number=1,Type=Integer,Description="First">
+##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="Second">
+##ANCESTRY=<ID=0,Name=AFR>
+##ANCESTRY=<ID=1,Name=EUR>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	s1	s2
+chr1	100	.	A	C	.	PASS	.	AN1:AN2	0:1	1:0
+chr1	195	.	A	C	.	PASS	.	AN1:AN2	0:1	1:0
+chr1	200	.	A	C	.	PASS	.	AN1:AN2	0:1	1:0
+chr1	205	.	A	C	.	PASS	.	AN1:AN2	0:1	1:0
+BOUNDARY_FLARE
+
+"$BIN_DIR/felixla" --phase-vcf "$OUT_DIR/boundary.vcf" \
+  --flare-vcf "$OUT_DIR/boundary.flare.vcf" \
+  --export-felixla --out "$OUT_DIR/boundary" >/dev/null
+
+positions_in_region() {
+  "$BIN_DIR/felixla" --felixla "$OUT_DIR/boundary" --region "$1" \
+    --export-felixla --out "$OUT_DIR/region_probe" >/dev/null 2>&1 || { echo ""; return; }
+  "$BIN_DIR/felixla" --felixla "$OUT_DIR/region_probe" --export-vcf \
+    --out "$OUT_DIR/region_probe" >/dev/null 2>&1
+  python3 - "$OUT_DIR/region_probe.vcf.gz" <<'REGION_PROBE'
+import gzip
+import sys
+
+with gzip.open(sys.argv[1], "rt") as handle:
+    print(",".join(line.split("\t")[1] for line in handle if not line.startswith("#")))
+REGION_PROBE
+}
+
+# Closed at both ends: the variants at 100 and 200 are both inside.
+test "$(positions_in_region chr1:100-200)" = "100,195,200"
+test "$(positions_in_region chr1:101-199)" = "195"
+test "$(positions_in_region chr1:195-195)" = "195"
+# The deletion sits at 195 and nowhere else, so neither neighbouring region
+# claims it and no region claims it twice.
+test "$(positions_in_region chr1:196-300)" = "200,205"
+test "$(positions_in_region chr1:1-194)" = "100"
+
+# --extract identifies a variant by CHROM/POS/REF/ALT. The ID column takes no
+# part, an allele-swapped entry is refused rather than silently missing, and a
+# contig spelled differently from the input matches nothing.
+cat >"$OUT_DIR/wrong_id.pvar" <<'WRONG_ID'
+#CHROM	POS	ID	REF	ALT
+chr1	100	rs_not_this_variant	A	T
+WRONG_ID
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/boundary" --extract "$OUT_DIR/wrong_id.pvar" \
+  --export-felixla --out "$OUT_DIR/by_coords" >/dev/null
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/by_coords" --export-vcf \
+  --out "$OUT_DIR/by_coords" >/dev/null 2>&1
+python3 - "$OUT_DIR/by_coords.vcf.gz" <<'BY_COORDS'
+import gzip
+import sys
+
+with gzip.open(sys.argv[1], "rt") as handle:
+    rows = [line.split("\t") for line in handle if not line.startswith("#")]
+assert len(rows) == 1, rows
+assert rows[0][1] == "100", rows
+# The ID written out is the source ID with the allele appended, so the rows a
+# multiallelic record splits into stay distinguishable. It is a label, not the
+# identity that was matched on -- the list said rs_not_this_variant.
+assert rows[0][2] == "rs1_A_T", rows
+BY_COORDS
+
+cat >"$OUT_DIR/swapped.pvar" <<'SWAPPED_ALLELES'
+#CHROM	POS	ID	REF	ALT
+chr1	100	.	T	A
+SWAPPED_ALLELES
+if "$BIN_DIR/felixla" --felixla "$OUT_DIR/boundary" --extract "$OUT_DIR/swapped.pvar" \
+     --export-felixla --out "$OUT_DIR/swapped" >/dev/null 2>"$OUT_DIR/swapped.err"; then
+  echo "--extract accepted REF and ALT the wrong way round" >&2
+  exit 1
+fi
+grep -q "REF mismatch" "$OUT_DIR/swapped.err"
+
+cat >"$OUT_DIR/nochr.pvar" <<'NO_CHR_PREFIX'
+#CHROM	POS	ID	REF	ALT
+1	100	.	A	T
+NO_CHR_PREFIX
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/boundary" --extract "$OUT_DIR/nochr.pvar" \
+  --export-felixla --out "$OUT_DIR/nochr" >/dev/null
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/nochr" --export-vcf \
+  --out "$OUT_DIR/nochr" >/dev/null 2>&1
+python3 - "$OUT_DIR/nochr.vcf.gz" <<'NO_CHR_CHECK'
+import gzip
+import sys
+
+with gzip.open(sys.argv[1], "rt") as handle:
+    rows = [line for line in handle if not line.startswith("#")]
+# CHROM is matched as written, so "1" selects nothing from a "chr1" prefix.
+assert not rows, rows
+NO_CHR_CHECK
+
+# An allele-level selection leaves the ancestry blocks exactly as they were,
+# including blocks that now hold no variant at all: which ALT alleles were
+# kept says nothing about where a haplotype's ancestry switches.
+cat >"$OUT_DIR/first_only.pvar" <<'FIRST_ONLY'
+#CHROM	POS	ID	REF	ALT
+chr1	100	.	A	T
+FIRST_ONLY
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/boundary" --extract "$OUT_DIR/first_only.pvar" \
+  --export-felixla --out "$OUT_DIR/first_only" >/dev/null
+cmp -s "$OUT_DIR/boundary.ancblock.bin" "$OUT_DIR/first_only.ancblock.bin"
+cmp -s "$OUT_DIR/boundary.ancblock.mks" "$OUT_DIR/first_only.ancblock.mks"
+cmp -s "$OUT_DIR/boundary.ancblock.idx" "$OUT_DIR/first_only.ancblock.idx"
+
 echo "tiny smoke test passed"
