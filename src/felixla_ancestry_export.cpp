@@ -393,16 +393,42 @@ void export_lai(const std::string& prefix, const std::string& out_path, const Me
                  static_cast<unsigned long long>(meta.n_haps));
 }
 
+// A per-sample proportion is only as genome-wide as the blocks it is summed
+// over. Filtering variants drops the blocks that no longer hold one, so a
+// prefix that has been extracted from is holey, and a proportion taken over
+// what is left is over that, not over the genome. The caller is told.
+struct CoverageGaps {
+    uint64_t count = 0;
+    uint64_t bases = 0;
+    std::string first;
+};
+
 void export_global_admixture(const std::string& prefix, const std::string& out_path,
                              const Meta& meta, const std::vector<std::string>& samples) {
     // Base pairs, not blocks: a caller that splits a chromosome finely in one
     // place must not thereby weight that place more heavily.
     std::vector<uint64_t> bp(static_cast<size_t>(meta.n_samples * meta.n_ancestries), 0);
     uint64_t covered_bp = 0;
+    CoverageGaps gaps;
+    std::string previous_chr;
+    int64_t previous_end = 0;
 
     BlockReader reader(prefix, meta);
     while (reader.next()) {
         const Block& block = reader.current();
+        // Only a gap within one contig counts. Moving to the next contig is
+        // not a gap, and nothing here knows where a contig ends anyway.
+        if (block.chr == previous_chr && block.start > previous_end + 1) {
+            ++gaps.count;
+            gaps.bases += static_cast<uint64_t>(block.start - previous_end - 1);
+            if (gaps.first.empty()) {
+                gaps.first = block.chr + ":" + std::to_string(previous_end + 1) + "-" +
+                             std::to_string(block.start - 1);
+            }
+        }
+        previous_chr = block.chr;
+        previous_end = block.end;
+
         uint64_t length = static_cast<uint64_t>(block.end - block.start) + 1;
         covered_bp += length;
         const std::vector<uint8_t>& labels = reader.labels();
@@ -414,6 +440,20 @@ void export_global_admixture(const std::string& prefix, const std::string& out_p
         }
     }
     if (covered_bp == 0) die("the prefix has no ancestry blocks to summarise");
+
+    if (gaps.count > 0) {
+        std::fprintf(stderr,
+            "WARNING: the ancestry blocks do not cover a contiguous span: %llu gap(s) "
+            "totalling %llu bp, the first at %s. These proportions are over the "
+            "%llu bp the blocks do cover, not over the genome, so they are not "
+            "comparable with proportions from a prefix covering a different span. "
+            "Filtering variants drops the blocks none of them fall in, which is "
+            "where the gaps come from.\n",
+            static_cast<unsigned long long>(gaps.count),
+            static_cast<unsigned long long>(gaps.bases),
+            gaps.first.c_str(),
+            static_cast<unsigned long long>(covered_bp));
+    }
 
     FILE* fp = open_or_die(out_path, "w");
     std::string out = "#ID";

@@ -1520,4 +1520,99 @@ test "$(lai_rows "$OUT_DIR/blocks_ends_merged")" = "1-100 401-500"
   --export-felixla --out "$OUT_DIR/blocks_middle" >/dev/null
 test "$(lai_rows "$OUT_DIR/blocks_middle")" = "101-200 201-300 301-400"
 
+# Per-sample proportions over a holey prefix are over what is left, not over
+# the genome, and saying so is the difference between a number and a
+# misleading number.
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/blocks_ends" --export-global-admixture \
+  --out "$OUT_DIR/blocks_ends" 2>"$OUT_DIR/blocks_ends.warn" >/dev/null
+grep -q "do not cover a contiguous span" "$OUT_DIR/blocks_ends.warn"
+grep -q "1 gap(s) totalling 300 bp" "$OUT_DIR/blocks_ends.warn"
+grep -q "first at chr1:101-400" "$OUT_DIR/blocks_ends.warn"
+
+# The rows themselves are still internally consistent: each sums to one over
+# the span that is covered.
+python3 - "$OUT_DIR/blocks_ends.global.admixture.tsv" <<'HOLEY_ROWS'
+import sys
+
+with open(sys.argv[1]) as handle:
+    rows = [line.rstrip("\n").split("\t") for line in handle][1:]
+for row in rows:
+    total = sum(float(value) for value in row[1:])
+    assert abs(total - 1.0) < 1e-5, row
+HOLEY_ROWS
+
+# A prefix with no gaps says nothing, or the warning would be noise that gets
+# ignored on the run that matters.
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/blocks" --export-global-admixture \
+  --out "$OUT_DIR/blocks" 2>"$OUT_DIR/blocks.warn" >/dev/null
+if grep -q "contiguous span" "$OUT_DIR/blocks.warn"; then
+  echo "an ungapped prefix warned about coverage" >&2
+  exit 1
+fi
+
+# Moving to the next contig is not a gap; nothing here knows where a contig
+# ends. chr2 starts well past where chr1 stopped, so a check that forgot to
+# compare contigs would call the boundary a 700 bp hole.
+cat >"$OUT_DIR/twochr.vcf" <<'TWOCHR_GENO'
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=100000>
+##contig=<ID=chr2,length=100000>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	s1	s2
+chr1	100	.	A	T	.	PASS	.	GT	0|1	1|0
+chr1	300	.	A	T	.	PASS	.	GT	0|1	1|0
+chr2	1000	.	A	T	.	PASS	.	GT	0|1	1|0
+chr2	1200	.	A	T	.	PASS	.	GT	0|1	1|0
+TWOCHR_GENO
+
+cat >"$OUT_DIR/twochr.flare.vcf" <<'TWOCHR_FLARE'
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=100000>
+##contig=<ID=chr2,length=100000>
+##FORMAT=<ID=AN1,Number=1,Type=Integer,Description="First">
+##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="Second">
+##ANCESTRY=<ID=0,Name=AFR>
+##ANCESTRY=<ID=1,Name=EUR>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	s1	s2
+chr1	100	.	A	C	.	PASS	.	AN1:AN2	0:1	1:0
+chr1	300	.	A	C	.	PASS	.	AN1:AN2	0:1	1:0
+chr2	1000	.	A	C	.	PASS	.	AN1:AN2	0:1	1:0
+chr2	1200	.	A	C	.	PASS	.	AN1:AN2	0:1	1:0
+TWOCHR_FLARE
+
+"$BIN_DIR/felixla" --phase-vcf "$OUT_DIR/twochr.vcf" \
+  --flare-vcf "$OUT_DIR/twochr.flare.vcf" \
+  --export-felixla --out "$OUT_DIR/twochr" >/dev/null
+# chr1 covers 1-300 and chr2 covers 1-1200, so the second contig's first block
+# starts 299 bases before the first contig's last block ended.
+test "$(lai_rows "$OUT_DIR/twochr")" = "1-300 1-1200"
+
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/twochr" --export-global-admixture \
+  --out "$OUT_DIR/twochr" 2>"$OUT_DIR/twochr.warn" >/dev/null
+if grep -q "contiguous span" "$OUT_DIR/twochr.warn"; then
+  echo "a contig boundary was reported as a coverage gap" >&2
+  exit 1
+fi
+
+# A contig whose blocks begin past where the previous contig ended. Packing
+# always starts a contig's first block at 1, so this takes a merge of a whole
+# chr1 with a region-extracted chr2 -- which is what chunked conversion
+# produces. A check that compared coordinates without comparing contigs would
+# call the boundary a 699 bp hole.
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/twochr" --region chr1:1-400 \
+  --export-felixla --out "$OUT_DIR/part_chr1" >/dev/null
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/twochr" --region chr2:1000-1300 \
+  --export-felixla --out "$OUT_DIR/part_chr2" >/dev/null
+printf '%s\n%s\n' "$OUT_DIR/part_chr1" "$OUT_DIR/part_chr2" >"$OUT_DIR/parts.list"
+"$BIN_DIR/felixla" --merge-list "$OUT_DIR/parts.list" \
+  --export-felixla --out "$OUT_DIR/parts" >/dev/null
+test "$(lai_rows "$OUT_DIR/parts")" = "1-300 1000-1200"
+
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/parts" --export-global-admixture \
+  --out "$OUT_DIR/parts" 2>"$OUT_DIR/parts.warn" >/dev/null
+if grep -q "contiguous span" "$OUT_DIR/parts.warn"; then
+  echo "a contig boundary was reported as a coverage gap" >&2
+  exit 1
+fi
+
 echo "tiny smoke test passed"

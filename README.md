@@ -493,6 +493,25 @@ row sums to one. The denominator is the span the prefix's ancestry blocks
 actually cover, which for a region or contig subset is that subset, not the
 genome: proportions from two prefixes are comparable only over the same span.
 
+A prefix that has been filtered by `--extract` or `--exclude` has holes in it,
+because blocks holding no retained variant were dropped, and a proportion
+summed over what is left is over that rather than over a chromosome. That is
+easy to forget, so the export says so:
+
+```text
+WARNING: the ancestry blocks do not cover a contiguous span: 3 gap(s)
+totalling 1841204 bp, the first at chr1:48211-93004. These proportions are
+over the 6201933 bp the blocks do cover, not over the genome, ...
+```
+
+The warning fires on a gap between two blocks on the same contig. It does not
+fire at a contig boundary, since nothing in the packed files says where a
+contig ends, and it does not fire for a region or contig subset either -- those
+are subsets you asked for, and warning on every chunked job would make the
+warning worth ignoring on the run where it matters. `--export-local-admixture`
+never warns: its rows are per block, so a gap costs a row rather than
+distorting one.
+
 **`--export-local-admixture`** writes `<out>.local.admixture.tsv`, one row per
 ancestry block, holding each ancestry's share of the cohort's haplotypes
 there:
