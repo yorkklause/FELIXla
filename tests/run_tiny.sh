@@ -1365,4 +1365,64 @@ for malformed in rs12345 chr1:100 chr1:100:A chr1:100::T; do
   fi
 done
 
+
+# The separators inside a contig name are not field separators. This is the
+# case the right-to-left split exists for, and the only one that distinguishes
+# it from splitting four fields off the front.
+cat >"$OUT_DIR/hla.vcf" <<'HLA_GENO'
+##fileformat=VCFv4.2
+##contig=<ID=HLA-A,length=10000>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	s1	s2
+HLA-A	100	.	A	T	.	PASS	.	GT	0|1	1|0
+HLA-A	200	.	G	C	.	PASS	.	GT	1|0	0|1
+HLA_GENO
+
+cat >"$OUT_DIR/hla.flare.vcf" <<'HLA_FLARE'
+##fileformat=VCFv4.2
+##contig=<ID=HLA-A,length=10000>
+##FORMAT=<ID=AN1,Number=1,Type=Integer,Description="First">
+##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="Second">
+##ANCESTRY=<ID=0,Name=AFR>
+##ANCESTRY=<ID=1,Name=EUR>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	s1	s2
+HLA-A	100	.	A	C	.	PASS	.	AN1:AN2	0:1	1:0
+HLA-A	200	.	A	C	.	PASS	.	AN1:AN2	0:1	1:0
+HLA_FLARE
+
+"$BIN_DIR/felixla" --phase-vcf "$OUT_DIR/hla.vcf" \
+  --flare-vcf "$OUT_DIR/hla.flare.vcf" \
+  --export-felixla --out "$OUT_DIR/hla" >/dev/null
+
+printf 'HLA-A-100-A-T\n' >"$OUT_DIR/hla_id.txt"
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/hla" --extract "$OUT_DIR/hla_id.txt" \
+  --export-felixla --out "$OUT_DIR/hla_by_id" >/dev/null
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/hla_by_id" --export-vcf \
+  --out "$OUT_DIR/hla_by_id" >/dev/null 2>&1
+python3 - "$OUT_DIR/hla_by_id.vcf.gz" <<'HLA_ID_CHECK'
+import gzip
+import sys
+
+with gzip.open(sys.argv[1], "rt") as handle:
+    rows = [line.split("\t") for line in handle if not line.startswith("#")]
+# Splitting from the left would take "HLA" as the contig and "A" as the
+# position, and select nothing.
+assert [(row[0], row[1], row[3], row[4]) for row in rows] == \
+    [("HLA-A", "100", "A", "T")], rows
+HLA_ID_CHECK
+
+# Packing with the same ID must agree, so both parsers split the same way.
+"$BIN_DIR/felixla" --phase-vcf "$OUT_DIR/hla.vcf" \
+  --flare-vcf "$OUT_DIR/hla.flare.vcf" \
+  --extract "$OUT_DIR/hla_id.txt" \
+  --export-felixla --out "$OUT_DIR/hla_packed" >/dev/null
+for component in common.geno.bin common.variant.mks common.variant.idx \
+                 rare.carrier.bin rare.variant.mks rare.variant.idx \
+                 ancblock.bin ancblock.mks ancblock.idx samples; do
+  if ! cmp -s "$OUT_DIR/hla_packed.$component" "$OUT_DIR/hla_by_id.$component"; then
+    echo "a contig name containing a separator differs between the two routes: $component" >&2
+    exit 1
+  fi
+done
+
 echo "tiny smoke test passed"
