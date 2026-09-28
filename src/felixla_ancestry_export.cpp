@@ -394,10 +394,15 @@ void export_lai(const std::string& prefix, const std::string& out_path, const Me
 }
 
 // A per-sample proportion is only as genome-wide as the blocks it is summed
-// over. Filtering variants drops the blocks that no longer hold one, so a
-// prefix that has been extracted from is holey, and a proportion taken over
-// what is left is over that, not over the genome. The caller is told.
-struct CoverageGaps {
+// over, so the blocks are checked for being one unbroken run per contig,
+// starting at the first base. Anything else -- a gap left by dropping blocks
+// that hold no retained variant, or a contig that starts partway in because a
+// region was extracted -- means the proportions are over less than they look
+// like they are over, and the caller is told.
+//
+// The trailing end cannot be checked: the packed files record no contig
+// lengths, so there is nothing to compare a last block's end against.
+struct CoverageBreaks {
     uint64_t count = 0;
     uint64_t bases = 0;
     std::string first;
@@ -409,25 +414,29 @@ void export_global_admixture(const std::string& prefix, const std::string& out_p
     // place must not thereby weight that place more heavily.
     std::vector<uint64_t> bp(static_cast<size_t>(meta.n_samples * meta.n_ancestries), 0);
     uint64_t covered_bp = 0;
-    CoverageGaps gaps;
-    std::string previous_chr;
-    int64_t previous_end = 0;
+    CoverageBreaks breaks;
+    std::string current_chr;
+    int64_t expected_start = 1;
 
     BlockReader reader(prefix, meta);
     while (reader.next()) {
         const Block& block = reader.current();
-        // Only a gap within one contig counts. Moving to the next contig is
-        // not a gap, and nothing here knows where a contig ends anyway.
-        if (block.chr == previous_chr && block.start > previous_end + 1) {
-            ++gaps.count;
-            gaps.bases += static_cast<uint64_t>(block.start - previous_end - 1);
-            if (gaps.first.empty()) {
-                gaps.first = block.chr + ":" + std::to_string(previous_end + 1) + "-" +
-                             std::to_string(block.start - 1);
+        // Each contig is expected to resume where the last block left off, and
+        // to begin at base one. A new contig resets that expectation rather
+        // than counting as a break itself.
+        if (block.chr != current_chr) {
+            current_chr = block.chr;
+            expected_start = 1;
+        }
+        if (block.start > expected_start) {
+            ++breaks.count;
+            breaks.bases += static_cast<uint64_t>(block.start - expected_start);
+            if (breaks.first.empty()) {
+                breaks.first = block.chr + ":" + std::to_string(expected_start) + "-" +
+                               std::to_string(block.start - 1);
             }
         }
-        previous_chr = block.chr;
-        previous_end = block.end;
+        expected_start = block.end + 1;
 
         uint64_t length = static_cast<uint64_t>(block.end - block.start) + 1;
         covered_bp += length;
@@ -441,17 +450,17 @@ void export_global_admixture(const std::string& prefix, const std::string& out_p
     }
     if (covered_bp == 0) die("the prefix has no ancestry blocks to summarise");
 
-    if (gaps.count > 0) {
+    if (breaks.count > 0) {
         std::fprintf(stderr,
-            "WARNING: the ancestry blocks do not cover a contiguous span: %llu gap(s) "
-            "totalling %llu bp, the first at %s. These proportions are over the "
+            "WARNING: the ancestry blocks are not contiguous: %llu break(s) leaving "
+            "%llu bp uncovered, the first at %s. These proportions are over the "
             "%llu bp the blocks do cover, not over the genome, so they are not "
             "comparable with proportions from a prefix covering a different span. "
-            "Filtering variants drops the blocks none of them fall in, which is "
-            "where the gaps come from.\n",
-            static_cast<unsigned long long>(gaps.count),
-            static_cast<unsigned long long>(gaps.bases),
-            gaps.first.c_str(),
+            "Whether the blocks reach the end of each contig cannot be checked "
+            "here, since the packed files record no contig lengths.\n",
+            static_cast<unsigned long long>(breaks.count),
+            static_cast<unsigned long long>(breaks.bases),
+            breaks.first.c_str(),
             static_cast<unsigned long long>(covered_bp));
     }
 

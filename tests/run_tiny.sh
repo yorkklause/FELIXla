@@ -1520,17 +1520,22 @@ test "$(lai_rows "$OUT_DIR/blocks_ends_merged")" = "1-100 401-500"
   --export-felixla --out "$OUT_DIR/blocks_middle" >/dev/null
 test "$(lai_rows "$OUT_DIR/blocks_middle")" = "101-200 201-300 301-400"
 
-# Per-sample proportions over a holey prefix are over what is left, not over
-# the genome, and saying so is the difference between a number and a
-# misleading number.
-"$BIN_DIR/felixla" --felixla "$OUT_DIR/blocks_ends" --export-global-admixture \
-  --out "$OUT_DIR/blocks_ends" 2>"$OUT_DIR/blocks_ends.warn" >/dev/null
-grep -q "do not cover a contiguous span" "$OUT_DIR/blocks_ends.warn"
-grep -q "1 gap(s) totalling 300 bp" "$OUT_DIR/blocks_ends.warn"
-grep -q "first at chr1:101-400" "$OUT_DIR/blocks_ends.warn"
+# Per-sample proportions over a prefix whose blocks are not contiguous are
+# over what is left, not over the genome, and saying so is the difference
+# between a number and a misleading number.
+warned() {
+  "$BIN_DIR/felixla" --felixla "$1" --export-global-admixture \
+    --out "$1" 2>"$1.warn" >/dev/null
+  grep -oE "[0-9]+ break\(s\) leaving [0-9]+ bp uncovered, the first at [^.]*" "$1.warn" \
+    || echo "no warning"
+}
+
+# A hole in the middle, from blocks that held no retained variant.
+test "$(warned "$OUT_DIR/blocks_ends")" \
+  = "1 break(s) leaving 300 bp uncovered, the first at chr1:101-400"
 
 # The rows themselves are still internally consistent: each sums to one over
-# the span that is covered.
+# the span that is covered. That is what makes them easy to misread.
 python3 - "$OUT_DIR/blocks_ends.global.admixture.tsv" <<'HOLEY_ROWS'
 import sys
 
@@ -1541,18 +1546,28 @@ for row in rows:
     assert abs(total - 1.0) < 1e-5, row
 HOLEY_ROWS
 
-# A prefix with no gaps says nothing, or the warning would be noise that gets
-# ignored on the run that matters.
-"$BIN_DIR/felixla" --felixla "$OUT_DIR/blocks" --export-global-admixture \
-  --out "$OUT_DIR/blocks" 2>"$OUT_DIR/blocks.warn" >/dev/null
-if grep -q "contiguous span" "$OUT_DIR/blocks.warn"; then
-  echo "an ungapped prefix warned about coverage" >&2
-  exit 1
-fi
+# A contig that starts partway in is just as uncovered as one with a hole,
+# whether the start was lost to a dropped block or asked for with --region.
+cat >"$OUT_DIR/blocks_last.pvar" <<'BLOCKS_LAST'
+#CHROM	POS	ID	REF	ALT
+chr1	500	.	A	T
+BLOCKS_LAST
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/blocks" --extract "$OUT_DIR/blocks_last.pvar" \
+  --export-felixla --out "$OUT_DIR/blocks_last" >/dev/null
+test "$(warned "$OUT_DIR/blocks_last")" \
+  = "1 break(s) leaving 400 bp uncovered, the first at chr1:1-400"
 
-# Moving to the next contig is not a gap; nothing here knows where a contig
-# ends. chr2 starts well past where chr1 stopped, so a check that forgot to
-# compare contigs would call the boundary a 700 bp hole.
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/blocks" --region chr1:200-451 \
+  --export-felixla --out "$OUT_DIR/blocks_region" >/dev/null
+test "$(warned "$OUT_DIR/blocks_region")" \
+  = "1 break(s) leaving 199 bp uncovered, the first at chr1:1-199"
+
+# Blocks running unbroken from base one say nothing, or the warning would be
+# noise that gets ignored on the run that matters.
+test "$(warned "$OUT_DIR/blocks")" = "no warning"
+
+# A contig boundary is not a break: the next contig is expected to start at
+# one, not to continue from where the previous one ended.
 cat >"$OUT_DIR/twochr.vcf" <<'TWOCHR_GENO'
 ##fileformat=VCFv4.2
 ##contig=<ID=chr1,length=100000>
@@ -1583,22 +1598,14 @@ TWOCHR_FLARE
 "$BIN_DIR/felixla" --phase-vcf "$OUT_DIR/twochr.vcf" \
   --flare-vcf "$OUT_DIR/twochr.flare.vcf" \
   --export-felixla --out "$OUT_DIR/twochr" >/dev/null
-# chr1 covers 1-300 and chr2 covers 1-1200, so the second contig's first block
-# starts 299 bases before the first contig's last block ended.
 test "$(lai_rows "$OUT_DIR/twochr")" = "1-300 1-1200"
+test "$(warned "$OUT_DIR/twochr")" = "no warning"
 
-"$BIN_DIR/felixla" --felixla "$OUT_DIR/twochr" --export-global-admixture \
-  --out "$OUT_DIR/twochr" 2>"$OUT_DIR/twochr.warn" >/dev/null
-if grep -q "contiguous span" "$OUT_DIR/twochr.warn"; then
-  echo "a contig boundary was reported as a coverage gap" >&2
-  exit 1
-fi
-
-# A contig whose blocks begin past where the previous contig ended. Packing
-# always starts a contig's first block at 1, so this takes a merge of a whole
-# chr1 with a region-extracted chr2 -- which is what chunked conversion
-# produces. A check that compared coordinates without comparing contigs would
-# call the boundary a 699 bp hole.
+# And the size of the break is measured from base one of its own contig, not
+# from wherever the previous contig happened to stop. Packing always starts a
+# contig at one, so this takes a merge of a whole chr1 with a region-extracted
+# chr2 -- which is what chunked conversion produces. Measured from chr1's end
+# the break would read 699 bp at chr2:301-999.
 "$BIN_DIR/felixla" --felixla "$OUT_DIR/twochr" --region chr1:1-400 \
   --export-felixla --out "$OUT_DIR/part_chr1" >/dev/null
 "$BIN_DIR/felixla" --felixla "$OUT_DIR/twochr" --region chr2:1000-1300 \
@@ -1607,12 +1614,7 @@ printf '%s\n%s\n' "$OUT_DIR/part_chr1" "$OUT_DIR/part_chr2" >"$OUT_DIR/parts.lis
 "$BIN_DIR/felixla" --merge-list "$OUT_DIR/parts.list" \
   --export-felixla --out "$OUT_DIR/parts" >/dev/null
 test "$(lai_rows "$OUT_DIR/parts")" = "1-300 1000-1200"
-
-"$BIN_DIR/felixla" --felixla "$OUT_DIR/parts" --export-global-admixture \
-  --out "$OUT_DIR/parts" 2>"$OUT_DIR/parts.warn" >/dev/null
-if grep -q "contiguous span" "$OUT_DIR/parts.warn"; then
-  echo "a contig boundary was reported as a coverage gap" >&2
-  exit 1
-fi
+test "$(warned "$OUT_DIR/parts")" \
+  = "1 break(s) leaving 999 bp uncovered, the first at chr2:1-999"
 
 echo "tiny smoke test passed"
