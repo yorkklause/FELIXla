@@ -61,6 +61,12 @@ struct AncestryState {
 
 struct OpenAncestryBlock {
     bool active = false;
+    // An id is claimed the first time a retained variant lands in the block,
+    // which is also what decides whether the block is written at all. A block
+    // that no retained variant falls in describes ancestry over a stretch the
+    // prefix has no data for, so carrying it would say the filters had not
+    // been applied.
+    bool holds_variant = false;
     uint32_t block_id = 0;
     int geno_rid = -1;
     std::string chr;
@@ -1745,6 +1751,18 @@ static bool ancestry_record_changes_state(
     return final_ancestry != state.hap_ancestry;
 }
 
+// Ids have to stay consecutive, so they are handed out at the moment a
+// variant needs one rather than when a block opens: a block that is never
+// used must not consume one.
+static uint32_t claim_block_id(OpenAncestryBlock& block, uint32_t& n_blocks_written) {
+    if (!block.holds_variant) {
+        block.block_id = n_blocks_written;
+        ++n_blocks_written;
+        block.holds_variant = true;
+    }
+    return block.block_id;
+}
+
 static void close_open_block(
     FILE* anc_fp,
     const char* anc_bin_path,
@@ -1752,11 +1770,14 @@ static void close_open_block(
     const char* anc_mks_path,
     FILE* anc_idx_fp,
     OpenAncestryBlock& block,
-    uint32_t& n_blocks_written,
     int n_ancestries,
     int n_words
 ) {
     if (!block.active) return;
+    if (!block.holds_variant) {
+        block.active = false;
+        return;
+    }
 
     write_anc_block(
         anc_fp,
@@ -1773,7 +1794,6 @@ static void close_open_block(
         n_words
     );
 
-    ++n_blocks_written;
     block.active = false;
 }
 
@@ -1784,7 +1804,6 @@ static void update_open_block_from_flare(
     const char* anc_mks_path,
     FILE* anc_idx_fp,
     OpenAncestryBlock& block,
-    uint32_t& n_blocks_written,
     int n_ancestries,
     int n_words,
     int flare_geno_rid,
@@ -1816,14 +1835,13 @@ static void update_open_block_from_flare(
             anc_mks_path,
             anc_idx_fp,
             block,
-            n_blocks_written,
             n_ancestries,
             n_words
         );
     }
 
     block.active = true;
-    block.block_id = n_blocks_written;
+    block.holds_variant = false;
     block.geno_rid = flare_geno_rid;
     block.chr = flare_chr;
     block.start_pos = interval_start;
@@ -5531,7 +5549,6 @@ int main(int argc, char** argv) {
                     anc_mks.c_str(),
                     anc_idx_fp,
                     block,
-                    n_blocks_written,
                     n_ancestries,
                     n_words
                 );
@@ -5554,7 +5571,6 @@ int main(int argc, char** argv) {
                         anc_mks.c_str(),
                         anc_idx_fp,
                         block,
-                        n_blocks_written,
                         n_ancestries,
                         n_words,
                         ancestry_state_rid,
@@ -5635,7 +5651,6 @@ int main(int argc, char** argv) {
                     anc_mks.c_str(),
                     anc_idx_fp,
                     block,
-                    n_blocks_written,
                     n_ancestries,
                     n_words
                 );
@@ -5697,7 +5712,6 @@ int main(int argc, char** argv) {
                     anc_mks.c_str(),
                     anc_idx_fp,
                     block,
-                    n_blocks_written,
                     n_ancestries,
                     n_words,
                     interval_record.geno_rid,
@@ -5721,7 +5735,6 @@ int main(int argc, char** argv) {
                 anc_mks.c_str(),
                 anc_idx_fp,
                 block,
-                n_blocks_written,
                 n_ancestries,
                 n_words,
                 ancestry_state_rid,
@@ -5739,7 +5752,6 @@ int main(int argc, char** argv) {
                 anc_mks.c_str(),
                 anc_idx_fp,
                 block,
-                n_blocks_written,
                 n_ancestries,
                 n_words,
                 ancestry_state_rid,
@@ -5919,6 +5931,10 @@ int main(int argc, char** argv) {
 
             std::string split_id = make_split_id(raw_id, g_chr, g_pos, ref, alt);
 
+            // The variant is being written, so the block it falls in is one
+            // the prefix has data for and earns its id here.
+            uint32_t variant_block_id = claim_block_id(block, n_blocks_written);
+
             if (mac <= static_cast<uint32_t>(rare_threshold)) {
                 uint64_t carrier_offset = tell_or_die(rare_fp, rare_bin.c_str());
 
@@ -5987,7 +6003,7 @@ int main(int argc, char** argv) {
                     ref,
                     alt,
                     static_cast<uint32_t>(alt_idx),
-                    block.block_id,
+                    variant_block_id,
                     geno_offset,
                     mac
                 );
@@ -6019,7 +6035,6 @@ int main(int argc, char** argv) {
         anc_mks.c_str(),
         anc_idx_fp,
         block,
-        n_blocks_written,
         n_ancestries,
         n_words
     );

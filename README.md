@@ -424,6 +424,30 @@ The split variant marker streams record `chr`, `pos`, split-biallelic `id`,
 `ref`, `alt`, ALT allele index, global variant index, and MAC. Marker streams
 and indexes are little-endian binary files with 8-byte magic headers.
 
+#### What happens to the ancestry blocks
+
+Filtering variants filters the ancestry blocks too. **A block is kept when it
+covers at least one retained variant, and dropped otherwise.** Keeping every
+block would leave the output claiming local ancestry across stretches it no
+longer holds a single variant in, which is not what an extract should look
+like -- pull two variants out of a chromosome and you should not still be
+carrying its whole ancestry map.
+
+A block that is kept keeps its own span. It is not clipped to the variants
+that survived, because the ancestry really does extend across it: the caller
+said this haplotype is AFR from here to there, and dropping a variant in the
+middle does not change where the switch happened.
+
+The blocks that survive may therefore have gaps between them. That is allowed:
+the format requires ancestry blocks to be ordered and non-overlapping, not to
+abut. Gaps already arose from `--extract-bed` and `--exclude-bed`, which clip
+blocks at interval boundaries, and concat revalidates a gapped prefix like any
+other.
+
+A region is the one filter that clips rather than drops, since a region is a
+statement about coordinates and a block that straddles its edge is half
+inside.
+
 #### Ancestry exports
 
 Three read-only views summarize a packed prefix's ancestry blocks. All three
@@ -525,6 +549,9 @@ already packed.
   the same list -- which the test suite asserts, component by component, so
   the two cannot drift apart. A listed coordinate the prefix holds under a
   different REF is a fatal mismatch there too.
+
+  Selecting variants selects ancestry blocks with them; see
+  [What happens to the ancestry blocks](#what-happens-to-the-ancestry-blocks).
 
 - **`--exclude FILE`** -- the same PVAR/VCF format and the same
   allele matching as `--extract`, naming alleles to drop rather than keep. It

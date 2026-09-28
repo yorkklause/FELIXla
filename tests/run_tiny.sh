@@ -1064,9 +1064,8 @@ for component in common.geno.bin common.variant.mks common.variant.idx \
   fi
 done
 
-# --exclude composes the same way, and the ancestry blocks are untouched by an
-# allele-level selection: local ancestry does not depend on which ALT alleles
-# were kept.
+# --exclude composes the same way. Every block here still covers a retained
+# variant, so all of them survive; the case where one does not is below.
 "$BIN_DIR/felixla" --felixla "$OUT_DIR/tiny" \
   --exclude "$OUT_DIR/keep.pvar" \
   --export-felixla --out "$OUT_DIR/prefix_exclude" >/dev/null
@@ -1268,9 +1267,9 @@ for component in common.geno.bin common.variant.mks common.variant.idx \
   fi
 done
 
-# An allele-level selection leaves the ancestry blocks exactly as they were,
-# including blocks that now hold no variant at all: which ALT alleles were
-# kept says nothing about where a haplotype's ancestry switches.
+# The boundary fixture has a single block spanning every variant, so keeping
+# one variant keeps that block whole: a block that still covers a retained
+# variant is not clipped to it.
 cat >"$OUT_DIR/first_only.pvar" <<'FIRST_ONLY'
 #CHROM	POS	ID	REF	ALT
 chr1	100	.	A	T
@@ -1429,5 +1428,96 @@ if "$BIN_DIR/felixla" --phase-vcf "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   exit 1
 fi
 grep -q "has been removed" "$OUT_DIR/nanc.err"
+
+
+# A block that no retained variant falls in is dropped, and the blocks left
+# behind may have gaps between them. The fixture gives every variant its own
+# block so the two ends can be kept and the middle dropped.
+cat >"$OUT_DIR/blocks.vcf" <<'BLOCKS_GENO'
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=100000>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	s1	s2
+chr1	100	.	A	T	.	PASS	.	GT	0|1	1|0
+chr1	200	.	A	T	.	PASS	.	GT	0|1	1|0
+chr1	300	.	A	T	.	PASS	.	GT	0|1	1|0
+chr1	400	.	A	T	.	PASS	.	GT	0|1	1|0
+chr1	500	.	A	T	.	PASS	.	GT	0|1	1|0
+BLOCKS_GENO
+
+cat >"$OUT_DIR/blocks.flare.vcf" <<'BLOCKS_FLARE'
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=100000>
+##FORMAT=<ID=AN1,Number=1,Type=Integer,Description="First">
+##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="Second">
+##ANCESTRY=<ID=0,Name=AFR>
+##ANCESTRY=<ID=1,Name=EUR>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	s1	s2
+chr1	100	.	A	C	.	PASS	.	AN1:AN2	0:1	1:0
+chr1	200	.	A	C	.	PASS	.	AN1:AN2	1:0	0:1
+chr1	300	.	A	C	.	PASS	.	AN1:AN2	0:1	1:0
+chr1	400	.	A	C	.	PASS	.	AN1:AN2	1:0	0:1
+chr1	500	.	A	C	.	PASS	.	AN1:AN2	0:1	1:0
+BLOCKS_FLARE
+
+"$BIN_DIR/felixla" --phase-vcf "$OUT_DIR/blocks.vcf" \
+  --flare-vcf "$OUT_DIR/blocks.flare.vcf" \
+  --export-felixla --out "$OUT_DIR/blocks" >/dev/null
+
+cat >"$OUT_DIR/blocks_ends.pvar" <<'BLOCKS_ENDS'
+#CHROM	POS	ID	REF	ALT
+chr1	100	.	A	T
+chr1	500	.	A	T
+BLOCKS_ENDS
+
+lai_rows() {
+  "$BIN_DIR/felixla" --felixla "$1" --export-lai --out "$1" >/dev/null 2>&1
+  python3 - "$1.lai.gz" <<'LAI_ROWS'
+import gzip
+import sys
+
+with gzip.open(sys.argv[1], "rt") as handle:
+    print(" ".join(
+        "%s-%s" % (line.split("\t")[1], line.split("\t")[2])
+        for line in handle if not line.startswith("#")
+    ))
+LAI_ROWS
+}
+
+test "$(lai_rows "$OUT_DIR/blocks")" = "1-100 101-200 201-300 301-400 401-500"
+
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/blocks" --extract "$OUT_DIR/blocks_ends.pvar" \
+  --export-felixla --out "$OUT_DIR/blocks_ends" >/dev/null
+# The three middle blocks held only variants the list did not name, so they are
+# gone, and what is left is not contiguous.
+test "$(lai_rows "$OUT_DIR/blocks_ends")" = "1-100 401-500"
+grep -q $'ancestry_blocks\t2' "$OUT_DIR/blocks_ends.meta"
+
+# Packing with the same list has to reach the same place, blocks included.
+"$BIN_DIR/felixla" --phase-vcf "$OUT_DIR/blocks.vcf" \
+  --flare-vcf "$OUT_DIR/blocks.flare.vcf" \
+  --extract "$OUT_DIR/blocks_ends.pvar" \
+  --export-felixla --out "$OUT_DIR/blocks_ends_packed" >/dev/null
+for component in common.geno.bin common.variant.mks common.variant.idx \
+                 rare.carrier.bin rare.variant.mks rare.variant.idx \
+                 ancblock.bin ancblock.mks ancblock.idx samples; do
+  if ! cmp -s "$OUT_DIR/blocks_ends_packed.$component" "$OUT_DIR/blocks_ends.$component"; then
+    echo "dropping empty blocks differs between packing and prefix extract: $component" >&2
+    exit 1
+  fi
+done
+
+# A prefix whose blocks have gaps is still a valid prefix: concat revalidates
+# all eleven files, and block ids must have stayed consecutive through the
+# renumbering.
+printf '%s\n' "$OUT_DIR/blocks_ends" >"$OUT_DIR/blocks_ends.list"
+"$BIN_DIR/felixla" --merge-list "$OUT_DIR/blocks_ends.list" \
+  --export-felixla --out "$OUT_DIR/blocks_ends_merged" >/dev/null
+test "$(lai_rows "$OUT_DIR/blocks_ends_merged")" = "1-100 401-500"
+
+# --exclude reaches the same rule from the other side.
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/blocks" --exclude "$OUT_DIR/blocks_ends.pvar" \
+  --export-felixla --out "$OUT_DIR/blocks_middle" >/dev/null
+test "$(lai_rows "$OUT_DIR/blocks_middle")" = "101-200 201-300 301-400"
 
 echo "tiny smoke test passed"

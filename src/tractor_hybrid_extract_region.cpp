@@ -1,11 +1,18 @@
 // tractor_hybrid_extract_region.cpp
 // designed by Kai, implemented by codex
 //
-// Select part of an existing FELIXla packed prefix into a new one: a 1-based
-// inclusive genomic region, a PVAR/VCF list of alleles to keep or drop, or
-// both. Ancestry blocks describe local ancestry along the coordinate axis, not
-// per variant, so an allele-level selection passes them through untouched and
-// only a region clips them.
+// Select part of an existing FELIXla packed prefix into a new one: a
+// half-open genomic region, a PVAR/VCF list of alleles to keep or drop, or
+// both.
+//
+// Ancestry blocks are selected too. A block is kept when it covers at least
+// one retained variant, and dropped otherwise: an output that kept every
+// block would claim local ancestry over stretches it no longer has a single
+// variant in, which is not what an extract looks like. A kept block keeps its
+// own span, because the ancestry really does extend across it; only a region
+// clips one. Blocks that survive may therefore leave gaps between them, which
+// the format allows -- the rule is that they are ordered and do not overlap,
+// not that they abut.
 
 #include <algorithm>
 #include <cstdarg>
@@ -474,6 +481,16 @@ public:
         return false;
     }
 
+    // A second pass over the same markers starts from a clean coordinate and
+    // does not repeat the REF check the first pass already made.
+    void begin_pass(bool ref_mismatch_fatal) {
+        ref_mismatch_fatal_ = ref_mismatch_fatal;
+        open_ = false;
+        raw_ref_matched_ = false;
+        normalized_matched_ = false;
+        first_prefix_ref_.clear();
+    }
+
     // Called once the marker stream has left a coordinate, and once at the end.
     void finish_coordinate() {
         if (!open_) return;
@@ -540,18 +557,48 @@ static bool overlaps_region(const AncBlockRecord& block, const Region& region) {
            block.start <= region.end;
 }
 
-static bool ancestry_blocks_cover_position(
-    const std::vector<AncBlockRecord>& blocks,
-    const std::string& chr,
-    int64_t pos
-) {
-    for (const AncBlockRecord& block : blocks) {
-        if (chrom_matches(block.chr, chr) && pos >= block.start && pos <= block.end) {
-            return true;
+// Which block covers a position, found by search rather than by scanning
+// every block. Blocks on one contig are sorted and do not overlap, so the last
+// one starting at or before the position is the only candidate.
+class BlockIndex {
+public:
+    explicit BlockIndex(const std::vector<AncBlockRecord>& blocks) : blocks_(blocks) {
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            by_contig_[contig_key(blocks[i].chr)].push_back(i);
+        }
+        for (auto& entry : by_contig_) {
+            std::sort(entry.second.begin(), entry.second.end(),
+                      [this](size_t a, size_t b) {
+                          return blocks_[a].start < blocks_[b].start;
+                      });
         }
     }
-    return false;
-}
+
+    static constexpr size_t kNone = static_cast<size_t>(-1);
+
+    size_t find(const std::string& chr, int64_t pos) const {
+        auto entry = by_contig_.find(contig_key(chr));
+        if (entry == by_contig_.end()) return kNone;
+        const std::vector<size_t>& ids = entry->second;
+        size_t lo = 0;
+        size_t hi = ids.size();
+        while (lo < hi) {
+            size_t mid = lo + (hi - lo) / 2;
+            if (blocks_[ids[mid]].start <= pos) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if (lo == 0) return kNone;
+        size_t candidate = ids[lo - 1];
+        return pos <= blocks_[candidate].end ? candidate : kNone;
+    }
+
+private:
+    const std::vector<AncBlockRecord>& blocks_;
+    std::unordered_map<std::string, std::vector<size_t>> by_contig_;
+};
 
 static Region make_region(const std::string& chr, int64_t start, int64_t end_exclusive,
                           const std::string& source) {
@@ -771,12 +818,15 @@ static void copy_fixed_bytes(
     write_exact(out_fp, buffer.data(), buffer.size(), out_what);
 }
 
+// Reads the blocks a region leaves behind, in file order. Ids are not handed
+// out here: which blocks survive is not known until the variants have been
+// filtered, and a block that ends up holding none must not consume an id.
 static void read_selected_anc_blocks(
     const std::string& in_prefix,
     const Meta& meta,
     const Region& region,
     std::vector<AncBlockRecord>& selected_blocks,
-    std::unordered_map<uint32_t, uint32_t>& block_id_map
+    std::unordered_map<uint32_t, size_t>& block_index_by_old_id
 ) {
     const std::string anc_mks_path = in_prefix + ".ancblock.mks";
     FILE* fp = open_file_or_die(anc_mks_path, "rb");
@@ -794,15 +844,13 @@ static void read_selected_anc_blocks(
             block.start = std::max(block.start, region.start);
             block.end = std::min(block.end, region.end);
         }
-        block.new_block_id = static_cast<uint32_t>(selected_blocks.size());
-
-        if (block_id_map.count(block.old_block_id)) {
+        if (block_index_by_old_id.count(block.old_block_id)) {
             die("duplicate ancestry block id in %s: %u", anc_mks_path.c_str(), block.old_block_id);
         }
         if (selected_blocks.size() > std::numeric_limits<uint32_t>::max()) {
             die("too many selected ancestry blocks");
         }
-        block_id_map[block.old_block_id] = block.new_block_id;
+        block_index_by_old_id[block.old_block_id] = selected_blocks.size();
         selected_blocks.push_back(block);
     }
 
@@ -895,6 +943,86 @@ static const VariantRecord* next_variant(
     return &rare_record;
 }
 
+static void mark_blocks_holding_variants(
+    const std::string& in_prefix,
+    const Region& region,
+    SiteList& extract_sites,
+    SiteList& exclude_sites,
+    const std::vector<AncBlockRecord>& blocks,
+    const std::unordered_map<uint32_t, size_t>& block_index_by_old_id,
+    const BlockIndex& block_index,
+    std::vector<char>& holds_variant
+) {
+    holds_variant.assign(blocks.size(), 0);
+
+    const std::string common_mks_path = in_prefix + ".common.variant.mks";
+    const std::string rare_mks_path = in_prefix + ".rare.variant.mks";
+    FILE* common_mks = open_file_or_die(common_mks_path, "rb");
+    FILE* rare_mks = open_file_or_die(rare_mks_path, "rb");
+    const char common_mks_magic[8] = {'T', 'R', 'C', 'M', 'M', 'K', 'S', '1'};
+    const char rare_mks_magic[8] = {'T', 'R', 'R', 'A', 'M', 'K', 'S', '1'};
+    read_magic(common_mks, common_mks_path, common_mks_magic);
+    read_magic(rare_mks, rare_mks_path, rare_mks_magic);
+
+    bool have_common = false;
+    bool have_rare = false;
+    VariantRecord common_record;
+    VariantRecord rare_record;
+
+    while (true) {
+        const VariantRecord* next = next_variant(
+            common_mks, common_mks_path, rare_mks, rare_mks_path,
+            have_common, have_rare, common_record, rare_record);
+        if (!next) break;
+        const VariantRecord& record = *next;
+        if (!in_region(record.chr, record.pos, region)) continue;
+        if (extract_sites.active() &&
+            !extract_sites.matches(record.chr, record.pos, record.ref, record.alt)) {
+            continue;
+        }
+        if (exclude_sites.active() &&
+            exclude_sites.matches(record.chr, record.pos, record.ref, record.alt)) {
+            continue;
+        }
+
+        // A common variant names its block; a rare one is placed by position.
+        size_t index = BlockIndex::kNone;
+        if (record.common) {
+            auto found = block_index_by_old_id.find(record.block_id);
+            if (found != block_index_by_old_id.end()) index = found->second;
+        } else {
+            index = block_index.find(record.chr, record.pos);
+        }
+        if (index != BlockIndex::kNone) holds_variant[index] = 1;
+    }
+
+    extract_sites.finish_coordinate();
+    exclude_sites.finish_coordinate();
+    std::fclose(common_mks);
+    std::fclose(rare_mks);
+}
+
+// Keeps the blocks that hold at least one retained variant, in file order, and
+// numbers them. Dropping the rest is what makes an extract look like one: a
+// block covering a stretch the output has no variant in would otherwise claim
+// ancestry for data that is no longer there.
+static void keep_blocks_holding_variants(
+    std::vector<AncBlockRecord>& blocks,
+    const std::vector<char>& holds_variant,
+    std::unordered_map<uint32_t, uint32_t>& block_id_map
+) {
+    size_t write_i = 0;
+    for (size_t read_i = 0; read_i < blocks.size(); ++read_i) {
+        if (!holds_variant[read_i]) continue;
+        AncBlockRecord block = blocks[read_i];
+        block.new_block_id = static_cast<uint32_t>(write_i);
+        block_id_map[block.old_block_id] = block.new_block_id;
+        blocks[write_i] = block;
+        ++write_i;
+    }
+    blocks.resize(write_i);
+}
+
 static void write_selected_variants(
     const std::string& in_prefix,
     const std::string& out_prefix,
@@ -903,7 +1031,7 @@ static void write_selected_variants(
     SiteList& extract_sites,
     SiteList& exclude_sites,
     const std::unordered_map<uint32_t, uint32_t>& block_id_map,
-    const std::vector<AncBlockRecord>& selected_blocks,
+    const BlockIndex& block_index,
     uint64_t& common_written,
     uint64_t& rare_written,
     uint64_t& total_written
@@ -1014,7 +1142,7 @@ static void write_selected_variants(
 
             ++common_written;
         } else {
-            if (!ancestry_blocks_cover_position(selected_blocks, record.chr, record.pos)) {
+            if (block_index.find(record.chr, record.pos) == BlockIndex::kNone) {
                 die(
                     "rare variant %s:%lld is not covered by any selected ancestry block",
                     record.chr.c_str(),
@@ -1154,8 +1282,23 @@ int main(int argc, char** argv) {
     copy_text_file(in_prefix + ".samples", out_prefix + ".samples");
 
     std::vector<AncBlockRecord> selected_blocks;
+    std::unordered_map<uint32_t, size_t> block_index_by_old_id;
+    read_selected_anc_blocks(in_prefix, meta, region, selected_blocks, block_index_by_old_id);
+
+    // Which blocks survive depends on which variants survive, so the markers
+    // are read once to find out and once to write. Only the markers: the
+    // genotype and carrier payloads are touched only by the writing pass.
+    BlockIndex block_index(selected_blocks);
+    std::vector<char> holds_variant;
+    mark_blocks_holding_variants(in_prefix, region, extract_sites, exclude_sites,
+                                 selected_blocks, block_index_by_old_id, block_index,
+                                 holds_variant);
+    extract_sites.begin_pass(false);
+    exclude_sites.begin_pass(false);
+
     std::unordered_map<uint32_t, uint32_t> block_id_map;
-    read_selected_anc_blocks(in_prefix, meta, region, selected_blocks, block_id_map);
+    keep_blocks_holding_variants(selected_blocks, holds_variant, block_id_map);
+    BlockIndex kept_index(selected_blocks);
     write_selected_anc_blocks(in_prefix, out_prefix, meta, selected_blocks);
 
     uint64_t common_written = 0;
@@ -1169,7 +1312,7 @@ int main(int argc, char** argv) {
         extract_sites,
         exclude_sites,
         block_id_map,
-        selected_blocks,
+        kept_index,
         common_written,
         rare_written,
         total_written
