@@ -137,6 +137,8 @@ def build_inputs(work: pathlib.Path):
         out.write("##contig=<ID=chr2>\n")
         out.write('##FORMAT=<ID=AN1,Number=1,Type=Integer,Description="First haplotype local ancestry">\n')
         out.write('##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="Second haplotype local ancestry">\n')
+        for code in range(N_ANCESTRIES):
+            out.write(f'##ANCESTRY=<ID={code},Name=ANC{code + 1}>\n')
         out.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t")
         out.write("\t".join(samples))
         out.write("\n")
@@ -320,7 +322,10 @@ def build_spaced_indexed_vcf(bin_dir: pathlib.Path, work: pathlib.Path) -> pathl
         "##contig=<ID=chr7>\n"
         '##FORMAT=<ID=AN1,Number=1,Type=Integer,Description="First ancestry">\n'
         '##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="Second ancestry">\n'
-        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1\n"
+        # This fixture only ever uses codes 0 and 1, and the compat call below
+        # passes 2, so the header has to agree with both.
+        + "".join(f'##ANCESTRY=<ID={code},Name=ANC{code + 1}>\n' for code in range(2))
+        + "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1\n"
         "chr7\t16000000\t.\tA\tT\t.\tPASS\t.\tAN1:AN2\t0:1\n"
     )
     prefix = work / "spaced"
@@ -801,8 +806,6 @@ def build_with_cli(
             str(genotype_path),
             "--flare-vcf",
             str(flare_path),
-            "--n-ancestries",
-            str(N_ANCESTRIES),
             *extra,
             "--export-felixla",
             "--out",
@@ -834,6 +837,8 @@ def check_int16_gt_encoding(bin_dir: pathlib.Path, work: pathlib.Path) -> None:
         out.write("##fileformat=VCFv4.2\n##contig=<ID=chr1>\n")
         out.write('##FORMAT=<ID=AN1,Number=1,Type=Integer,Description="First ancestry">\n')
         out.write('##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="Second ancestry">\n')
+        for code in range(N_ANCESTRIES):
+            out.write(f'##ANCESTRY=<ID={code},Name=ANC{code + 1}>\n')
         out.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t")
         out.write("\t".join(samples) + "\n")
         out.write("chr1\t100\t.\tA\tC\t.\tPASS\t.\tAN1:AN2\t0:1\t1:2\t2:0\n")
@@ -876,6 +881,8 @@ def check_duplicate_flare_coordinate(bin_dir: pathlib.Path, work: pathlib.Path) 
         out.write("##fileformat=VCFv4.2\n##contig=<ID=chr1>\n")
         out.write('##FORMAT=<ID=AN1,Number=1,Type=Integer,Description="First ancestry">\n')
         out.write('##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="Second ancestry">\n')
+        for code in range(N_ANCESTRIES):
+            out.write(f'##ANCESTRY=<ID={code},Name=ANC{code + 1}>\n')
         out.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t")
         out.write("\t".join(samples) + "\n")
         out.write("chr1\t100\t.\tA\tC\t.\tPASS\t.\tAN1:AN2\t0:1\t1:2\n")
@@ -928,6 +935,8 @@ def check_padded_multiallelic_extract(bin_dir: pathlib.Path, work: pathlib.Path)
         out.write("##fileformat=VCFv4.2\n##contig=<ID=chr19>\n")
         out.write('##FORMAT=<ID=AN1,Number=1,Type=Integer,Description="First ancestry">\n')
         out.write('##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="Second ancestry">\n')
+        for code in range(N_ANCESTRIES):
+            out.write(f'##ANCESTRY=<ID={code},Name=ANC{code + 1}>\n')
         out.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t")
         out.write("\t".join(samples) + "\n")
         out.write("chr19\t40176167\t.\tA\tC\t.\tPASS\t.\tAN1:AN2\t0:1\t1:2\t2:0\t0:2\n")
@@ -1165,8 +1174,6 @@ def check_indexed_and_large_extract_bed(
             str(indexed_genotype),
             "--flare-vcf",
             str(flare_path),
-            "--n-ancestries",
-            str(N_ANCESTRIES),
             "--extract-bed",
             str(sparse_bed),
             "--export-felixla",
@@ -1201,8 +1208,6 @@ def check_indexed_and_large_extract_bed(
             str(indexed_genotype),
             "--flare-vcf",
             str(flare_path),
-            "--n-ancestries",
-            str(N_ANCESTRIES),
             "--extract-bed",
             str(large_bed),
             "--export-felixla",
@@ -1451,8 +1456,6 @@ def main() -> int:
                 str(legacy_vcf),
                 "--flare-vcf",
                 str(flare_path),
-                "--n-ancestries",
-                str(N_ANCESTRIES),
                 "--extract",
                 str(indexed_extract_pvar),
                 "--export-felixla",
@@ -1569,8 +1572,6 @@ def main() -> int:
             str(genotype_path),
             "--flare-vcf",
             str(flare_path),
-            "--n-ancestries",
-            str(N_ANCESTRIES),
             "--export-felixla",
             "--out",
         ]
@@ -1596,8 +1597,6 @@ def main() -> int:
                 str(extra_genotype_sample),
                 "--flare-vcf",
                 str(flare_path),
-                "--n-ancestries",
-                str(N_ANCESTRIES),
                 "--export-felixla",
                 "--out",
                 str(work / "bad.extra_genotype_sample.out"),
@@ -1618,8 +1617,6 @@ def main() -> int:
                 str(genotype_path),
                 "--flare-vcf",
                 str(extra_flare_sample),
-                "--n-ancestries",
-                str(N_ANCESTRIES),
                 "--export-felixla",
                 "--out",
                 str(work / "bad.extra_flare_sample.out"),

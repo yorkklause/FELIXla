@@ -3706,22 +3706,38 @@ static void apply_contig_selection(
 // have to be represented as something it is not. Local ancestry on the sex
 // chromosomes is unsettled besides. Refusing the contig outright beats
 // surfacing this later as a confusing "expected diploid GT" on one record.
-static bool is_sex_contig(const char* chr) {
-    if (!chr) return false;
+// FELIXla packs autosomes only. The sex chromosomes cannot be represented at
+// all -- the format gives every sample exactly two haplotypes -- and the rest,
+// from the mitochondrion to unplaced scaffolds and the ALT contigs, are either
+// haploid, not diploid in the usual sense, or not something local ancestry is
+// called on. Refusing them by name beats packing a prefix whose ancestry
+// blocks mean nothing.
+static bool is_autosome_name(const char* chr) {
+    if (!chr || !*chr) return false;
     const char* name = chr;
-    if (std::strncmp(name, "chr", 3) == 0 || std::strncmp(name, "CHR", 3) == 0) {
+    if (std::strncmp(name, "chr", 3) == 0 || std::strncmp(name, "CHR", 3) == 0 ||
+        std::strncmp(name, "Chr", 3) == 0) {
         name += 3;
     }
-    return (name[0] == 'X' || name[0] == 'x' || name[0] == 'Y' || name[0] == 'y') &&
-           name[1] == '\0';
+    if (!*name) return false;
+    int value = 0;
+    for (const char* c = name; *c; ++c) {
+        if (*c < '0' || *c > '9') return false;
+        // Stop well before the bound so a long digit string cannot overflow,
+        // while leaving the bound itself stated once, below.
+        if (value > 1000) return false;
+        value = value * 10 + (*c - '0');
+    }
+    return value >= 1 && value <= 22;
 }
 
-static void reject_sex_contig(const char* chr) {
-    if (!is_sex_contig(chr)) return;
+static void reject_non_autosome(const char* chr) {
+    if (is_autosome_name(chr)) return;
     die(
-        "contig %s is not supported: the packed format stores two haplotypes "
-        "per sample, so haploid sex-chromosome genotypes cannot be represented. "
-        "Select the autosomes explicitly, for example --chr 1-22",
+        "contig %s is not supported: FELIXla packs autosomes 1-22 only. The "
+        "packed format stores two haplotypes per sample, so a haploid contig "
+        "cannot be represented, and local ancestry is not called on the "
+        "others. Select the autosomes explicitly, for example --chr 1-22",
         chr
     );
 }
@@ -4825,7 +4841,9 @@ int main(int argc, char** argv) {
     } else if (n_ancestries <= 0) {
         die("FLARE VCF header has no ##ANCESTRY lines, so the ancestry count "
             "cannot be determined; counting labels in the data would be wrong "
-            "for a region that contains no carrier of some ancestry");
+            "for a region that contains no carrier of some ancestry. Add one "
+            "##ANCESTRY=<ID=k,Name=NAME> line per ancestry, numbered from "
+            "zero, to the FLARE header");
     }
     if (n_ancestries <= 0 || n_ancestries > 32) {
         die("ancestry count must be in [1, 32], got %d", n_ancestries);
@@ -5788,7 +5806,7 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        reject_sex_contig(g_chr);
+        reject_non_autosome(g_chr);
 
         const char* raw_id = g_raw_id;
         if (!extract_sites.active) {

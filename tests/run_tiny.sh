@@ -147,7 +147,6 @@ grep -q "FELIXla CLI v0" "$OUT_DIR/felixla.version.txt"
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   --flare-vcf \
   "$ROOT_DIR/testdata/tiny.flare.vcf" \
-  --n-ancestries 2 \
   --export-felixla \
   --out \
   "$OUT_DIR/tiny.felixla_cli" >/dev/null
@@ -194,7 +193,6 @@ PY
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   --flare-vcf \
   "$ROOT_DIR/testdata/tiny.flare.vcf" \
-  --n-ancestries 2 \
   --keep "$OUT_DIR/keep.samples" \
   --extract "$OUT_DIR/extract.sites.vcf.gz" \
   --export-felixla \
@@ -247,8 +245,7 @@ if [[ -n "$BGZIP_BIN" && -n "$TABIX_BIN" ]]; then
   "$BIN_DIR/felixla" \
     --phase-vcf "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
     --flare-vcf "$ROOT_DIR/testdata/tiny.flare.region_seek.vcf" \
-    --n-ancestries 2 \
-    --region chr1:150-161 \
+      --region chr1:150-161 \
     --extract "$OUT_DIR/extract.sites.vcf" \
     --export-felixla \
     --out "$OUT_DIR/tiny.region_seek.sequential" \
@@ -257,8 +254,7 @@ if [[ -n "$BGZIP_BIN" && -n "$TABIX_BIN" ]]; then
   "$BIN_DIR/felixla" \
     --phase-vcf "$OUT_DIR/tiny.region_seek.genotypes.vcf.gz" \
     --flare-vcf "$OUT_DIR/tiny.region_seek.flare.vcf.gz" \
-    --n-ancestries 2 \
-    --region chr1:150-161 \
+      --region chr1:150-161 \
     --extract "$OUT_DIR/extract.sites.vcf" \
     --export-felixla \
     --out "$OUT_DIR/tiny.region_seek.indexed" \
@@ -282,8 +278,7 @@ EOF
   "$BIN_DIR/felixla" \
     --phase-vcf "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
     --flare-vcf "$ROOT_DIR/testdata/tiny.flare.region_seek.vcf" \
-    --n-ancestries 2 \
-    --region chr1:250-251 \
+      --region chr1:250-251 \
     --extract "$OUT_DIR/region_tail.extract.pvar" \
     --export-felixla \
     --out "$OUT_DIR/tiny.region_tail.sequential" \
@@ -292,8 +287,7 @@ EOF
   "$BIN_DIR/felixla" \
     --phase-vcf "$OUT_DIR/tiny.region_seek.genotypes.vcf.gz" \
     --flare-vcf "$OUT_DIR/tiny.region_seek.flare.vcf.gz" \
-    --n-ancestries 2 \
-    --region chr1:250-251 \
+      --region chr1:250-251 \
     --extract "$OUT_DIR/region_tail.extract.pvar" \
     --export-felixla \
     --out "$OUT_DIR/tiny.region_tail.indexed" \
@@ -322,7 +316,6 @@ if "$BIN_DIR/felixla" \
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   --flare-vcf \
   "$ROOT_DIR/testdata/tiny.flare.vcf" \
-  --n-ancestries 2 \
   --extract "$OUT_DIR/extract.bad_ref.vcf" \
   --export-felixla \
   --out \
@@ -454,7 +447,6 @@ ROUNDTRIP_NO_CONTIG_REGION
   "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
   --rfmix-msp \
   "$ROOT_DIR/testdata/tiny.rfmix.msp.tsv" \
-  --n-ancestries 2 \
   --export-felixla \
   --out \
   "$OUT_DIR/rfmix" >/dev/null
@@ -479,7 +471,6 @@ ROUNDTRIP_RFMIX
 "$BIN_DIR/felixla" \
   --tractor-dosage-vcf \
   "$ROOT_DIR/testdata/tiny.tractor_dosage.vcf" \
-  --n-ancestries 2 \
   --export-felixla \
   --out \
   "$OUT_DIR/dosage" >/dev/null
@@ -1366,63 +1357,77 @@ for malformed in rs12345 chr1:100 chr1:100:A chr1:100::T; do
 done
 
 
-# The separators inside a contig name are not field separators. This is the
-# case the right-to-left split exists for, and the only one that distinguishes
-# it from splitting four fields off the front.
-cat >"$OUT_DIR/hla.vcf" <<'HLA_GENO'
-##fileformat=VCFv4.2
-##contig=<ID=HLA-A,length=10000>
-##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
-#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	s1	s2
-HLA-A	100	.	A	T	.	PASS	.	GT	0|1	1|0
-HLA-A	200	.	G	C	.	PASS	.	GT	1|0	0|1
-HLA_GENO
+# The separators inside a contig name are not field separators. FELIXla packs
+# autosomes only, so such a name never reaches the packed data, but it can
+# still appear in a site list -- and the right-to-left split is what keeps the
+# list readable instead of fatal. Splitting from the left would read
+# HLA-A-100-A-T as position "A-T" and die on the whole file, taking the chr1
+# entry with it.
+cat >"$OUT_DIR/ids_contig_sep.txt" <<'IDS_CONTIG_SEP'
+chr1-100-A-T
+HLA-A-100-A-T
+IDS_CONTIG_SEP
 
-cat >"$OUT_DIR/hla.flare.vcf" <<'HLA_FLARE'
-##fileformat=VCFv4.2
-##contig=<ID=HLA-A,length=10000>
-##FORMAT=<ID=AN1,Number=1,Type=Integer,Description="First">
-##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="Second">
-##ANCESTRY=<ID=0,Name=AFR>
-##ANCESTRY=<ID=1,Name=EUR>
-#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	s1	s2
-HLA-A	100	.	A	C	.	PASS	.	AN1:AN2	0:1	1:0
-HLA-A	200	.	A	C	.	PASS	.	AN1:AN2	0:1	1:0
-HLA_FLARE
-
-"$BIN_DIR/felixla" --phase-vcf "$OUT_DIR/hla.vcf" \
-  --flare-vcf "$OUT_DIR/hla.flare.vcf" \
-  --export-felixla --out "$OUT_DIR/hla" >/dev/null
-
-printf 'HLA-A-100-A-T\n' >"$OUT_DIR/hla_id.txt"
-"$BIN_DIR/felixla" --felixla "$OUT_DIR/hla" --extract "$OUT_DIR/hla_id.txt" \
-  --export-felixla --out "$OUT_DIR/hla_by_id" >/dev/null
-"$BIN_DIR/felixla" --felixla "$OUT_DIR/hla_by_id" --export-vcf \
-  --out "$OUT_DIR/hla_by_id" >/dev/null 2>&1
-python3 - "$OUT_DIR/hla_by_id.vcf.gz" <<'HLA_ID_CHECK'
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/boundary" --extract "$OUT_DIR/ids_contig_sep.txt" \
+  --export-felixla --out "$OUT_DIR/ids_contig_sep" >/dev/null
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/ids_contig_sep" --export-vcf \
+  --out "$OUT_DIR/ids_contig_sep" >/dev/null 2>&1
+python3 - "$OUT_DIR/ids_contig_sep.vcf.gz" <<'IDS_CONTIG_SEP_CHECK'
 import gzip
 import sys
 
 with gzip.open(sys.argv[1], "rt") as handle:
     rows = [line.split("\t") for line in handle if not line.startswith("#")]
-# Splitting from the left would take "HLA" as the contig and "A" as the
-# position, and select nothing.
-assert [(row[0], row[1], row[3], row[4]) for row in rows] == \
-    [("HLA-A", "100", "A", "T")], rows
-HLA_ID_CHECK
+# The chr1 entry is selected and the HLA-A one names a contig the prefix does
+# not have, so it is simply inert.
+assert [(row[0], row[1]) for row in rows] == [("chr1", 100)][:1] or \
+    [(row[0], int(row[1])) for row in rows] == [("chr1", 100)], rows
+IDS_CONTIG_SEP_CHECK
 
-# Packing with the same ID must agree, so both parsers split the same way.
-"$BIN_DIR/felixla" --phase-vcf "$OUT_DIR/hla.vcf" \
-  --flare-vcf "$OUT_DIR/hla.flare.vcf" \
-  --extract "$OUT_DIR/hla_id.txt" \
-  --export-felixla --out "$OUT_DIR/hla_packed" >/dev/null
+# Packing with the same list must read it the same way.
+"$BIN_DIR/felixla" --phase-vcf "$OUT_DIR/boundary.vcf" \
+  --flare-vcf "$OUT_DIR/boundary.flare.vcf" \
+  --extract "$OUT_DIR/ids_contig_sep.txt" \
+  --export-felixla --out "$OUT_DIR/ids_contig_sep_packed" >/dev/null
 for component in common.geno.bin common.variant.mks common.variant.idx \
                  rare.carrier.bin rare.variant.mks rare.variant.idx \
                  ancblock.bin ancblock.mks ancblock.idx samples; do
-  if ! cmp -s "$OUT_DIR/hla_packed.$component" "$OUT_DIR/hla_by_id.$component"; then
+  if ! cmp -s "$OUT_DIR/ids_contig_sep_packed.$component" "$OUT_DIR/ids_contig_sep.$component"; then
     echo "a contig name containing a separator differs between the two routes: $component" >&2
     exit 1
   fi
 done
+
+# Only the autosomes are supported, and a contig outside 1-22 is refused by
+# name rather than packed into a prefix whose ancestry blocks mean nothing.
+for refused in chrX chrM chr23 chrUn_GL000220v1; do
+  sed -e "s/^chr1\t/$refused\t/" -e "s/ID=chr1/ID=$refused/" \
+    "$OUT_DIR/boundary.vcf" >"$OUT_DIR/refused.vcf"
+  sed -e "s/^chr1\t/$refused\t/" -e "s/ID=chr1/ID=$refused/" \
+    "$OUT_DIR/boundary.flare.vcf" >"$OUT_DIR/refused.flare.vcf"
+  if "$BIN_DIR/felixla" --phase-vcf "$OUT_DIR/refused.vcf" \
+       --flare-vcf "$OUT_DIR/refused.flare.vcf" \
+       --export-felixla --out "$OUT_DIR/refused" \
+       >/dev/null 2>"$OUT_DIR/refused.err"; then
+    echo "contig $refused was packed, but only autosomes are supported" >&2
+    exit 1
+  fi
+  grep -q "is not supported" "$OUT_DIR/refused.err"
+done
+
+# chr22 is an autosome and packs.
+sed -e "s/^chr1\t/chr22\t/" -e "s/ID=chr1/ID=chr22/" "$OUT_DIR/boundary.vcf" >"$OUT_DIR/chr22.vcf"
+sed -e "s/^chr1\t/chr22\t/" -e "s/ID=chr1/ID=chr22/" "$OUT_DIR/boundary.flare.vcf" >"$OUT_DIR/chr22.flare.vcf"
+"$BIN_DIR/felixla" --phase-vcf "$OUT_DIR/chr22.vcf" --flare-vcf "$OUT_DIR/chr22.flare.vcf" \
+  --export-felixla --out "$OUT_DIR/chr22" >/dev/null
+
+# --n-ancestries is gone; the count comes from the input header.
+if "$BIN_DIR/felixla" --phase-vcf "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
+     --flare-vcf "$ROOT_DIR/testdata/tiny.flare.vcf" --n-ancestries 2 \
+     --export-felixla --out "$OUT_DIR/nanc" >/dev/null 2>"$OUT_DIR/nanc.err"; then
+  echo "--n-ancestries was accepted after removal" >&2
+  exit 1
+fi
+grep -q "has been removed" "$OUT_DIR/nanc.err"
 
 echo "tiny smoke test passed"

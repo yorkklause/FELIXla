@@ -72,7 +72,6 @@ Filters:
   --anc-mac INT / --anc-maf F   Same, required of at least one ancestry alone.
 
 Other:
-  --n-ancestries INT            Optional; otherwise taken from the input header.
   --threads INT                 BGZF threads for --flare-vcf packing and
                                 --export-lai. Default: 1.
   --version, --help
@@ -183,7 +182,6 @@ struct PlinkArgs {
     std::string mac, maf, anc_mac, anc_maf;
 
     // Other
-    std::string n_ancestries;
     std::string threads;
 };
 
@@ -251,8 +249,6 @@ PlinkArgs parse_plink_args(int argc, char** argv) {
             args.anc_maf = require_value(i, argc, argv, arg);
 
         // Other
-        } else if (arg == "--n-ancestries") {
-            args.n_ancestries = require_value(i, argc, argv, arg);
         } else if (arg == "--threads") {
             args.threads = require_value(i, argc, argv, arg);
 
@@ -271,8 +267,11 @@ PlinkArgs parse_plink_args(int argc, char** argv) {
             die("--lai-vcf is now --flare-vcf");
         } else if (arg == "--tractor-hybrid") {
             die("--tractor-hybrid is now --felixla");
-        } else if (arg == "--n-ancestry" || arg == "--ancestries") {
-            die(arg + " is now --n-ancestries");
+        } else if (arg == "--n-ancestries" || arg == "--n-ancestry" ||
+                   arg == "--ancestries") {
+            die(arg + " has been removed: the ancestry count comes from the "
+                      "input header, which is the only place it can be right "
+                      "for every region of a chromosome");
         } else if (arg == "--mac-threshold" || arg == "--recommend-mac-threshold" ||
                    arg == "--choose-mac-threshold" || arg == "--n-samples") {
             die(arg + " has been removed: the sparse/dense threshold is always "
@@ -350,7 +349,7 @@ int run_plink_style(int argc, char** argv) {
                 "flare_subset_to_tractor_hybrid",
                 args.phase_vcf,
                 args.flare_vcf,
-                args.n_ancestries.empty() ? "auto" : args.n_ancestries,
+                "auto",
                 "auto",
                 args.out_path
             };
@@ -381,13 +380,13 @@ int run_plink_style(int argc, char** argv) {
             }
             return run_tool(felixla_rfmix_main, {
                 "rfmix_msp_to_tractor_hybrid", args.phase_vcf, args.rfmix_msp,
-                args.n_ancestries.empty() ? "auto" : args.n_ancestries,
+                "auto",
                 "auto", args.out_path});
         }
         if (from_dosage) {
             return run_tool(felixla_dosage_main, {
                 "tractor_dosage_vcf_to_hybrid", args.tractor_dosage_vcf,
-                args.n_ancestries.empty() ? "auto" : args.n_ancestries,
+                "auto",
                 "auto", args.out_path});
         }
         // From an existing prefix: select a region, a set of alleles, or both.

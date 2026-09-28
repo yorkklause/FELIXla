@@ -76,6 +76,8 @@ def write_fixture(directory, rng, n_samples, n_records, n_ancestries, layout,
         out.write('##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">\n')
         out.write('##FORMAT=<ID=AN1,Number=1,Type=Integer,Description="a1">\n')
         out.write('##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="a2">\n')
+        for code in range(n_ancestries):
+            out.write(f'##ANCESTRY=<ID={code},Name=ANC{code + 1}>\n')
         out.write('##FORMAT=<ID=ANP1,Number=1,Type=Float,Description="p1">\n')
         out.write('##FORMAT=<ID=ANP2,Number=1,Type=Float,Description="p2">\n')
         out.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t"
@@ -112,7 +114,6 @@ def pack(felixla, genotype, flare, n_ancestries, prefix, keep, scalar_paths):
     command = [str(felixla),
                "--phase-vcf", str(genotype),
                "--flare-vcf", str(flare),
-               "--n-ancestries", str(n_ancestries),
                "--export-felixla",
                "--out", str(prefix)]
     if keep:

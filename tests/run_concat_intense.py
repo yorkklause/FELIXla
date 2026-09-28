@@ -64,8 +64,6 @@ def build_prefix(
         str(genotype),
         "--flare-vcf",
         str(flare),
-        "--n-ancestries",
-        "3",
         "--export-felixla",
         "--out",
         str(out),

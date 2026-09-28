@@ -445,6 +445,42 @@ static void write_anc_mks_record(
     write_u64_le(fp, anc_offset, "ancestry mks offset");
 }
 
+// FELIXla packs autosomes only. The sex chromosomes cannot be represented at
+// all -- the format gives every sample exactly two haplotypes -- and the rest,
+// from the mitochondrion to unplaced scaffolds and the ALT contigs, are either
+// haploid, not diploid in the usual sense, or not something local ancestry is
+// called on. Refusing them by name beats packing a prefix whose ancestry
+// blocks mean nothing.
+static bool is_autosome_name(const char* chr) {
+    if (!chr || !*chr) return false;
+    const char* name = chr;
+    if (std::strncmp(name, "chr", 3) == 0 || std::strncmp(name, "CHR", 3) == 0 ||
+        std::strncmp(name, "Chr", 3) == 0) {
+        name += 3;
+    }
+    if (!*name) return false;
+    int value = 0;
+    for (const char* c = name; *c; ++c) {
+        if (*c < '0' || *c > '9') return false;
+        // Stop well before the bound so a long digit string cannot overflow,
+        // while leaving the bound itself stated once, below.
+        if (value > 1000) return false;
+        value = value * 10 + (*c - '0');
+    }
+    return value >= 1 && value <= 22;
+}
+
+static void reject_non_autosome(const char* chr) {
+    if (is_autosome_name(chr)) return;
+    die(
+        "contig %s is not supported: FELIXla packs autosomes 1-22 only. The "
+        "packed format stores two haplotypes per sample, so a haploid contig "
+        "cannot be represented, and local ancestry is not called on the "
+        "others. Select the autosomes explicitly, for example --chr 1-22",
+        chr
+    );
+}
+
 static void write_sidecars(
     bcf_hdr_t* ghdr,
     const std::string& samples_path,
@@ -1249,7 +1285,8 @@ int main(int argc, char** argv) {
     n_ancestries = msp_reader.n_ancestries();
     if (n_ancestries <= 0 || n_ancestries > 32) {
         die("ancestry count must be in [1, 32]; the MSP file has no "
-            "\"#Subpopulation order/codes:\" line to take it from");
+            "\"#Subpopulation order/codes:\" line to take it from. Add one, "
+            "for example \"#Subpopulation order/codes: AFR=0 EUR=1\"");
     }
     felixla::log_line("n_ancestries %d", n_ancestries);
 
@@ -1323,6 +1360,7 @@ int main(int argc, char** argv) {
         progress.record_scanned();
 
         const char* g_chr = bcf_hdr_id2name(ghdr, grec->rid);
+        reject_non_autosome(g_chr);
         int64_t g_pos = static_cast<int64_t>(grec->pos) + 1;
 
         while (has_msp_record) {

@@ -108,7 +108,7 @@ Output      --out                        the output path, always required
 
 Parameters  --keep --extract --exclude --extract-bed --exclude-bed
             --chr --region --mac --maf --anc-mac --anc-maf
-            --n-ancestries --threads --version --help
+            --threads --version --help
 ```
 
 A typical conversion:
@@ -220,11 +220,14 @@ exported VCF, not an identity FELIXla matches on.
 
 - **`--phase-vcf PATH`** -- a phased diploid genotype VCF/BCF, given together
   with `--flare-vcf` or `--rfmix-msp`. Genotypes must be phased, diploid, and
-  non-missing. The sex chromosomes are not supported: the packed format gives
-  every sample exactly two haplotypes, so haploid genotypes cannot be
-  represented, and a record on `X` or `Y` is refused with that explanation.
-  Select the autosomes explicitly, for example `--chr 1-22`. Multi-allelic
-  records are split logically by ALT allele.
+  non-missing. **Only the autosomes, 1 through 22, are supported**, spelled
+  with or without the `chr` prefix. A record on any other contig -- a sex
+  chromosome, the mitochondrion, an unplaced scaffold, an ALT contig -- is
+  refused by name. The packed format gives every sample exactly two
+  haplotypes, so a haploid contig cannot be represented at all, and local
+  ancestry is not called on the rest; packing them would produce a prefix
+  whose ancestry blocks mean nothing. Select a subset explicitly with `--chr`.
+  Multi-allelic records are split logically by ALT allele.
 
 - **`--flare-vcf PATH`** -- a FLARE local ancestry VCF/BCF. It must carry
   scalar integer `FORMAT/AN1` and `FORMAT/AN2` fields encoded as
@@ -252,6 +255,24 @@ exported VCF, not an identity FELIXla matches on.
 - **`--merge-list FILE`** -- a file of prefixes to concatenate in genomic
   order, one per line, or two tab-separated columns to take a different BED
   from each. See [Concatenating chunks](#concatenating-chunks).
+
+#### Where the ancestry count comes from
+
+There is no flag for it. FELIXla takes the number of ancestries from the
+header of whichever input defines it: FLARE's `##ANCESTRY` lines, RFMix's
+`#Subpopulation order/codes:` line, or the `DS#`/`ANC#` `FORMAT` declarations
+of a TRACTOR dosage VCF. An input whose header declares none is refused, with
+the line it needs spelled out in the message.
+
+Counting the labels present in the data instead would be wrong, and wrong in a
+way that only shows up late: a region that happens to carry no haplotype of
+some ancestry would come out with a smaller count than its neighbours, and the
+two prefixes could then not be concatenated. The header is the only place the
+answer is the same for every region of a chromosome.
+
+Where an input also names its ancestries, the names are kept in
+`<prefix>.meta` and label the columns of the ancestry exports. The packed
+format stores ancestry codes in 5 bits, so at most 32 are supported.
 
 #### What FELIXla assumes about its inputs
 
@@ -551,18 +572,6 @@ already packed.
 
 #### Other
 
-- **`--n-ancestries INT`** -- number of local ancestry labels. The packed format
-  stores ancestry codes in 5 bits, so at most 32 labels are supported. It is
-  normally omitted: FELIXla takes the count from the header of whichever input
-  defines it -- FLARE's `##ANCESTRY` lines, RFMix's `#Subpopulation
-  order/codes:` line, or the `DS#`/`ANC#` `FORMAT` declarations of a TRACTOR
-  dosage VCF -- and refuses the run if a value given here disagrees. Taking it
-  from the data instead would be wrong: a region that happens to carry no
-  haplotype of some ancestry would come out with a smaller count than its
-  neighbours, and the two prefixes could then not be concatenated. When an
-  input names its ancestries, the names are kept in `<prefix>.meta` and label
-  the columns of the ancestry exports.
-
 - **`--threads INT`** -- number of BGZF decompression threads shared by the
   genotype and FLARE readers. Default is `1`, which keeps one conversion in one
   core. Decompression is the largest single cost when both inputs are
@@ -668,8 +677,9 @@ desired length is not an integer number of decimal megabases.
 The manifest contains one row per task with global and per-contig chunk IDs,
 `CHROM`, half-open start/end matching the region text, conservative
 index-derived contig bounds, and the indexed record count. `--chrom` may be
-repeated to select contigs. The compatibility columns `contig_first_pos` and `contig_last_pos`
-therefore contain aligned index bounds, not exact VCF record positions.
+repeated to select contigs. The compatibility columns `contig_first_pos` and
+`contig_last_pos` therefore contain aligned index bounds, not exact VCF record
+positions.
 
 An optional command template writes a separate one-command-per-line file that
 can be consumed by a scheduler or another parallel runner:
