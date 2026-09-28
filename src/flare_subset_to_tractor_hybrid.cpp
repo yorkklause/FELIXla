@@ -768,11 +768,6 @@ static bool next_text_field(
     return true;
 }
 
-static bool text_field_equals(const TextFieldView& field, const std::string& value) {
-    return field.length == value.size() &&
-           std::memcmp(field.data, value.data(), field.length) == 0;
-}
-
 static bool text_field_equals(const TextFieldView& field, const char* value) {
     size_t value_length = std::strlen(value);
     return field.length == value_length &&
@@ -936,6 +931,44 @@ static BedIntervals load_bed_intervals(
     return bed;
 }
 
+// resolve_contig_token gives a name the benefit of the chr prefix by asking a
+// header. This is the same tolerance for the places that compare two names to
+// each other with no header in hand.
+static bool contig_names_match(std::string_view a, std::string_view b) {
+    if (a == b) return true;
+    auto without_prefix = [](std::string_view name) {
+        return name.size() > 3 && name.compare(0, 3, "chr") == 0 ? name.substr(3) : name;
+    };
+    return without_prefix(a) == without_prefix(b);
+}
+
+// A one-column line is a gnomAD-style variant ID: CHROM, POS, REF and ALT
+// joined by ':' or '-'. The line is split from the right, three separators
+// back, because REF and ALT never contain one but a contig name can --
+// HLA-A*01:01-100-A-T has to come apart as HLA-A*01:01 / 100 / A / T.
+static bool split_variant_id(const char* line, size_t length, TextFieldView* fields) {
+    size_t cut[3];
+    size_t found = 0;
+    for (size_t i = length; i-- > 0 && found < 3;) {
+        if (line[i] == ':' || line[i] == '-') cut[found++] = i;
+    }
+    if (found < 3) return false;
+
+    size_t alt_start = cut[0] + 1;
+    size_t ref_start = cut[1] + 1;
+    size_t pos_start = cut[2] + 1;
+    if (cut[0] == length - 1 || cut[1] + 1 == cut[0] || cut[2] + 1 == cut[1] || cut[2] == 0) {
+        return false;
+    }
+
+    fields[0] = TextFieldView{line, cut[2]};
+    fields[1] = TextFieldView{line + pos_start, cut[1] - pos_start};
+    fields[2] = TextFieldView{line, 0};
+    fields[3] = TextFieldView{line + ref_start, cut[0] - ref_start};
+    fields[4] = TextFieldView{line + alt_start, length - alt_start};
+    return true;
+}
+
 static uint32_t intern_extract_contig(ExtractSites& sites, std::string chr) {
     auto found = sites.contig_ids.find(chr);
     if (found != sites.contig_ids.end()) return found->second;
@@ -985,15 +1018,24 @@ static ExtractSites load_extract_sites(
         const char* end = line + line_length;
         TextFieldView fields[5];
         bool complete = true;
-        for (TextFieldView& field : fields) {
-            if (!next_text_field(cursor, end, field)) {
-                complete = false;
-                break;
+        if (std::memchr(line, '\t', line_length) == nullptr) {
+            complete = split_variant_id(line, line_length, fields);
+            if (!complete) {
+                die("%s expects PVAR/VCF columns CHROM POS ID REF ALT, or a "
+                    "CHROM:POS:REF:ALT variant ID, at %s:%llu",
+                    flag, path.c_str(), static_cast<unsigned long long>(line_no));
             }
-        }
-        if (!complete) {
-            die("%s expects PVAR/VCF columns CHROM POS ID REF ALT at %s:%llu",
-                flag, path.c_str(), static_cast<unsigned long long>(line_no));
+        } else {
+            for (TextFieldView& field : fields) {
+                if (!next_text_field(cursor, end, field)) {
+                    complete = false;
+                    break;
+                }
+            }
+            if (!complete) {
+                die("%s expects PVAR/VCF columns CHROM POS ID REF ALT at %s:%llu",
+                    flag, path.c_str(), static_cast<unsigned long long>(line_no));
+            }
         }
         if (text_field_equals(fields[0], "CHROM") ||
             text_field_equals(fields[0], "#CHROM")) {
@@ -1012,7 +1054,8 @@ static ExtractSites load_extract_sites(
         ++sites.source_position_count;
 
         if (region.active &&
-            (!text_field_equals(fields[0], region.chr) ||
+            (!contig_names_match(std::string_view(fields[0].data, fields[0].length),
+                                 region.chr) ||
              pos < region.start || pos > region.end)) {
             continue;
         }

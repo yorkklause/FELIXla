@@ -1290,4 +1290,79 @@ cmp -s "$OUT_DIR/boundary.ancblock.bin" "$OUT_DIR/first_only.ancblock.bin"
 cmp -s "$OUT_DIR/boundary.ancblock.mks" "$OUT_DIR/first_only.ancblock.mks"
 cmp -s "$OUT_DIR/boundary.ancblock.idx" "$OUT_DIR/first_only.ancblock.idx"
 
+
+# A one-column line is a gnomAD-style variant ID. Either separator, either
+# contig spelling, and the result has to be the bytes the equivalent PVAR
+# produces -- a second way to name a variant is only worth having if it names
+# the same one.
+cat >"$OUT_DIR/ids_colon.txt" <<'IDS_COLON'
+chr1:100:A:T
+chr1:200:G:C
+IDS_COLON
+cat >"$OUT_DIR/ids_dash.txt" <<'IDS_DASH'
+1-100-A-T
+1-200-G-C
+IDS_DASH
+cat >"$OUT_DIR/ids_columns.pvar" <<'IDS_COLUMNS'
+#CHROM	POS	ID	REF	ALT
+chr1	100	.	A	T
+chr1	200	.	G	C
+IDS_COLUMNS
+
+for spelling in ids_colon.txt ids_dash.txt ids_columns.pvar; do
+  "$BIN_DIR/felixla" --felixla "$OUT_DIR/boundary" --extract "$OUT_DIR/$spelling" \
+    --export-felixla --out "$OUT_DIR/ids_${spelling%%.*}" >/dev/null
+done
+for variant in ids_colon ids_dash; do
+  for component in common.geno.bin common.variant.mks common.variant.idx \
+                   rare.carrier.bin rare.variant.mks rare.variant.idx \
+                   ancblock.bin ancblock.mks ancblock.idx samples; do
+    if ! cmp -s "$OUT_DIR/ids_ids_columns.$component" "$OUT_DIR/ids_$variant.$component"; then
+      echo "variant IDs in $variant selected something other than the PVAR: $component" >&2
+      exit 1
+    fi
+  done
+done
+
+# The same list has to mean the same thing while packing.
+"$BIN_DIR/felixla" --phase-vcf "$OUT_DIR/boundary.vcf" \
+  --flare-vcf "$OUT_DIR/boundary.flare.vcf" \
+  --extract "$OUT_DIR/ids_dash.txt" \
+  --export-felixla --out "$OUT_DIR/ids_packed" >/dev/null
+for component in common.geno.bin common.variant.mks common.variant.idx \
+                 rare.carrier.bin rare.variant.mks rare.variant.idx \
+                 ancblock.bin ancblock.mks ancblock.idx samples; do
+  if ! cmp -s "$OUT_DIR/ids_packed.$component" "$OUT_DIR/ids_ids_dash.$component"; then
+    echo "a variant ID list differs between packing and prefix extract: $component" >&2
+    exit 1
+  fi
+done
+
+# An indel keeps its full alleles in an ID, and the separators inside a contig
+# name are not field separators: the split counts three from the right.
+printf 'chr1:195:ACCCCCCCCCC:A\n' >"$OUT_DIR/ids_indel.txt"
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/boundary" --extract "$OUT_DIR/ids_indel.txt" \
+  --export-felixla --out "$OUT_DIR/ids_indel" >/dev/null
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/ids_indel" --export-vcf \
+  --out "$OUT_DIR/ids_indel" >/dev/null 2>&1
+python3 - "$OUT_DIR/ids_indel.vcf.gz" <<'IDS_INDEL_CHECK'
+import gzip
+import sys
+
+with gzip.open(sys.argv[1], "rt") as handle:
+    rows = [line.split("\t") for line in handle if not line.startswith("#")]
+assert [(row[1], row[3], row[4]) for row in rows] == [("195", "ACCCCCCCCCC", "A")], rows
+IDS_INDEL_CHECK
+
+# Anything that is not four fields is refused rather than guessed at, which is
+# what keeps a file of bare rs IDs from looking like it worked.
+for malformed in rs12345 chr1:100 chr1:100:A chr1:100::T; do
+  printf '%s\n' "$malformed" >"$OUT_DIR/ids_bad.txt"
+  if "$BIN_DIR/felixla" --felixla "$OUT_DIR/boundary" --extract "$OUT_DIR/ids_bad.txt" \
+       --export-felixla --out "$OUT_DIR/ids_bad" >/dev/null 2>&1; then
+    echo "a malformed variant ID was accepted: $malformed" >&2
+    exit 1
+  fi
+done
+
 echo "tiny smoke test passed"

@@ -183,9 +183,18 @@ loses it nor writes it twice.
 out:
 
 - The `ID` column is read and ignored. A list may carry rs IDs, dots, or
-  anything else there; none of it participates in matching. A file of bare
-  variant IDs with no coordinates is rejected outright, since there is no
-  column layout under which it could be matched.
+  anything else there; none of it participates in matching.
+
+- A line with no tab is read as a **variant ID** instead: `CHROM`, `POS`,
+  `REF` and `ALT` joined by `:` or `-`, as gnomAD writes them. All of
+  `chr1:100:A:T`, `chr1-100-A-T`, `1-100-A-T` and `chr1:100-A-T` name the same
+  variant, and a file may mix them with tab-separated PVAR rows. The line is
+  split three separators from the right, so a contig name containing one --
+  `HLA-A*01:01-100-A-T` -- still comes apart correctly.
+
+  Anything that is not four fields is refused rather than guessed at, which
+  is what stops a file of bare rs IDs from running clean and selecting
+  nothing.
 
 - `REF` and `ALT` are not interchangeable. A list naming `T>A` where the
   prefix holds `A>T` is a REF mismatch, and for `--extract` that is fatal
@@ -447,6 +456,9 @@ already packed.
   them before exact allele-level filtering. Without an index, FELIXla falls
   back to a streaming scan and prints a warning.
 
+  A line with no tab is read as a `CHROM:POS:REF:ALT` variant ID; see
+  [Coordinates and identity](#coordinates-and-identity).
+
   `--extract` also selects out of an existing prefix, with
   `--felixla PREFIX --extract FILE --export-felixla`. The matching rules are
   the same ones, applied to the prefix's own split-biallelic markers instead of
@@ -655,8 +667,8 @@ desired length is not an integer number of decimal megabases.
 
 The manifest contains one row per task with global and per-contig chunk IDs,
 `CHROM`, half-open start/end matching the region text, conservative
-index-derived contig bounds, and the indexed record count. `--chrom` may be repeated to select
-contigs. The compatibility columns `contig_first_pos` and `contig_last_pos`
+index-derived contig bounds, and the indexed record count. `--chrom` may be
+repeated to select contigs. The compatibility columns `contig_first_pos` and `contig_last_pos`
 therefore contain aligned index bounds, not exact VCF record positions.
 
 An optional command template writes a separate one-command-per-line file that

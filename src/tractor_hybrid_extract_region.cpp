@@ -293,11 +293,32 @@ static bool in_region(const std::string& chr, int64_t pos, const Region& region)
 // markers are keyed on the name with the prefix removed, which collapses the
 // two spellings onto one key without preferring either.
 static std::string contig_key(const std::string& chr) {
-    if (chr.size() > 3 && (chr.compare(0, 3, "chr") == 0 || chr.compare(0, 3, "CHR") == 0 ||
-                           chr.compare(0, 3, "Chr") == 0)) {
-        return chr.substr(3);
-    }
+    if (chr.size() > 3 && chr.compare(0, 3, "chr") == 0) return chr.substr(3);
     return chr;
+}
+
+// A one-column line is a gnomAD-style variant ID: CHROM, POS, REF and ALT
+// joined by ':' or '-'. Split from the right, three separators back, because
+// REF and ALT never contain one but a contig name can -- HLA-A*01:01-100-A-T
+// has to come apart as HLA-A*01:01 / 100 / A / T.
+static bool split_variant_id(const std::string& line, std::vector<std::string>& fields) {
+    size_t cut[3];
+    size_t found = 0;
+    for (size_t i = line.size(); i-- > 0 && found < 3;) {
+        if (line[i] == ':' || line[i] == '-') cut[found++] = i;
+    }
+    if (found < 3) return false;
+    if (cut[0] == line.size() - 1 || cut[1] + 1 == cut[0] || cut[2] + 1 == cut[1] ||
+        cut[2] == 0) {
+        return false;
+    }
+
+    fields.assign(5, std::string());
+    fields[0] = line.substr(0, cut[2]);
+    fields[1] = line.substr(cut[2] + 1, cut[1] - cut[2] - 1);
+    fields[3] = line.substr(cut[1] + 1, cut[0] - cut[1] - 1);
+    fields[4] = line.substr(cut[0] + 1);
+    return true;
 }
 
 static bool is_symbolic_allele(const std::string& value) {
@@ -350,11 +371,20 @@ public:
             if (!line.empty() && line.back() == '\r') line.pop_back();
             if (line.empty() || line[0] == '#') continue;
 
-            std::vector<std::string> fields = split_tabs(line);
-            if (fields.size() < 5) {
-                die("%s:%llu has %zu columns; CHROM POS ID REF ALT are required",
-                    path.c_str(), static_cast<unsigned long long>(line_no),
-                    fields.size());
+            std::vector<std::string> fields;
+            if (line.find('\t') == std::string::npos) {
+                if (!split_variant_id(line, fields)) {
+                    die("%s:%llu is neither PVAR/VCF columns CHROM POS ID REF ALT "
+                        "nor a CHROM:POS:REF:ALT variant ID",
+                        path.c_str(), static_cast<unsigned long long>(line_no));
+                }
+            } else {
+                fields = split_tabs(line);
+                if (fields.size() < 5) {
+                    die("%s:%llu has %zu columns; CHROM POS ID REF ALT are required",
+                        path.c_str(), static_cast<unsigned long long>(line_no),
+                        fields.size());
+                }
             }
             const std::string& chr = fields[0];
             int64_t pos = parse_i64_string(fields[1], "site list POS");
