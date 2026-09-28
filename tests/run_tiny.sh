@@ -1045,4 +1045,79 @@ fi
 printf '%s\n' "$OUT_DIR/compat" >"$OUT_DIR/compat.list"
 "$BIN_DIR/felixla" concat "$OUT_DIR/compat.list" "$OUT_DIR/compat_merged" >/dev/null
 
+
+# Selecting alleles out of a packed prefix must land exactly where selecting
+# them while packing lands, since the two are different code paths for the
+# same filter.
+cat >"$OUT_DIR/keep.pvar" <<'SITES'
+#CHROM	POS	ID	REF	ALT
+chr1	100	.	A	G
+chr1	160	.	A	T
+chr2	100	.	A	T
+SITES
+
+"$BIN_DIR/felixla" --phase-vcf "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
+  --flare-vcf "$ROOT_DIR/testdata/tiny.flare.vcf" \
+  --extract "$OUT_DIR/keep.pvar" \
+  --export-felixla --out "$OUT_DIR/packed_extract" >/dev/null
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/tiny" \
+  --extract "$OUT_DIR/keep.pvar" \
+  --export-felixla --out "$OUT_DIR/prefix_extract" >/dev/null
+
+for component in common.geno.bin common.variant.mks common.variant.idx \
+                 rare.carrier.bin rare.variant.mks rare.variant.idx \
+                 ancblock.bin ancblock.mks ancblock.idx samples; do
+  if ! cmp -s "$OUT_DIR/packed_extract.$component" "$OUT_DIR/prefix_extract.$component"; then
+    echo "--extract on a prefix differs from --extract while packing: $component" >&2
+    exit 1
+  fi
+done
+
+# --exclude composes the same way, and the ancestry blocks are untouched by an
+# allele-level selection: local ancestry does not depend on which ALT alleles
+# were kept.
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/tiny" \
+  --exclude "$OUT_DIR/keep.pvar" \
+  --export-felixla --out "$OUT_DIR/prefix_exclude" >/dev/null
+cmp -s "$OUT_DIR/tiny.ancblock.bin" "$OUT_DIR/prefix_exclude.ancblock.bin"
+cmp -s "$OUT_DIR/tiny.ancblock.mks" "$OUT_DIR/prefix_exclude.ancblock.mks"
+
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/prefix_exclude" --export-vcf \
+  --out "$OUT_DIR/prefix_exclude" >/dev/null
+python3 - "$OUT_DIR/prefix_exclude.vcf.gz" <<'EXCLUDED'
+import gzip
+import sys
+
+kept = []
+with gzip.open(sys.argv[1], "rt") as handle:
+    for line in handle:
+        if not line.startswith("#"):
+            fields = line.split("\t")
+            kept.append((fields[0], int(fields[1]), fields[3], fields[4]))
+
+# The three excluded alleles are gone; the other six survive, including the
+# second ALT of the multiallelic record at chr1:100.
+assert ("chr1", 100, "A", "G") not in kept, kept
+assert ("chr1", 100, "A", "C") in kept, kept
+assert ("chr1", 160, "A", "T") not in kept, kept
+assert ("chr2", 100, "A", "T") not in kept, kept
+assert len(kept) == 6, kept
+EXCLUDED
+
+# A list naming a REF the prefix does not have is a mistake when selecting and
+# inert when dropping, exactly as it is while packing.
+cat >"$OUT_DIR/badref.pvar" <<'BADREF'
+#CHROM	POS	ID	REF	ALT
+chr1	160	.	G	T
+BADREF
+if "$BIN_DIR/felixla" --felixla "$OUT_DIR/tiny" --extract "$OUT_DIR/badref.pvar" \
+     --export-felixla --out "$OUT_DIR/badref" >/dev/null 2>"$OUT_DIR/badref.err"; then
+  echo "--extract accepted a REF that disagrees with the prefix" >&2
+  exit 1
+fi
+grep -q "REF mismatch" "$OUT_DIR/badref.err"
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/tiny" --exclude "$OUT_DIR/badref.pvar" \
+  --export-felixla --out "$OUT_DIR/badref_drop" >/dev/null
+cmp -s "$OUT_DIR/tiny.common.variant.mks" "$OUT_DIR/badref_drop.common.variant.mks"
+
 echo "tiny smoke test passed"

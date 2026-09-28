@@ -307,14 +307,23 @@ int run_plink_style(int argc, char** argv) {
     if (n_inputs == 0) die("no input given; see --help");
     if (n_inputs > 1) die("choose one input at a time");
 
-    bool has_filter = !args.keep_path.empty() || !args.extract_path.empty() ||
-                      !args.exclude_path.empty() || !args.extract_bed_path.empty() ||
-                      !args.exclude_bed_path.empty() || !args.chr.empty() ||
-                      !args.mac.empty() || !args.maf.empty() ||
-                      !args.anc_mac.empty() || !args.anc_maf.empty();
-    if (has_filter && !from_flare) {
-        die("the sample and variant filters are supported only for "
-            "--phase-vcf + --flare-vcf --export-felixla");
+    // --extract and --exclude also select alleles out of a packed prefix, so
+    // they are the two filters that do not need the source records.
+    bool has_site_list = !args.extract_path.empty() || !args.exclude_path.empty();
+    bool has_pack_only_filter =
+        !args.keep_path.empty() || !args.extract_bed_path.empty() ||
+        !args.exclude_bed_path.empty() || !args.chr.empty() ||
+        !args.mac.empty() || !args.maf.empty() ||
+        !args.anc_mac.empty() || !args.anc_maf.empty();
+    bool has_filter = has_site_list || has_pack_only_filter;
+    if (has_pack_only_filter && !from_flare) {
+        die("--keep, the BED filters and the frequency filters are applied "
+            "while packing; they are supported only for --phase-vcf + "
+            "--flare-vcf --export-felixla");
+    }
+    if (has_site_list && !from_flare && !(from_prefix && args.export_felixla)) {
+        die("--extract and --exclude are supported for --phase-vcf + "
+            "--flare-vcf --export-felixla and for --felixla --export-felixla");
     }
 
     // Only two paths have anything to hand threads to: the FLARE conversion,
@@ -381,13 +390,24 @@ int run_plink_style(int argc, char** argv) {
                 args.n_ancestries.empty() ? "auto" : args.n_ancestries,
                 "auto", args.out_path});
         }
-        // From an existing prefix: a region extract.
-        if (args.region.empty()) {
-            die("--felixla --export-felixla needs --region to extract");
+        // From an existing prefix: select a region, a set of alleles, or both.
+        if (args.region.empty() && !has_site_list) {
+            die("--felixla --export-felixla needs --region, --extract or "
+                "--exclude to select with");
         }
-        return run_tool(felixla_extract_main, {
-            "tractor_hybrid_extract_region", args.felixla_prefix, args.region,
-            args.out_path});
+        std::vector<std::string> extract_args = {
+            "tractor_hybrid_extract_region", args.felixla_prefix};
+        if (!args.region.empty()) extract_args.push_back(args.region);
+        extract_args.push_back(args.out_path);
+        if (!args.extract_path.empty()) {
+            extract_args.push_back("--extract");
+            extract_args.push_back(args.extract_path);
+        }
+        if (!args.exclude_path.empty()) {
+            extract_args.push_back("--exclude");
+            extract_args.push_back(args.exclude_path);
+        }
+        return run_tool(felixla_extract_main, extract_args);
     }
 
     if (!from_prefix) {

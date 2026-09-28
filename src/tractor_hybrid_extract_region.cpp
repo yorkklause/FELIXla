@@ -1,8 +1,11 @@
 // tractor_hybrid_extract_region.cpp
 // designed by Kai, implemented by codex
 //
-// Extract a 1-based inclusive genomic region from an existing tractor_hybrid
-// packed prefix into a new tractor_hybrid packed prefix.
+// Select part of an existing FELIXla packed prefix into a new one: a 1-based
+// inclusive genomic region, a PVAR/VCF list of alleles to keep or drop, or
+// both. Ancestry blocks describe local ancestry along the coordinate axis, not
+// per variant, so an allele-level selection passes them through untouched and
+// only a region clips them.
 
 #include <algorithm>
 #include <cstdarg>
@@ -11,8 +14,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -31,6 +36,24 @@ struct Region {
     int64_t start = 1;
     int64_t end = 0;
     std::string label;
+
+    // An empty contig means the whole prefix, so a run that filters only by
+    // site list needs no region and records none.
+    bool whole() const { return chr.empty(); }
+};
+
+// One listed coordinate: its REF and the ALT alleles named there, sorted so a
+// record's ALT can be found without scanning.
+struct SitePosition {
+    std::string ref;
+    std::vector<std::string> alts;
+    uint64_t line_no = 0;
+};
+
+struct NormalizedAllele {
+    int64_t pos = 0;
+    std::string_view ref;
+    std::string_view alt;
 };
 
 struct VariantRecord {
@@ -257,10 +280,215 @@ static bool chrom_matches(const std::string& observed, const std::string& reques
 }
 
 static bool in_region(const std::string& chr, int64_t pos, const Region& region) {
+    if (region.whole()) return true;
     return chrom_matches(chr, region.chr) && pos >= region.start && pos <= region.end;
 }
 
+static bool is_symbolic_allele(const std::string& value) {
+    return value.empty() || value[0] == '<' || value == "." ||
+           value.find_first_of("[]") != std::string::npos;
+}
+
+// The same normalization the packer applies when a site list writes an allele
+// with different padding from the genotype VCF: strip shared trailing bases,
+// then shared leading ones, keeping at least one base on each side. Stripping
+// from the front moves the coordinate, so the position travels with the pair.
+static NormalizedAllele normalize_allele(int64_t pos, const std::string& ref,
+                                         const std::string& alt) {
+    std::string_view r(ref);
+    std::string_view a(alt);
+    if (is_symbolic_allele(ref) || is_symbolic_allele(alt)) {
+        return NormalizedAllele{pos, r, a};
+    }
+    while (r.size() > 1 && a.size() > 1 && r.back() == a.back()) {
+        r.remove_suffix(1);
+        a.remove_suffix(1);
+    }
+    while (r.size() > 1 && a.size() > 1 && r.front() == a.front()) {
+        r.remove_prefix(1);
+        a.remove_prefix(1);
+        ++pos;
+    }
+    return NormalizedAllele{pos, r, a};
+}
+
+// A PVAR/VCF-style list of alleles, matched against the markers of a packed
+// prefix exactly as the packer matches it against genotype records: by CHROM
+// and POS, then by ALT where the REF agrees, and otherwise by comparing both
+// sides normalized.
+class SiteList {
+public:
+    void load(const std::string& path, const char* flag, bool ref_mismatch_fatal) {
+        flag_ = flag;
+        path_ = path;
+        ref_mismatch_fatal_ = ref_mismatch_fatal;
+        active_ = true;
+
+        std::ifstream in(path);
+        if (!in) die("cannot open %s list %s", flag, path.c_str());
+
+        std::string line;
+        uint64_t line_no = 0;
+        while (std::getline(in, line)) {
+            ++line_no;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty() || line[0] == '#') continue;
+
+            std::vector<std::string> fields = split_tabs(line);
+            if (fields.size() < 5) {
+                die("%s:%llu has %zu columns; CHROM POS ID REF ALT are required",
+                    path.c_str(), static_cast<unsigned long long>(line_no),
+                    fields.size());
+            }
+            const std::string& chr = fields[0];
+            int64_t pos = parse_i64_string(fields[1], "site list POS");
+            const std::string& ref = fields[3];
+            if (chr.empty()) die("%s:%llu has an empty CHROM", path.c_str(),
+                                 static_cast<unsigned long long>(line_no));
+            if (pos <= 0) die("%s:%llu has a non-positive POS", path.c_str(),
+                              static_cast<unsigned long long>(line_no));
+            if (ref.empty() || ref == ".") {
+                die("%s:%llu has an unknown REF", path.c_str(),
+                    static_cast<unsigned long long>(line_no));
+            }
+
+            SitePosition& position = positions_[Key{chr, pos}];
+            if (position.ref.empty()) {
+                position.ref = ref;
+                position.line_no = line_no;
+            } else if (position.ref != ref) {
+                die("conflicting REF values in %s list %s at %s:%lld: %s vs %s",
+                    flag, path.c_str(), chr.c_str(), static_cast<long long>(pos),
+                    position.ref.c_str(), ref.c_str());
+            }
+
+            size_t start = 0;
+            while (start <= fields[4].size()) {
+                size_t comma = fields[4].find(',', start);
+                std::string alt = fields[4].substr(
+                    start, comma == std::string::npos ? std::string::npos : comma - start);
+                if (alt.empty() || alt == ".") {
+                    die("%s:%llu has an empty ALT", path.c_str(),
+                        static_cast<unsigned long long>(line_no));
+                }
+                auto at = std::lower_bound(position.alts.begin(), position.alts.end(), alt);
+                if (at != position.alts.end() && *at == alt) {
+                    die("duplicate allele in %s list %s at %s:%lld: %s>%s",
+                        flag, path.c_str(), chr.c_str(), static_cast<long long>(pos),
+                        ref.c_str(), alt.c_str());
+                }
+                position.alts.insert(at, alt);
+                ++allele_count_;
+                if (comma == std::string::npos) break;
+                start = comma + 1;
+            }
+        }
+        if (!in.eof()) die("failed reading %s list %s", flag, path.c_str());
+        // A list naming nothing is a mistake worth stopping for rather than a
+        // filter that keeps everything or drops nothing, and the packer
+        // refuses it the same way.
+        if (positions_.empty()) {
+            die("%s site list is empty: %s", flag, path.c_str());
+        }
+    }
+
+    bool active() const { return active_; }
+    const std::string& path() const { return path_; }
+    size_t position_count() const { return positions_.size(); }
+    uint64_t allele_count() const { return allele_count_; }
+
+    // True when the list names this marker's allele. Also accumulates the
+    // per-coordinate evidence that --extract needs in order to refuse a list
+    // whose REF disagrees with the prefix.
+    bool matches(const std::string& chr, int64_t pos, const std::string& ref,
+                 const std::string& alt) {
+        auto it = positions_.find(Key{chr, pos});
+        if (it == positions_.end()) return false;
+        const SitePosition& position = it->second;
+
+        note_coordinate(chr, pos, ref, position);
+
+        bool raw_ref = position.ref == ref;
+        if (raw_ref) {
+            auto at = std::lower_bound(position.alts.begin(), position.alts.end(), alt);
+            bool exact = at != position.alts.end() && *at == alt;
+            normalized_matched_ = normalized_matched_ || exact;
+            return exact;
+        }
+
+        NormalizedAllele query = normalize_allele(pos, ref, alt);
+        for (const std::string& candidate_alt : position.alts) {
+            NormalizedAllele candidate = normalize_allele(pos, position.ref, candidate_alt);
+            if (candidate.pos == query.pos && candidate.ref == query.ref &&
+                candidate.alt == query.alt) {
+                normalized_matched_ = true;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Called once the marker stream has left a coordinate, and once at the end.
+    void finish_coordinate() {
+        if (!open_) return;
+        if (ref_mismatch_fatal_ && !raw_ref_matched_ && !normalized_matched_) {
+            die("REF mismatch for %s site %s:%lld: list has %s, prefix has %s",
+                flag_, open_chr_.c_str(), static_cast<long long>(open_pos_),
+                open_list_ref_.c_str(), first_prefix_ref_.c_str());
+        }
+        open_ = false;
+        raw_ref_matched_ = false;
+        normalized_matched_ = false;
+        first_prefix_ref_.clear();
+    }
+
+private:
+    struct Key {
+        std::string chr;
+        int64_t pos;
+        bool operator==(const Key& other) const {
+            return pos == other.pos && chr == other.chr;
+        }
+    };
+    struct KeyHash {
+        size_t operator()(const Key& key) const {
+            return std::hash<std::string>()(key.chr) ^
+                   (std::hash<int64_t>()(key.pos) * 1099511628211ULL);
+        }
+    };
+
+    void note_coordinate(const std::string& chr, int64_t pos, const std::string& ref,
+                         const SitePosition& position) {
+        if (open_ && (open_pos_ != pos || open_chr_ != chr)) finish_coordinate();
+        if (!open_) {
+            open_ = true;
+            open_chr_ = chr;
+            open_pos_ = pos;
+            open_list_ref_ = position.ref;
+        }
+        bool raw_ref = position.ref == ref;
+        if (!raw_ref && first_prefix_ref_.empty()) first_prefix_ref_ = ref;
+        raw_ref_matched_ = raw_ref_matched_ || raw_ref;
+    }
+
+    bool active_ = false;
+    bool ref_mismatch_fatal_ = false;
+    const char* flag_ = "--extract";
+    std::string path_;
+    std::unordered_map<Key, SitePosition, KeyHash> positions_;
+    uint64_t allele_count_ = 0;
+
+    bool open_ = false;
+    std::string open_chr_;
+    int64_t open_pos_ = 0;
+    std::string open_list_ref_;
+    std::string first_prefix_ref_;
+    bool raw_ref_matched_ = false;
+    bool normalized_matched_ = false;
+};
+
 static bool overlaps_region(const AncBlockRecord& block, const Region& region) {
+    if (region.whole()) return true;
     return chrom_matches(block.chr, region.chr) &&
            block.end >= region.start &&
            block.start <= region.end;
@@ -296,29 +524,6 @@ static Region parse_region_string(const std::string& region_text) {
     }
     region.label = region.chr + ":" + std::to_string(region.start) + "-" + std::to_string(region.end);
     return region;
-}
-
-static Region parse_region_args(int argc, char** argv, int& out_prefix_arg) {
-    if (argc == 4) {
-        out_prefix_arg = 3;
-        return parse_region_string(argv[2]);
-    }
-
-    if (argc == 6) {
-        Region region;
-        region.chr = argv[2];
-        region.start = parse_i64_string(argv[3], "region start");
-        region.end = parse_i64_string(argv[4], "region end");
-        if (region.chr.empty()) die("region chromosome is empty");
-        if (region.start <= 0 || region.end <= 0 || region.start > region.end) {
-            die("invalid region coordinates: %s %s %s", argv[2], argv[3], argv[4]);
-        }
-        region.label = region.chr + ":" + std::to_string(region.start) + "-" + std::to_string(region.end);
-        out_prefix_arg = 5;
-        return region;
-    }
-
-    die("invalid argument count");
 }
 
 static Meta read_meta(const std::string& path) {
@@ -386,7 +591,7 @@ static void write_meta(
         out << line << '\n';
     }
     out << "source_hybrid_prefix\t" << in_prefix << '\n';
-    out << "extracted_region\t" << region.label << '\n';
+    if (!region.whole()) out << "extracted_region\t" << region.label << '\n';
     out << "global_variants\t" << global_variants << '\n';
     out << "common_variants\t" << common_variants << '\n';
     out << "rare_variants\t" << rare_variants << '\n';
@@ -521,8 +726,13 @@ static void read_selected_anc_blocks(
         AncBlockRecord block = read_anc_record(fp, anc_mks_path);
         if (!overlaps_region(block, region)) continue;
 
-        block.start = std::max(block.start, region.start);
-        block.end = std::min(block.end, region.end);
+        // Only a region clips a block. An allele-level selection does not
+        // change where a haplotype's ancestry switches, so the blocks it
+        // leaves behind must describe the same spans they always did.
+        if (!region.whole()) {
+            block.start = std::max(block.start, region.start);
+            block.end = std::min(block.end, region.end);
+        }
         block.new_block_id = static_cast<uint32_t>(selected_blocks.size());
 
         if (block_id_map.count(block.old_block_id)) {
@@ -629,6 +839,8 @@ static void write_selected_variants(
     const std::string& out_prefix,
     const Meta& meta,
     const Region& region,
+    SiteList& extract_sites,
+    SiteList& exclude_sites,
     const std::unordered_map<uint32_t, uint32_t>& block_id_map,
     const std::vector<AncBlockRecord>& selected_blocks,
     uint64_t& common_written,
@@ -691,6 +903,17 @@ static void write_selected_variants(
         if (!next) break;
         const VariantRecord& record = *next;
         if (!in_region(record.chr, record.pos, region)) continue;
+
+        // --extract selects, --exclude then removes, so the two compose the
+        // way they do in PLINK and the way they do when packing.
+        if (extract_sites.active() &&
+            !extract_sites.matches(record.chr, record.pos, record.ref, record.alt)) {
+            continue;
+        }
+        if (exclude_sites.active() &&
+            exclude_sites.matches(record.chr, record.pos, record.ref, record.alt)) {
+            continue;
+        }
 
         if (total_written > std::numeric_limits<uint32_t>::max()) {
             die("selected variant count exceeds uint32_t limit");
@@ -774,6 +997,9 @@ static void write_selected_variants(
         ++total_written;
     }
 
+    extract_sites.finish_coordinate();
+    exclude_sites.finish_coordinate();
+
     std::fclose(in_common_mks);
     std::fclose(in_rare_mks);
     std::fclose(in_common_bin);
@@ -790,11 +1016,16 @@ static void print_usage(const char* prog) {
     std::fprintf(
         stderr,
         "Usage:\n"
-        "  %s in_prefix chr:start-end out_prefix\n"
-        "  %s in_prefix chr start end out_prefix\n\n"
+        "  %s in_prefix chr:start-end out_prefix [options]\n"
+        "  %s in_prefix chr start end out_prefix [options]\n"
+        "  %s in_prefix out_prefix --extract FILE | --exclude FILE\n\n"
         "Coordinates are 1-based and inclusive.\n\n"
+        "Options:\n"
+        "  --extract FILE   PVAR/VCF alleles to keep\n"
+        "  --exclude FILE   PVAR/VCF alleles to drop, applied after --extract\n\n"
         "Example:\n"
         "  %s chr22 chr22:16000000-17000000 chr22.region\n",
+        prog,
         prog,
         prog,
         prog
@@ -804,15 +1035,63 @@ static void print_usage(const char* prog) {
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 4 && argc != 6) {
+    // The site-list flags may appear anywhere after the program name; what is
+    // left is the historical positional form, with the region now optional.
+    std::vector<std::string> positional;
+    std::string extract_path;
+    std::string exclude_path;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--extract" || arg == "--exclude") {
+            if (i + 1 >= argc) die("%s requires a file", arg.c_str());
+            std::string& target = arg == "--extract" ? extract_path : exclude_path;
+            if (!target.empty()) die("%s was given twice", arg.c_str());
+            target = argv[++i];
+        } else if (arg.size() > 2 && arg[0] == '-' && arg[1] == '-') {
+            print_usage(argv[0]);
+            die("unknown option: %s", arg.c_str());
+        } else {
+            positional.push_back(arg);
+        }
+    }
+
+    bool have_sites = !extract_path.empty() || !exclude_path.empty();
+    if (positional.size() != 2 && positional.size() != 3 && positional.size() != 5) {
         print_usage(argv[0]);
         return 1;
     }
+    if (positional.size() == 2 && !have_sites) {
+        print_usage(argv[0]);
+        die("give a region, a site list, or both");
+    }
 
-    std::string in_prefix = argv[1];
-    int out_prefix_arg = 0;
-    Region region = parse_region_args(argc, argv, out_prefix_arg);
-    std::string out_prefix = argv[out_prefix_arg];
+    std::string in_prefix = positional.front();
+    std::string out_prefix = positional.back();
+    Region region;
+    if (positional.size() == 3) {
+        region = parse_region_string(positional[1]);
+    } else if (positional.size() == 5) {
+        region.chr = positional[1];
+        region.start = parse_i64_string(positional[2], "region start");
+        region.end = parse_i64_string(positional[3], "region end");
+        if (region.chr.empty()) die("region chromosome is empty");
+        if (region.start <= 0 || region.end <= 0 || region.start > region.end) {
+            die("invalid region coordinates: %s %s %s", positional[1].c_str(),
+                positional[2].c_str(), positional[3].c_str());
+        }
+        region.label = region.chr + ":" + std::to_string(region.start) + "-" +
+                       std::to_string(region.end);
+    } else {
+        region.label = "whole prefix";
+    }
+
+    SiteList extract_sites;
+    SiteList exclude_sites;
+    // A listed coordinate the prefix holds under a different REF is a mistake
+    // worth stopping for when selecting, and inert when dropping: an --exclude
+    // entry that matches nothing simply removes nothing.
+    if (!extract_path.empty()) extract_sites.load(extract_path, "--extract", true);
+    if (!exclude_path.empty()) exclude_sites.load(exclude_path, "--exclude", false);
 
     Meta meta = read_meta(in_prefix + ".meta");
     copy_text_file(in_prefix + ".samples", out_prefix + ".samples");
@@ -830,6 +1109,8 @@ int main(int argc, char** argv) {
         out_prefix,
         meta,
         region,
+        extract_sites,
+        exclude_sites,
         block_id_map,
         selected_blocks,
         common_written,
@@ -849,6 +1130,16 @@ int main(int argc, char** argv) {
 
     std::fprintf(stderr, "Finished.\n");
     std::fprintf(stderr, "Region:                %s\n", region.label.c_str());
+    if (extract_sites.active()) {
+        std::fprintf(stderr, "Extract list:          %s (%llu alleles)\n",
+            extract_sites.path().c_str(),
+            static_cast<unsigned long long>(extract_sites.allele_count()));
+    }
+    if (exclude_sites.active()) {
+        std::fprintf(stderr, "Exclude list:          %s (%llu alleles)\n",
+            exclude_sites.path().c_str(),
+            static_cast<unsigned long long>(exclude_sites.allele_count()));
+    }
     std::fprintf(stderr, "Global variants:       %llu\n", static_cast<unsigned long long>(total_written));
     std::fprintf(stderr, "Common variants:       %llu\n", static_cast<unsigned long long>(common_written));
     std::fprintf(stderr, "Rare variants:         %llu\n", static_cast<unsigned long long>(rare_written));

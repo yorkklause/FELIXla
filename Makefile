@@ -242,6 +242,7 @@ test-intense: all
 	python3 tests/run_concat_intense.py --bin-dir "$(abspath $(BIN_DIR))"
 	python3 tests/run_scalar_equivalence.py --bin-dir "$(abspath $(BIN_DIR))"
 	python3 tests/run_ancestry_export_intense.py --bin-dir "$(abspath $(BIN_DIR))"
+	python3 tests/run_prefix_extract_intense.py --bin-dir "$(abspath $(BIN_DIR))"
 
 benchmark-pack: all
 	python3 tests/run_pack_benchmark.py --felixla "$(abspath $(FELIX_TARGET))"

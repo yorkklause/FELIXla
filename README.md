@@ -126,10 +126,18 @@ cannot mean anything are refused by name rather than silently ignored: an
 export that reads a packed prefix says so, and a removed flag names what
 replaced it.
 
-The filters apply while packing, which is the only point at which FELIXla reads
-the source records, so they are accepted with `--phase-vcf` plus `--flare-vcf`
-and refused elsewhere. To subset an existing prefix, extract the region into a
-new one with `--felixla --region --export-felixla` and export from that.
+Most filters apply while packing, which is the only point at which FELIXla
+reads the source records, so they are accepted with `--phase-vcf` plus
+`--flare-vcf` and refused elsewhere. `--region`, `--extract` and `--exclude`
+are the exceptions: they also select out of a packed prefix, so
+
+```bash
+felixla --felixla hybrid/chr22 --extract sites.pvar \
+        --export-felixla --out hybrid/chr22.subset
+```
+
+writes the same prefix that packing with `--extract sites.pvar` would have
+written, without re-reading the source VCFs.
 
 ### Input
 
@@ -161,7 +169,8 @@ new one with `--felixla --region --export-felixla` and export from that.
 
 - **`--felixla PREFIX`** -- an existing FELIXla prefix, named without a
   component-file suffix. It is the input to every export, and, with
-  `--region --export-felixla`, to a region extract.
+  `--export-felixla` plus `--region`, `--extract` or `--exclude`, to a new
+  prefix holding part of it.
 
 - **`--merge-list FILE`** -- a file of prefixes to concatenate in genomic
   order, one per line, or two tab-separated columns to take a different BED
@@ -341,8 +350,10 @@ two line up row for row.
 
 #### Sample and variant filters
 
-These apply while packing, so they go with `--phase-vcf` plus `--flare-vcf`
-and `--export-felixla`.
+Most of these apply while packing, so they go with `--phase-vcf` plus
+`--flare-vcf` and `--export-felixla`. `--region`, `--extract` and `--exclude`
+also apply to `--felixla --export-felixla`, selecting out of a prefix that is
+already packed.
 
 - **`--keep FILE`** -- one sample ID per line, analogous to
   PLINK `--keep`. Retained samples are written in genotype VCF order.
@@ -366,6 +377,14 @@ and `--export-felixla`.
   them before exact allele-level filtering. Without an index, FELIXla falls
   back to a streaming scan and prints a warning.
 
+  `--extract` also selects out of an existing prefix, with
+  `--felixla PREFIX --extract FILE --export-felixla`. The matching rules are
+  the same ones, applied to the prefix's own split-biallelic markers instead of
+  to VCF records, and the result is byte-identical to packing the source with
+  the same list -- which the test suite asserts, component by component, so
+  the two cannot drift apart. A listed coordinate the prefix holds under a
+  different REF is a fatal mismatch there too.
+
 - **`--exclude FILE`** -- the same PVAR/VCF format and the same
   allele matching as `--extract`, naming alleles to drop rather than keep. It
   is applied after selection, so `--extract` and `--exclude` compose as they do
@@ -373,7 +392,13 @@ and `--export-felixla`.
   the list does not name, and the record is dropped only when nothing remains.
   An entry matching no record in the input is silently inert. Unlike
   `--extract`, the list is not narrowed by `--region`, since a site outside the
-  region is absent from the output regardless.
+  region is absent from the output regardless. A REF that matches nothing is
+  inert rather than fatal: an `--exclude` entry naming no record simply removes
+  nothing.
+
+  Like `--extract`, it also applies to `--felixla --export-felixla`, and the
+  two compose there in the same order: `--extract` selects, then `--exclude`
+  removes.
 
   Note that neither `--extract` nor `--exclude` uses the `ID` column: matching
   is on `CHROM`, `POS` and the normalized `REF`/`ALT`. A PLINK-style file of
@@ -824,6 +849,13 @@ column widths, two-digit ancestry labels, the three `FORMAT` layouts, sample
 counts either side of a 32-column word, sample subsets, and multiallelic
 records. Setting `FELIXLA_SCALAR_PATHS=1` is also the way to confirm that a
 suspected packing difference comes from the wide paths rather than the input.
+
+`test-intense` also checks that selecting alleles out of a packed prefix lands
+exactly where selecting them while packing lands: for each random case it packs
+with `--extract`/`--exclude`, packs the whole input and then filters the prefix
+with the same list, and requires the two results to be byte-identical component
+by component. Two implementations of one filter can only stay in step if
+something insists on it.
 
 `test-intense` finally checks the three ancestry exports against three separate
 oracles: the LAI rows against the ancestry masks decoded independently from
