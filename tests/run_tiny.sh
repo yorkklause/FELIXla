@@ -1520,19 +1520,19 @@ test "$(lai_rows "$OUT_DIR/blocks_ends_merged")" = "1-100 401-500"
   --export-felixla --out "$OUT_DIR/blocks_middle" >/dev/null
 test "$(lai_rows "$OUT_DIR/blocks_middle")" = "101-200 201-300 301-400"
 
-# Per-sample proportions over a prefix whose blocks are not contiguous are
-# over what is left, not over the genome, and saying so is the difference
-# between a number and a misleading number.
+# Per-sample proportions are summed over whatever the blocks cover, so a
+# contig with a hole in it is worth saying out loud. Where a contig starts and
+# stops is not: a region extract legitimately holds part of one.
 warned() {
   "$BIN_DIR/felixla" --felixla "$1" --export-global-admixture \
     --out "$1" 2>"$1.warn" >/dev/null
-  grep -oE "[0-9]+ break\(s\) leaving [0-9]+ bp uncovered, the first at [^.]*" "$1.warn" \
+  grep -oE "[0-9]+ hole\(s\) totalling [0-9]+ bp, the first at [^.]*" "$1.warn" \
     || echo "no warning"
 }
 
 # A hole in the middle, from blocks that held no retained variant.
 test "$(warned "$OUT_DIR/blocks_ends")" \
-  = "1 break(s) leaving 300 bp uncovered, the first at chr1:101-400"
+  = "1 hole(s) totalling 300 bp, the first at chr1:101-400"
 
 # The rows themselves are still internally consistent: each sums to one over
 # the span that is covered. That is what makes them easy to misread.
@@ -1546,24 +1546,24 @@ for row in rows:
     assert abs(total - 1.0) < 1e-5, row
 HOLEY_ROWS
 
-# A contig that starts partway in is just as uncovered as one with a hole,
-# whether the start was lost to a dropped block or asked for with --region.
+# A contig that simply starts late is still one piece, and says nothing. Both
+# ways of getting there: blocks dropped off the front, and a --region that
+# asked for the rest.
 cat >"$OUT_DIR/blocks_last.pvar" <<'BLOCKS_LAST'
 #CHROM	POS	ID	REF	ALT
 chr1	500	.	A	T
 BLOCKS_LAST
 "$BIN_DIR/felixla" --felixla "$OUT_DIR/blocks" --extract "$OUT_DIR/blocks_last.pvar" \
   --export-felixla --out "$OUT_DIR/blocks_last" >/dev/null
-test "$(warned "$OUT_DIR/blocks_last")" \
-  = "1 break(s) leaving 400 bp uncovered, the first at chr1:1-400"
+test "$(lai_rows "$OUT_DIR/blocks_last")" = "401-500"
+test "$(warned "$OUT_DIR/blocks_last")" = "no warning"
 
 "$BIN_DIR/felixla" --felixla "$OUT_DIR/blocks" --region chr1:200-451 \
   --export-felixla --out "$OUT_DIR/blocks_region" >/dev/null
-test "$(warned "$OUT_DIR/blocks_region")" \
-  = "1 break(s) leaving 199 bp uncovered, the first at chr1:1-199"
+test "$(warned "$OUT_DIR/blocks_region")" = "no warning"
 
-# Blocks running unbroken from base one say nothing, or the warning would be
-# noise that gets ignored on the run that matters.
+# Blocks running unbroken say nothing, or the warning would be noise that gets
+# ignored on the run that matters.
 test "$(warned "$OUT_DIR/blocks")" = "no warning"
 
 # A contig boundary is not a break: the next contig is expected to start at
@@ -1601,11 +1601,11 @@ TWOCHR_FLARE
 test "$(lai_rows "$OUT_DIR/twochr")" = "1-300 1-1200"
 test "$(warned "$OUT_DIR/twochr")" = "no warning"
 
-# And the size of the break is measured from base one of its own contig, not
-# from wherever the previous contig happened to stop. Packing always starts a
-# contig at one, so this takes a merge of a whole chr1 with a region-extracted
-# chr2 -- which is what chunked conversion produces. Measured from chr1's end
-# the break would read 699 bp at chr2:301-999.
+# The same boundary, with the second contig starting well past where the first
+# one stopped. Packing always starts a contig at one, so this takes a merge of
+# a whole chr1 with a region-extracted chr2 -- which is what chunked conversion
+# produces. A check that forgot to compare contigs would report a 699 bp hole
+# at chr2:301-999 here.
 "$BIN_DIR/felixla" --felixla "$OUT_DIR/twochr" --region chr1:1-400 \
   --export-felixla --out "$OUT_DIR/part_chr1" >/dev/null
 "$BIN_DIR/felixla" --felixla "$OUT_DIR/twochr" --region chr2:1000-1300 \
@@ -1614,7 +1614,6 @@ printf '%s\n%s\n' "$OUT_DIR/part_chr1" "$OUT_DIR/part_chr2" >"$OUT_DIR/parts.lis
 "$BIN_DIR/felixla" --merge-list "$OUT_DIR/parts.list" \
   --export-felixla --out "$OUT_DIR/parts" >/dev/null
 test "$(lai_rows "$OUT_DIR/parts")" = "1-300 1000-1200"
-test "$(warned "$OUT_DIR/parts")" \
-  = "1 break(s) leaving 999 bp uncovered, the first at chr2:1-999"
+test "$(warned "$OUT_DIR/parts")" = "no warning"
 
 echo "tiny smoke test passed"

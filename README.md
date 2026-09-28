@@ -493,31 +493,25 @@ row sums to one. The denominator is the span the prefix's ancestry blocks
 actually cover, which for a region or contig subset is that subset, not the
 genome: proportions from two prefixes are comparable only over the same span.
 
-**The export warns when the blocks are not contiguous.** They are expected to
-run unbroken from base one on each contig; anything else means the proportions
-are over less than they look like they are over, and the rows still summing to
-one is exactly what makes that easy to misread:
+**The export warns when a contig is not covered in one piece.** `--extract`
+and `--exclude` drop the blocks no retained variant falls in, which leaves
+holes, and the rows still summing to one is exactly what makes a holey
+prefix easy to misread:
 
 ```text
-WARNING: the ancestry blocks are not contiguous: 3 break(s) leaving 1841204 bp
-uncovered, the first at chr1:48211-93004. These proportions are over the
-6201933 bp the blocks do cover, not over the genome, ...
+WARNING: the ancestry blocks do not cover each contig in one piece: 3 hole(s)
+totalling 1841204 bp, the first at chr1:48211-93004. These proportions are
+summed over the 6201933 bp the blocks do cover, ...
 ```
 
-Both ways of losing coverage are reported the same way: a hole in the middle,
-left by `--extract` or `--exclude` dropping the blocks no retained variant
-falls in, and a contig that begins partway in, whether because its first
-blocks were dropped or because a `--region` asked for the rest. A region chunk
-therefore warns, which is correct -- a genome-wide proportion computed from
-one chunk is the mistake the warning is for.
+Only holes inside a contig count. Where a contig starts and stops does not:
+a region extract holds part of one on purpose, and a contig boundary is not a
+hole either, so neither is reported. The check is a sanity warning, not a
+coverage audit -- nothing in the packed files records contig lengths, so there
+is no way to tell a prefix that stops early from one that ran to the end.
 
-A contig boundary is not a break: each contig is expected to start at base one,
-not to continue from where the previous one stopped. The trailing end is not
-checked at all, because the packed files record no contig lengths and there is
-nothing to compare a last block's end against.
-
-`--export-local-admixture` never warns: its rows are per block, so missing
-coverage costs a row rather than distorting one.
+`--export-local-admixture` never warns: its rows are per block, so a hole
+costs a row rather than distorting one.
 
 **`--export-local-admixture`** writes `<out>.local.admixture.tsv`, one row per
 ancestry block, holding each ancestry's share of the cohort's haplotypes

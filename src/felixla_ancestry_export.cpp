@@ -393,15 +393,12 @@ void export_lai(const std::string& prefix, const std::string& out_path, const Me
                  static_cast<unsigned long long>(meta.n_haps));
 }
 
-// A per-sample proportion is only as genome-wide as the blocks it is summed
-// over, so the blocks are checked for being one unbroken run per contig,
-// starting at the first base. Anything else -- a gap left by dropping blocks
-// that hold no retained variant, or a contig that starts partway in because a
-// region was extracted -- means the proportions are over less than they look
-// like they are over, and the caller is told.
-//
-// The trailing end cannot be checked: the packed files record no contig
-// lengths, so there is nothing to compare a last block's end against.
+// A per-sample proportion is summed over whatever the ancestry blocks cover,
+// so the blocks are checked for covering each contig in one piece. Where a
+// contig starts and stops is not the question -- a region extract legitimately
+// holds part of one -- but a hole in the middle is, because that is what
+// dropping the blocks no retained variant falls in leaves behind, and the rows
+// still summing to one is what makes it easy to miss.
 struct CoverageBreaks {
     uint64_t count = 0;
     uint64_t bases = 0;
@@ -421,14 +418,12 @@ void export_global_admixture(const std::string& prefix, const std::string& out_p
     BlockReader reader(prefix, meta);
     while (reader.next()) {
         const Block& block = reader.current();
-        // Each contig is expected to resume where the last block left off, and
-        // to begin at base one. A new contig resets that expectation rather
-        // than counting as a break itself.
+        // Within a contig the next block is expected to resume where the last
+        // one stopped. Arriving at a new contig is not a break: nothing says
+        // where a contig begins or ends, and it does not need to.
         if (block.chr != current_chr) {
             current_chr = block.chr;
-            expected_start = 1;
-        }
-        if (block.start > expected_start) {
+        } else if (block.start > expected_start) {
             ++breaks.count;
             breaks.bases += static_cast<uint64_t>(block.start - expected_start);
             if (breaks.first.empty()) {
@@ -452,12 +447,11 @@ void export_global_admixture(const std::string& prefix, const std::string& out_p
 
     if (breaks.count > 0) {
         std::fprintf(stderr,
-            "WARNING: the ancestry blocks are not contiguous: %llu break(s) leaving "
-            "%llu bp uncovered, the first at %s. These proportions are over the "
-            "%llu bp the blocks do cover, not over the genome, so they are not "
-            "comparable with proportions from a prefix covering a different span. "
-            "Whether the blocks reach the end of each contig cannot be checked "
-            "here, since the packed files record no contig lengths.\n",
+            "WARNING: the ancestry blocks do not cover each contig in one piece: "
+            "%llu hole(s) totalling %llu bp, the first at %s. These proportions "
+            "are summed over the %llu bp the blocks do cover, so they are not "
+            "comparable with proportions from a prefix covering a different "
+            "span.\n",
             static_cast<unsigned long long>(breaks.count),
             static_cast<unsigned long long>(breaks.bases),
             breaks.first.c_str(),
