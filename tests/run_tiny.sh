@@ -1228,23 +1228,54 @@ if "$BIN_DIR/felixla" --felixla "$OUT_DIR/boundary" --extract "$OUT_DIR/swapped.
 fi
 grep -q "REF mismatch" "$OUT_DIR/swapped.err"
 
+# A contig may be spelled with or without the chr prefix, and a list that
+# mixes the two at one coordinate still contributes both alleles rather than
+# losing whichever sorted second.
 cat >"$OUT_DIR/nochr.pvar" <<'NO_CHR_PREFIX'
 #CHROM	POS	ID	REF	ALT
 1	100	.	A	T
 NO_CHR_PREFIX
 "$BIN_DIR/felixla" --felixla "$OUT_DIR/boundary" --extract "$OUT_DIR/nochr.pvar" \
   --export-felixla --out "$OUT_DIR/nochr" >/dev/null
-"$BIN_DIR/felixla" --felixla "$OUT_DIR/nochr" --export-vcf \
-  --out "$OUT_DIR/nochr" >/dev/null 2>&1
-python3 - "$OUT_DIR/nochr.vcf.gz" <<'NO_CHR_CHECK'
+for component in common.geno.bin common.variant.mks rare.carrier.bin rare.variant.mks; do
+  if ! cmp -s "$OUT_DIR/by_coords.$component" "$OUT_DIR/nochr.$component"; then
+    echo "a list spelled without the chr prefix selected something else: $component" >&2
+    exit 1
+  fi
+done
+
+cat >"$OUT_DIR/mixed_chr.pvar" <<'MIXED_CHR'
+#CHROM	POS	ID	REF	ALT
+chr1	100	.	A	T
+1	200	.	G	C
+MIXED_CHR
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/boundary" --extract "$OUT_DIR/mixed_chr.pvar" \
+  --export-felixla --out "$OUT_DIR/mixed_chr" >/dev/null
+"$BIN_DIR/felixla" --felixla "$OUT_DIR/mixed_chr" --export-vcf \
+  --out "$OUT_DIR/mixed_chr" >/dev/null 2>&1
+python3 - "$OUT_DIR/mixed_chr.vcf.gz" <<'MIXED_CHR_CHECK'
 import gzip
 import sys
 
 with gzip.open(sys.argv[1], "rt") as handle:
-    rows = [line for line in handle if not line.startswith("#")]
-# CHROM is matched as written, so "1" selects nothing from a "chr1" prefix.
-assert not rows, rows
-NO_CHR_CHECK
+    rows = [line.split("\t") for line in handle if not line.startswith("#")]
+assert [(row[0], int(row[1])) for row in rows] == [("chr1", 100), ("chr1", 200)], rows
+MIXED_CHR_CHECK
+
+# Packing with the same list must land in the same place, whichever spelling
+# it used, or the two routes disagree about what the list meant.
+"$BIN_DIR/felixla" --phase-vcf "$OUT_DIR/boundary.vcf" \
+  --flare-vcf "$OUT_DIR/boundary.flare.vcf" \
+  --extract "$OUT_DIR/mixed_chr.pvar" \
+  --export-felixla --out "$OUT_DIR/mixed_chr_packed" >/dev/null
+for component in common.geno.bin common.variant.mks common.variant.idx \
+                 rare.carrier.bin rare.variant.mks rare.variant.idx \
+                 ancblock.bin ancblock.mks ancblock.idx samples; do
+  if ! cmp -s "$OUT_DIR/mixed_chr_packed.$component" "$OUT_DIR/mixed_chr.$component"; then
+    echo "mixed chr spellings differ between packing and prefix extract: $component" >&2
+    exit 1
+  fi
+done
 
 # An allele-level selection leaves the ancestry blocks exactly as they were,
 # including blocks that now hold no variant at all: which ALT alleles were

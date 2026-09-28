@@ -288,6 +288,18 @@ static bool in_region(const std::string& chr, int64_t pos, const Region& region)
     return chrom_matches(chr, region.chr) && pos >= region.start && pos <= region.end;
 }
 
+// A list may spell a contig with or without the chr prefix. There is no VCF
+// header here to resolve against, so both the list and the prefix's own
+// markers are keyed on the name with the prefix removed, which collapses the
+// two spellings onto one key without preferring either.
+static std::string contig_key(const std::string& chr) {
+    if (chr.size() > 3 && (chr.compare(0, 3, "chr") == 0 || chr.compare(0, 3, "CHR") == 0 ||
+                           chr.compare(0, 3, "Chr") == 0)) {
+        return chr.substr(3);
+    }
+    return chr;
+}
+
 static bool is_symbolic_allele(const std::string& value) {
     return value.empty() || value[0] == '<' || value == "." ||
            value.find_first_of("[]") != std::string::npos;
@@ -356,7 +368,7 @@ public:
                     static_cast<unsigned long long>(line_no));
             }
 
-            SitePosition& position = positions_[Key{chr, pos}];
+            SitePosition& position = positions_[Key{contig_key(chr), pos}];
             if (position.ref.empty()) {
                 position.ref = ref;
                 position.line_no = line_no;
@@ -406,7 +418,7 @@ public:
     // whose REF disagrees with the prefix.
     bool matches(const std::string& chr, int64_t pos, const std::string& ref,
                  const std::string& alt) {
-        auto it = positions_.find(Key{chr, pos});
+        auto it = positions_.find(Key{contig_key(chr), pos});
         if (it == positions_.end()) return false;
         const SitePosition& position = it->second;
 

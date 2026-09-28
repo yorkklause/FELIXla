@@ -193,10 +193,10 @@ out:
   list was built against a different reference, and quietly selecting nothing
   would hide that.
 
-- `CHROM` must match the input's spelling exactly. `1` does not match a
-  `chr1` prefix. Note that `--chr` and `--region` *are* prefix-tolerant, so
-  the same token can be accepted by one flag and ignored by another; see
-  the caveat below.
+- `CHROM` may be spelled with or without the `chr` prefix, whichever the
+  input uses. `1` and `chr1` name the same contig, as they already do for
+  `--chr` and `--region`, and a list that mixes the two spellings at one
+  coordinate contributes the alleles from both rows.
 
 - Only the padding of an allele pair is negotiable. `ATT>AT` and `AT>A` at the
   same position are the same allele and match each other, because shared

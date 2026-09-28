@@ -3253,13 +3253,29 @@ static int read_next_record(htsFile* fp, bcf_hdr_t* hdr, bcf1_t* rec, hts_itr_t*
     return ret;
 }
 
+// A token is matched against the genotype header as written, then with a chr
+// prefix added, then removed, so "--chr 1" works on a chr-prefixed header and
+// the other way round.
+static int resolve_contig_token(bcf_hdr_t* hdr, const std::string& token) {
+    int rid = bcf_hdr_name2id(hdr, token.c_str());
+    if (rid >= 0) return rid;
+    if (token.compare(0, 3, "chr") != 0) {
+        rid = bcf_hdr_name2id(hdr, ("chr" + token).c_str());
+        if (rid >= 0) return rid;
+    } else {
+        rid = bcf_hdr_name2id(hdr, token.substr(3).c_str());
+        if (rid >= 0) return rid;
+    }
+    return -1;
+}
+
 static bool add_contig_to_header_if_missing(
     bcf_hdr_t* hdr,
     const std::string& contig,
     const char* header_label
 ) {
     if (contig.empty()) return false;
-    if (bcf_hdr_name2id(hdr, contig.c_str()) >= 0) return false;
+    if (resolve_contig_token(hdr, contig) >= 0) return false;
 
     std::string line = "##contig=<ID=" + contig + ">";
     if (bcf_hdr_append(hdr, line.c_str()) != 0 || bcf_hdr_sync(hdr) != 0) {
@@ -3439,14 +3455,26 @@ static void merge_extract_alts(
 static void prepare_extract_positions(ExtractSites& extract_sites, bcf_hdr_t* ghdr) {
     if (!extract_sites.active) return;
 
-    std::vector<int32_t> contig_rid(extract_sites.contig_names.size(), -1);
-    for (size_t i = 0; i < extract_sites.contig_names.size(); ++i) {
-        const std::string& chr = extract_sites.contig_names[i];
-        int rid = bcf_hdr_name2id(ghdr, chr.c_str());
+    // A list may spell a contig with or without the chr prefix, so each name
+    // is resolved the way --chr resolves one and then rewritten to the
+    // header's own spelling. Rewriting matters as much as resolving: two
+    // spellings of one contig have to collapse to a single chr_id, or the
+    // sort below leaves two positions at the same coordinate and only the
+    // first is ever consulted.
+    size_t named_contigs = extract_sites.contig_names.size();
+    std::vector<int32_t> contig_rid(named_contigs, -1);
+    std::vector<uint32_t> canonical_chr_id(named_contigs, 0);
+    for (size_t i = 0; i < named_contigs; ++i) {
+        const std::string chr = extract_sites.contig_names[i];
+        int rid = resolve_contig_token(ghdr, chr);
         contig_rid[i] = rid >= 0 ? rid : extract_position_sort_rid(ghdr, chr);
+        canonical_chr_id[i] = rid >= 0
+            ? intern_extract_contig(extract_sites, bcf_hdr_id2name(ghdr, rid))
+            : static_cast<uint32_t>(i);
     }
     for (ExtractPosition& position : extract_sites.positions) {
         position.geno_rid = contig_rid[position.chr_id];
+        position.chr_id = canonical_chr_id[position.chr_id];
     }
 
     const ExtractSites& sites = extract_sites;
@@ -3536,22 +3564,6 @@ static void append_contig_tokens(ContigSelection& selection, const char* text) {
         }
         selection.tokens.push_back(part);
     }
-}
-
-// A token is matched against the genotype header as written, then with a chr
-// prefix added, then removed, so "--chr 1" works on a chr-prefixed header and
-// the other way round.
-static int resolve_contig_token(bcf_hdr_t* hdr, const std::string& token) {
-    int rid = bcf_hdr_name2id(hdr, token.c_str());
-    if (rid >= 0) return rid;
-    if (token.compare(0, 3, "chr") != 0) {
-        rid = bcf_hdr_name2id(hdr, ("chr" + token).c_str());
-        if (rid >= 0) return rid;
-    } else {
-        rid = bcf_hdr_name2id(hdr, token.substr(3).c_str());
-        if (rid >= 0) return rid;
-    }
-    return -1;
 }
 
 static int64_t contig_length_or_max(bcf_hdr_t* hdr, int rid) {
