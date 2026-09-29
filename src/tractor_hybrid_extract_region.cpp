@@ -804,20 +804,6 @@ static void write_anc_record(FILE* fp, const AncBlockRecord& record, uint64_t an
     write_u64_le(fp, anc_offset, "ancestry mks offset");
 }
 
-static void copy_fixed_bytes(
-    FILE* in_fp,
-    const std::string& in_path,
-    uint64_t offset,
-    FILE* out_fp,
-    const char* out_what,
-    uint64_t bytes
-) {
-    seek_or_die(in_fp, offset, in_path.c_str());
-    std::vector<uint8_t> buffer(static_cast<size_t>(bytes));
-    read_exact(in_fp, buffer.data(), buffer.size(), in_path.c_str());
-    write_exact(out_fp, buffer.data(), buffer.size(), out_what);
-}
-
 // Reads the blocks a region leaves behind, in file order. Ids are not handed
 // out here: which blocks survive is not known until the variants have been
 // filtered, and a block that ends up holding none must not consume an id.
@@ -865,6 +851,50 @@ static void read_selected_anc_blocks(
     }
 }
 
+// Copying a subset of the ancestry payload is a forward walk, not a series of
+// seeks.
+//
+// These handles carry a 16 MB stdio buffer, which is what makes a sequential
+// copy fast. A seek throws that buffer away, so seeking to each kept block
+// spends a 16 MB refill to deliver one 200 KB block. Keeping every block hid
+// this, because the seek never moved. Keeping a tenth of them did not:
+// measured on a real chr22 prefix -- 400,000 samples, a 72 GB payload, 33,224
+// of 360,920 blocks kept -- a seek per block had written 5 GB of the 6.6 GB
+// output after three hours and was killed. The forward walk below does the
+// whole extract in about 21 minutes, which is what the same subset cost before
+// blocks were ever dropped.
+//
+// So a gap is read through when it is small and seeked over when it is large
+// enough to be worth a refill. Reading bytes that get discarded is cheap and
+// predictable; a seek through a large buffer is neither. (A raw-descriptor
+// read with no stdio buffer is a third option, and a probe suggested it may be
+// faster still, but that is untested at scale and not what this code does.)
+static constexpr uint64_t kSeekRatherThanReadBytes = 8u << 20;
+
+static void skip_forward(
+    FILE* fp,
+    const std::string& path,
+    uint64_t from,
+    uint64_t to,
+    std::vector<uint8_t>& scratch
+) {
+    if (to <= from) {
+        if (to < from) seek_or_die(fp, to, path.c_str());
+        return;
+    }
+    uint64_t gap = to - from;
+    if (gap >= kSeekRatherThanReadBytes) {
+        seek_or_die(fp, to, path.c_str());
+        return;
+    }
+    if (scratch.size() < (1u << 20)) scratch.resize(1u << 20);
+    while (gap > 0) {
+        size_t chunk = static_cast<size_t>(std::min<uint64_t>(gap, scratch.size()));
+        read_exact(fp, scratch.data(), chunk, path.c_str());
+        gap -= chunk;
+    }
+}
+
 static void write_selected_anc_blocks(
     const std::string& in_prefix,
     const std::string& out_prefix,
@@ -887,9 +917,15 @@ static void write_selected_anc_blocks(
     write_magic(out_idx, anc_idx_magic);
 
     uint64_t block_bytes = meta.n_ancestries * meta.n_words * sizeof(uint64_t);
+    std::vector<uint8_t> block_buffer(static_cast<size_t>(block_bytes));
+    std::vector<uint8_t> scratch;
+    uint64_t in_position = 0;
     for (const AncBlockRecord& block : selected_blocks) {
         uint64_t anc_offset = tell_or_die(out_bin, out_anc_bin_path.c_str());
-        copy_fixed_bytes(in_bin, in_anc_bin_path, block.anc_offset, out_bin, "ancestry block", block_bytes);
+        skip_forward(in_bin, in_anc_bin_path, in_position, block.anc_offset, scratch);
+        read_exact(in_bin, block_buffer.data(), block_buffer.size(), in_anc_bin_path.c_str());
+        write_exact(out_bin, block_buffer.data(), block_buffer.size(), "ancestry block");
+        in_position = block.anc_offset + block_bytes;
 
         uint64_t mks_offset = tell_or_die(out_mks, out_anc_mks_path.c_str());
         write_anc_record(out_mks, block, anc_offset);

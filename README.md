@@ -24,6 +24,32 @@ GitHub repository and record the commit hash used in the analysis.
 
 ## Upgrading
 
+<!-- release-notes: v0.6.3 -->
+### From v0.6.2
+
+**Fixes an extract that does not finish on a real prefix.** v0.6.2 dropped the
+ancestry blocks no retained variant falls in, and copied the ones it kept by
+seeking to each. Those handles carry a 16 MB buffer, so every seek spent a
+16 MB refill to deliver one 200 KB block -- invisible on a small fixture, fatal
+at scale.
+
+Measured on chr22 of a 400,000-sample cohort, subsetting a 72 GB ancestry
+payload to HapMap3's 40,846 sites and keeping 33,224 of 360,920 blocks:
+
+```text
+v0.6.2   killed after 3 h, having written 5 GB of the 6.6 GB output
+v0.6.3   about 21 min, which is what the same subset cost in v0.6.1
+```
+
+v0.6.3 walks the payload forward instead, reading through small gaps and
+seeking only over large ones. Nothing about the output changes: the same
+blocks are kept and the files are identical to what v0.6.2 would eventually
+have produced.
+
+If an extract under v0.6.2 appeared to hang, this is why. Nothing else in
+v0.6.2 is affected -- the packing paths, the exports and the filters are
+untouched.
+
 <!-- release-notes: v0.6.2 -->
 ### From v0.6.1
 
