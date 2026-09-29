@@ -60,8 +60,8 @@ def build_inputs(d, rng, n_samples, n_records, n_anc):
         out.write("##fileformat=VCFv4.2\n##contig=<ID=chr1>\n##contig=<ID=chr2>\n")
         out.write('##FORMAT=<ID=AN1,Number=1,Type=Integer,Description="a">\n')
         out.write('##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="b">\n')
-        for k in range(n_anc):
-            out.write("##ANCESTRY=<ID=%d,Name=ANC%d>\n" % (k, k + 1))
+        out.write("##ANCESTRY=<%s>\n" % ",".join(
+            "ANC%d=%d" % (k + 1, k) for k in range(n_anc)))
         out.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t"
                   + "\t".join(samples) + "\n")
         for chrom, pos, _, _ in variants:

@@ -53,8 +53,8 @@ def write_inputs(work, rng, samples, positions, n_ancestries, names):
         out.write("##fileformat=VCFv4.2\n##contig=<ID=chr1,length=1000000>\n")
         out.write('##FORMAT=<ID=AN1,Number=1,Type=Integer,Description="First">\n')
         out.write('##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="Second">\n')
-        for code, name in enumerate(names):
-            out.write(f"##ANCESTRY=<ID={code},Name={name}>\n")
+        out.write("##ANCESTRY=<%s>\n" % ",".join(
+            "%s=%d" % (name, code) for code, name in enumerate(names)))
         out.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t")
         out.write("\t".join(samples) + "\n")
         for pos in positions:

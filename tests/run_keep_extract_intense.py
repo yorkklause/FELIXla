@@ -137,8 +137,8 @@ def build_inputs(work: pathlib.Path):
         out.write("##contig=<ID=chr2>\n")
         out.write('##FORMAT=<ID=AN1,Number=1,Type=Integer,Description="First haplotype local ancestry">\n')
         out.write('##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="Second haplotype local ancestry">\n')
-        for code in range(N_ANCESTRIES):
-            out.write(f'##ANCESTRY=<ID={code},Name=ANC{code + 1}>\n')
+        out.write("##ANCESTRY=<%s>\n" % ",".join(
+            "ANC%d=%d" % (code + 1, code) for code in range(N_ANCESTRIES)))
         out.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t")
         out.write("\t".join(samples))
         out.write("\n")
@@ -324,7 +324,7 @@ def build_spaced_indexed_vcf(bin_dir: pathlib.Path, work: pathlib.Path) -> pathl
         '##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="Second ancestry">\n'
         # This fixture only ever uses codes 0 and 1, and the compat call below
         # passes 2, so the header has to agree with both.
-        + "".join(f'##ANCESTRY=<ID={code},Name=ANC{code + 1}>\n' for code in range(2))
+        + "##ANCESTRY=<%s>\n" % ",".join("ANC%d=%d" % (c + 1, c) for c in range(2))
         + "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1\n"
         "chr7\t16000000\t.\tA\tT\t.\tPASS\t.\tAN1:AN2\t0:1\n"
     )
@@ -837,8 +837,8 @@ def check_int16_gt_encoding(bin_dir: pathlib.Path, work: pathlib.Path) -> None:
         out.write("##fileformat=VCFv4.2\n##contig=<ID=chr1>\n")
         out.write('##FORMAT=<ID=AN1,Number=1,Type=Integer,Description="First ancestry">\n')
         out.write('##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="Second ancestry">\n')
-        for code in range(N_ANCESTRIES):
-            out.write(f'##ANCESTRY=<ID={code},Name=ANC{code + 1}>\n')
+        out.write("##ANCESTRY=<%s>\n" % ",".join(
+            "ANC%d=%d" % (code + 1, code) for code in range(N_ANCESTRIES)))
         out.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t")
         out.write("\t".join(samples) + "\n")
         out.write("chr1\t100\t.\tA\tC\t.\tPASS\t.\tAN1:AN2\t0:1\t1:2\t2:0\n")
@@ -881,8 +881,8 @@ def check_duplicate_flare_coordinate(bin_dir: pathlib.Path, work: pathlib.Path) 
         out.write("##fileformat=VCFv4.2\n##contig=<ID=chr1>\n")
         out.write('##FORMAT=<ID=AN1,Number=1,Type=Integer,Description="First ancestry">\n')
         out.write('##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="Second ancestry">\n')
-        for code in range(N_ANCESTRIES):
-            out.write(f'##ANCESTRY=<ID={code},Name=ANC{code + 1}>\n')
+        out.write("##ANCESTRY=<%s>\n" % ",".join(
+            "ANC%d=%d" % (code + 1, code) for code in range(N_ANCESTRIES)))
         out.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t")
         out.write("\t".join(samples) + "\n")
         out.write("chr1\t100\t.\tA\tC\t.\tPASS\t.\tAN1:AN2\t0:1\t1:2\n")
@@ -935,8 +935,8 @@ def check_padded_multiallelic_extract(bin_dir: pathlib.Path, work: pathlib.Path)
         out.write("##fileformat=VCFv4.2\n##contig=<ID=chr19>\n")
         out.write('##FORMAT=<ID=AN1,Number=1,Type=Integer,Description="First ancestry">\n')
         out.write('##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="Second ancestry">\n')
-        for code in range(N_ANCESTRIES):
-            out.write(f'##ANCESTRY=<ID={code},Name=ANC{code + 1}>\n')
+        out.write("##ANCESTRY=<%s>\n" % ",".join(
+            "ANC%d=%d" % (code + 1, code) for code in range(N_ANCESTRIES)))
         out.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t")
         out.write("\t".join(samples) + "\n")
         out.write("chr19\t40176167\t.\tA\tC\t.\tPASS\t.\tAN1:AN2\t0:1\t1:2\t2:0\t0:2\n")

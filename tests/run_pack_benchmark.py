@@ -64,8 +64,8 @@ def write_inputs(
         out.write('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n')
         out.write('##FORMAT=<ID=AN1,Number=1,Type=Integer,Description="First ancestry">\n')
         out.write('##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="Second ancestry">\n')
-        for code in range(n_ancestries):
-            out.write(f'##ANCESTRY=<ID={code},Name=ANC{code + 1}>\n')
+        out.write("##ANCESTRY=<%s>\n" % ",".join(
+            "ANC%d=%d" % (code + 1, code) for code in range(n_ancestries)))
         out.write('##FORMAT=<ID=ANP1,Number=1,Type=Float,Description="First ancestry probability">\n')
         out.write('##FORMAT=<ID=ANP2,Number=1,Type=Float,Description="Second ancestry probability">\n')
         out.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t")

@@ -1130,8 +1130,7 @@ cat >"$OUT_DIR/boundary.flare.vcf" <<'BOUNDARY_FLARE'
 ##contig=<ID=chr1,length=100000>
 ##FORMAT=<ID=AN1,Number=1,Type=Integer,Description="First">
 ##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="Second">
-##ANCESTRY=<ID=0,Name=AFR>
-##ANCESTRY=<ID=1,Name=EUR>
+##ANCESTRY=<AFR=0,EUR=1>
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	s1	s2
 chr1	100	.	A	C	.	PASS	.	AN1:AN2	0:1	1:0
 chr1	195	.	A	C	.	PASS	.	AN1:AN2	0:1	1:0
@@ -1450,8 +1449,7 @@ cat >"$OUT_DIR/blocks.flare.vcf" <<'BLOCKS_FLARE'
 ##contig=<ID=chr1,length=100000>
 ##FORMAT=<ID=AN1,Number=1,Type=Integer,Description="First">
 ##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="Second">
-##ANCESTRY=<ID=0,Name=AFR>
-##ANCESTRY=<ID=1,Name=EUR>
+##ANCESTRY=<AFR=0,EUR=1>
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	s1	s2
 chr1	100	.	A	C	.	PASS	.	AN1:AN2	0:1	1:0
 chr1	200	.	A	C	.	PASS	.	AN1:AN2	1:0	0:1
@@ -1586,8 +1584,7 @@ cat >"$OUT_DIR/twochr.flare.vcf" <<'TWOCHR_FLARE'
 ##contig=<ID=chr2,length=100000>
 ##FORMAT=<ID=AN1,Number=1,Type=Integer,Description="First">
 ##FORMAT=<ID=AN2,Number=1,Type=Integer,Description="Second">
-##ANCESTRY=<ID=0,Name=AFR>
-##ANCESTRY=<ID=1,Name=EUR>
+##ANCESTRY=<AFR=0,EUR=1>
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	s1	s2
 chr1	100	.	A	C	.	PASS	.	AN1:AN2	0:1	1:0
 chr1	300	.	A	C	.	PASS	.	AN1:AN2	0:1	1:0
@@ -1615,5 +1612,35 @@ printf '%s\n%s\n' "$OUT_DIR/part_chr1" "$OUT_DIR/part_chr2" >"$OUT_DIR/parts.lis
   --export-felixla --out "$OUT_DIR/parts" >/dev/null
 test "$(lai_rows "$OUT_DIR/parts")" = "1-300 1000-1200"
 test "$(warned "$OUT_DIR/parts")" = "no warning"
+
+
+# FLARE names its ancestries on one header line keyed by name. This was read
+# only in the VCF-structured ID=/Name= shape once, which no FLARE file uses,
+# so real FLARE output could not be converted at all. Both shapes are pinned
+# here, and the fixtures above use the one FLARE writes.
+anc_header_names() {
+  sed '/^##ANCESTRY/d' "$ROOT_DIR/testdata/tiny.flare.vcf" \
+    | sed "s|^##FORMAT=<ID=AN2\(.*\)|##FORMAT=<ID=AN2\1\n$1|" >"$OUT_DIR/anchdr.vcf"
+  "$BIN_DIR/felixla" --phase-vcf "$ROOT_DIR/testdata/tiny.genotypes.vcf" \
+    --flare-vcf "$OUT_DIR/anchdr.vcf" --export-felixla --out "$OUT_DIR/anchdr" \
+    >/dev/null 2>"$OUT_DIR/anchdr.err" || { echo "REFUSED"; return; }
+  grep -h "^ancestry_name_" "$OUT_DIR/anchdr.meta" | cut -f2 | tr '\n' ' ' | sed 's/ $//'
+}
+
+# What FLARE writes: one line, name=code, and the code is what AN1/AN2 carry.
+test "$(anc_header_names '##ANCESTRY=<AFR=0,EUR=1>')" = "AFR EUR"
+# Names listed out of code order still land by code, not by position.
+test "$(anc_header_names '##ANCESTRY=<EUR=1,AFR=0>')" = "AFR EUR"
+# More ancestries declared than the data happens to use is fine: the count is
+# the header's to state, which is the whole reason it is read from there.
+test "$(anc_header_names '##ANCESTRY=<EAS=0,NAT=1,SAS=2,EUR=3,AFR=4>')" \
+  = "EAS NAT SAS EUR AFR"
+# The VCF-structured shape, which files in this project carry, still reads.
+test "$(anc_header_names '##ANCESTRY=<ID=0,Name=AFR>\n##ANCESTRY=<ID=1,Name=EUR>')" \
+  = "AFR EUR"
+# A code the header does not name would leave a variant with no ancestry, so
+# gaps and one-based codes are refused rather than guessed at.
+test "$(anc_header_names '##ANCESTRY=<AFR=0,EUR=2>')" = "REFUSED"
+test "$(anc_header_names '##ANCESTRY=<AFR=1,EUR=2>')" = "REFUSED"
 
 echo "tiny smoke test passed"

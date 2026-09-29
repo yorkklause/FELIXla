@@ -24,6 +24,26 @@ GitHub repository and record the commit hash used in the analysis.
 
 ## Upgrading
 
+<!-- release-notes: v0.6.4 -->
+### From v0.6.3
+
+**Fixes reading the `##ANCESTRY` header FLARE actually writes.** FLARE names
+its ancestries on one line, keyed by name:
+
+```text
+##ANCESTRY=<EAS=0,NAT=1,SAS=2,EUR=3,AFR=4>
+```
+
+v0.6.1 through v0.6.3 only understood a different spelling -- one
+`##ANCESTRY=<ID=0,Name=AFR>` line per ancestry -- and refused anything else
+with `FLARE ##ANCESTRY header line lacks ID or Name`. Since v0.6.2 also removed
+`--n-ancestries`, there was no way to convert a real FLARE VCF on those
+versions at all.
+
+Both spellings are read now. If you hit that error, this release is the fix;
+nothing about a prefix built by an earlier version changes, since the ancestry
+codes were always taken from `AN1`/`AN2` and were never renumbered.
+
 <!-- release-notes: v0.6.3 -->
 ### From v0.6.2
 
@@ -328,8 +348,19 @@ exported VCF, not an identity FELIXla matches on.
 
 - **`--flare-vcf PATH`** -- a FLARE local ancestry VCF/BCF. It must carry
   scalar integer `FORMAT/AN1` and `FORMAT/AN2` fields encoded as
-  `0..n_ancestries-1`. Sample IDs are matched by ID; FELIXla keeps the
-  genotype/FLARE intersection in genotype VCF order.
+  `0..n_ancestries-1`, and an `##ANCESTRY` header line naming them, which is
+  where the ancestry count comes from:
+
+  ```text
+  ##ANCESTRY=<AFR=0,EUR=1,AMR=2>
+  ```
+
+  That is the line FLARE writes. The older VCF-structured spelling, one
+  `##ANCESTRY=<ID=0,Name=AFR>` line per ancestry, is read too. Either way the
+  code is the value that appears in `AN1`/`AN2`, FELIXla stores it unchanged,
+  and the codes must run `0..N-1` with no gaps so that no code in the data goes
+  unnamed. Sample IDs are matched by ID; FELIXla keeps the genotype/FLARE
+  intersection in genotype VCF order.
 
 - **`--rfmix-msp PATH`** -- an RFMix MSP file, given together with
   `--phase-vcf` in place of `--flare-vcf`. The ancestry count and the ancestry

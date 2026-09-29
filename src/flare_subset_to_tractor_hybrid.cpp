@@ -449,29 +449,51 @@ struct AncestryNames {
     const std::string& operator[](size_t i) const { return names[i]; }
 };
 
+// FLARE names its ancestries on one header line, keyed by name:
+//
+//     ##ANCESTRY=<AFR=0,EUR=1,AMR=2>
+//
+// Some files in this project instead carry one line per ancestry in the
+// VCF-structured style, `##ANCESTRY=<ID=0,Name=AFR>`, so both are read. The
+// value is the code that appears in FORMAT/AN1 and AN2, and FELIXla stores
+// that code unchanged -- nothing here renumbers or reorders an ancestry. The
+// codes must be 0..N-1 with no gaps, so there is never a code in the data that
+// the header does not name.
 static AncestryNames read_flare_ancestry_names(bcf_hdr_t* ahdr) {
     AncestryNames found;
     std::vector<std::pair<int, std::string>> entries;
+
+    auto add = [&entries](const char* name, const char* code) {
+        // FLARE numbers ancestries from zero, so this cannot go through the
+        // shared parser, which requires a positive value.
+        char* end = nullptr;
+        long value = std::strtol(code, &end, 10);
+        if (!end || end == code || *end != '\0' || value < 0 || value > 31) {
+            die("FLARE ##ANCESTRY code must be in [0, 31]: %s=%s", name, code);
+        }
+        entries.emplace_back(static_cast<int>(value), name);
+    };
+
     for (int i = 0; i < ahdr->nhrec; ++i) {
         const bcf_hrec_t* hrec = ahdr->hrec[i];
         if (!hrec->key || std::strcmp(hrec->key, "ANCESTRY") != 0) continue;
+
         const char* id = nullptr;
         const char* name = nullptr;
         for (int k = 0; k < hrec->nkeys; ++k) {
             if (std::strcmp(hrec->keys[k], "ID") == 0) id = hrec->vals[k];
             else if (std::strcmp(hrec->keys[k], "Name") == 0) name = hrec->vals[k];
         }
-        if (!id || !name) {
-            die("FLARE ##ANCESTRY header line lacks ID or Name");
+        if (id && name) {
+            add(name, id);
+            continue;
         }
-        // FLARE numbers ancestries from zero, so this cannot go through the
-        // shared parser, which requires a positive value.
-        char* id_end = nullptr;
-        long id_value = std::strtol(id, &id_end, 10);
-        if (!id_end || *id_end != '\0' || id_value < 0 || id_value > 31) {
-            die("FLARE ##ANCESTRY ID must be in [0, 31]: %s", id);
+        if (hrec->nkeys == 0) {
+            die("FLARE ##ANCESTRY header line names no ancestry");
         }
-        entries.emplace_back(static_cast<int>(id_value), name);
+        for (int k = 0; k < hrec->nkeys; ++k) {
+            add(hrec->keys[k], hrec->vals[k]);
+        }
     }
     if (entries.empty()) return found;
 
@@ -479,7 +501,7 @@ static AncestryNames read_flare_ancestry_names(bcf_hdr_t* ahdr) {
     found.names.resize(entries.size());
     for (size_t i = 0; i < entries.size(); ++i) {
         if (entries[i].first != static_cast<int>(i)) {
-            die("FLARE ##ANCESTRY IDs must be 0..%d with no gaps; saw %d",
+            die("FLARE ##ANCESTRY codes must be 0..%d with no gaps; saw %d",
                 static_cast<int>(entries.size()) - 1, entries[i].first);
         }
         found.names[i] = entries[i].second;
